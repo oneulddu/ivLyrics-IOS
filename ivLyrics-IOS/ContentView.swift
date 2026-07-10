@@ -149,6 +149,10 @@ struct ContentView: View {
                 LyricsMotionDebugPreview()
                     .zIndex(100)
             }
+            if ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_EFFECT_PREVIEW"] == "1" {
+                KaraokeEffectsDebugPreview()
+                    .zIndex(100)
+            }
 #endif
         }
     }
@@ -2748,12 +2752,26 @@ private struct MainLyricPreviewRow: Identifiable {
         "\(type.rawValue)-\(slotId)-\(primary)-\(text)-\(rubyText)-\(syllables.count)"
     }
 
+    var effectRowSeed: Int {
+        var seed: Int32 = 17
+        for value in [text, rubyText, kind.trimmed.lowercased()] {
+            seed = seed &* 31 &+ javaStringHash(value)
+        }
+        return seed == Int32.min ? Int(seed) : Int(Swift.abs(seed))
+    }
+
     static func interlude(_ text: String) -> MainLyricPreviewRow {
         MainLyricPreviewRow(text: text, primary: true, type: .interlude)
     }
 
     static func loading(_ text: String) -> MainLyricPreviewRow {
         MainLyricPreviewRow(text: text, primary: true, type: .loading)
+    }
+}
+
+private func javaStringHash(_ value: String) -> Int32 {
+    value.utf16.reduce(into: Int32(0)) { hash, codeUnit in
+        hash = hash &* 31 &+ Int32(codeUnit)
     }
 }
 
@@ -2814,7 +2832,8 @@ private struct MainLyricPreviewRowView: View {
                 alignment: .center,
                 kind: row.kind,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
-                bounceTextSize: typography.scaledSize(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5)
+                bounceTextSize: typography.scaledSize(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5),
+                effectRowSeed: row.effectRowSeed
             )
         } else {
             Text(row.text)
@@ -3842,7 +3861,8 @@ struct LyricsLineView: View {
                             kind: part.kind,
                             inactiveColor: vocalPartInactiveColor(part, active: partActive),
                             bounceEnabled: settings.karaokeBounceEffectEnabled,
-                            bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
+                            bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
+                            effectRowSeed: index
                         )
                         .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
                         if LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line) {
@@ -3883,9 +3903,18 @@ struct LyricsLineView: View {
                 syntheticTimingEnabled: true
             )
         } else {
-            Text(originalText.isEmpty ? " " : originalText)
-                .foregroundStyle(active ? lineActiveColor : inactiveOriginalColor)
-                .multilineTextAlignment(textAlignment)
+            SyllableKaraokeText(
+                text: originalText.isEmpty ? " " : originalText,
+                syllables: [],
+                startTimeMs: line.startTimeMs,
+                endTimeMs: line.endTimeMs,
+                positionMs: positionMs,
+                active: active,
+                activeColor: lineActiveColor,
+                alignment: textAlignment,
+                kind: line.kind,
+                inactiveColor: inactiveOriginalColor
+            )
         }
     }
 
@@ -4014,6 +4043,7 @@ struct SyllableKaraokeText: View {
     var bounceEnabled: Bool = false
     var bounceTextSize: CGFloat = 22
     var syntheticTimingEnabled: Bool = false
+    var effectRowSeed: Int = 0
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !requiresContinuousEffect)) { timeline in
@@ -4028,8 +4058,8 @@ struct SyllableKaraokeText: View {
                 Text(text.isEmpty ? " " : text)
                     .foregroundStyle(fallbackColor)
                     .multilineTextAlignment(alignment)
-                    .modifier(LyricGlyphEffectModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, color: activeColor))
-                    .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize))
+                    .modifier(LyricGlyphEffectModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
+                    .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
             } else {
                 KaraokeSegmentFlowLayout(alignment: alignment) {
                     ForEach(karaokeSegments) { segment in
@@ -4038,11 +4068,12 @@ struct SyllableKaraokeText: View {
                             kind: normalizedKind,
                             active: active,
                             nowMs: nowMs,
-                            textSize: bounceTextSize
+                            textSize: bounceTextSize,
+                            rowSeed: effectRowSeed
                         )
                     }
                 }
-                .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize))
+                .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
                 .accessibilityLabel(text)
             }
         }
@@ -4213,6 +4244,7 @@ private struct KaraokeSyllableSegmentView: View {
     var active: Bool
     var nowMs: Double
     var textSize: CGFloat
+    var rowSeed: Int
 
     var body: some View {
         Text(segment.text)
@@ -4228,7 +4260,7 @@ private struct KaraokeSyllableSegmentView: View {
             .fixedSize(horizontal: true, vertical: false)
             .scaleEffect(segment.bounceScale, anchor: .center)
             .offset(y: segment.bounceOffsetY)
-            .modifier(LyricGlyphEffectModifier(kind: kind, active: active, nowMs: nowMs, textSize: textSize, segmentIndex: segment.id, color: segment.activeColor))
+            .modifier(LyricGlyphEffectModifier(kind: kind, active: active, nowMs: nowMs, textSize: textSize, segmentIndex: segment.id, rowSeed: rowSeed, color: segment.activeColor))
             .layoutValue(key: KaraokeWhitespaceLayoutKey.self, value: segment.isWhitespace)
     }
 }
@@ -4238,6 +4270,7 @@ private struct LyricLineMotionModifier: ViewModifier {
     var active: Bool
     var nowMs: Double
     var textSize: CGFloat
+    var rowSeed: Int = 0
 
     func body(content: Content) -> some View {
         let motion = motionValues
@@ -4249,28 +4282,29 @@ private struct LyricLineMotionModifier: ViewModifier {
 
     private var motionValues: (x: CGFloat, y: CGFloat, rotation: Double, scale: CGFloat) {
         guard active else { return (0, 0, 0, 1) }
+        let effectNowMs = nowMs + Double(rowSeed) * 73
         switch kind {
         case "effect":
-            let step = Int(nowMs / 45) % 4
+            let step = Int(effectNowMs / 45) % 4
             let x: [CGFloat] = [0, -0.5, 0.45, -0.25]
             let y: [CGFloat] = [0, 0.25, -0.25, -0.35]
             return (x[step], y[step], 0, 1)
         case "adlib":
-            return (0, -1.5 * signedSine(periodMs: 1_050), 0, 1)
+            return (0, -1.5 * signedSine(effectNowMs, periodMs: 1_050), 0, 1)
         case "pulse":
-            return (0, 0, 0, 1 + positiveSine(nowMs, periodMs: 940) * 0.025)
+            return (0, 0, 0, 1 + positiveSine(effectNowMs, periodMs: 940) * 0.025)
         case "bounce":
-            return (0, -positiveSine(nowMs, periodMs: 780) * textSize * 0.12, 0, 1)
+            return (0, -positiveSine(effectNowMs, periodMs: 780) * textSize * 0.12, 0, 1)
         case "sway":
-            let wave = signedSine(periodMs: 1_350)
+            let wave = signedSine(effectNowMs, periodMs: 1_350)
             return (wave * textSize * 0.0245, 0, Double(wave * 0.84), 1)
         case "float":
-            return (0, -positiveSine(nowMs, periodMs: 1_650) * textSize * 0.09, Double(signedSine(periodMs: 1_650) * 0.45), 1)
+            return (0, -positiveSine(effectNowMs, periodMs: 1_650) * textSize * 0.09, Double(signedSine(effectNowMs, periodMs: 1_650) * 0.45), 1)
         case "pop":
-            let phase = nowMs.truncatingRemainder(dividingBy: 1_080) / 1_080
+            let phase = effectNowMs.truncatingRemainder(dividingBy: 1_080) / 1_080
             return (0, 0, 0, phase < 0.18 ? 1.035 : (phase < 0.34 ? 0.996 : 1))
         case "glitch":
-            let step = Int(nowMs / 35) % 32
+            let step = Int(effectNowMs / 35) % 32
             if step == 5 || step == 19 { return (textSize * 0.035, -textSize * 0.01, 0, 1) }
             if step == 6 || step == 20 { return (-textSize * 0.035, textSize * 0.01, 0, 1) }
             return (0, 0, 0, 1)
@@ -4279,8 +4313,8 @@ private struct LyricLineMotionModifier: ViewModifier {
         }
     }
 
-    private func signedSine(periodMs: Double) -> CGFloat {
-        CGFloat(sin(nowMs.truncatingRemainder(dividingBy: periodMs) / periodMs * .pi * 2))
+    private func signedSine(_ valueMs: Double, periodMs: Double) -> CGFloat {
+        CGFloat(sin(valueMs.truncatingRemainder(dividingBy: periodMs) / periodMs * .pi * 2))
     }
 }
 
@@ -4290,6 +4324,7 @@ private struct LyricGlyphEffectModifier: ViewModifier {
     var nowMs: Double
     var textSize: CGFloat
     var segmentIndex: Int
+    var rowSeed: Int = 0
     var color: Color
 
     func body(content: Content) -> some View {
@@ -4316,7 +4351,7 @@ private struct LyricGlyphEffectModifier: ViewModifier {
         guard active else { return (1, .clear, 0, 0, 0, 0) }
         let waveOffset: CGFloat
         if kind == "wave" {
-            let phaseTime = nowMs + Double(segmentIndex) * 62
+            let phaseTime = nowMs + Double(rowSeed) * 95 + Double(segmentIndex) * 62
             let wave = CGFloat(sin(phaseTime.truncatingRemainder(dividingBy: 980) / 980 * .pi * 2))
             let lift = positiveSine(nowMs + Double(segmentIndex) * 42, periodMs: 760) * textSize * 0.018
             waveOffset = wave * textSize * 0.145 - lift
@@ -4493,6 +4528,80 @@ private struct KaraokeSegmentLayoutRow {
 }
 
 #if DEBUG
+private struct KaraokeEffectsDebugPreview: View {
+    private let kinds = [
+        "effect", "adlib", "pulse",
+        "bounce", "sway", "float",
+        "pop", "glitch", "wave",
+        "sparkle", "echo", "whisper",
+        "glow", "blur", "flicker"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Android lyric effects")
+                .font(.pretendard(16, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.64))
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
+                spacing: 12
+            ) {
+                ForEach(Array(kinds.enumerated()), id: \.offset) { index, kind in
+                    SyllableKaraokeText(
+                        text: kind,
+                        syllables: [],
+                        startTimeMs: 0,
+                        endTimeMs: 10_000,
+                        positionMs: 5_000,
+                        active: true,
+                        activeColor: effectColor(index),
+                        alignment: .center,
+                        kind: kind,
+                        bounceTextSize: 18,
+                        effectRowSeed: index
+                    )
+                    .font(.pretendard(18, weight: .bold))
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+            HStack(spacing: 10) {
+                ForEach(0..<3, id: \.self) { index in
+                    SyllableKaraokeText(
+                        text: "V\(index + 1)",
+                        syllables: [],
+                        startTimeMs: 0,
+                        endTimeMs: 10_000,
+                        positionMs: 5_000,
+                        active: true,
+                        activeColor: effectColor(index),
+                        alignment: .center,
+                        kind: "wave",
+                        bounceTextSize: 18,
+                        effectRowSeed: index
+                    )
+                    .font(.pretendard(18, weight: .bold))
+                    .frame(maxWidth: .infinity, minHeight: 42)
+                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .background(Color(red: 0.035, green: 0.04, blue: 0.06))
+        .ignoresSafeArea()
+    }
+
+    private func effectColor(_ index: Int) -> Color {
+        let colors: [Color] = [
+            .white,
+            Color(red: 0.58, green: 0.86, blue: 1),
+            Color(red: 1, green: 0.62, blue: 0.78)
+        ]
+        return colors[index % colors.count]
+    }
+}
+
 private struct LyricsMotionDebugPreview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 38) {
