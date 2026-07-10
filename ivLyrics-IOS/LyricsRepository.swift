@@ -23,6 +23,8 @@ actor LyricsRepository {
     private let openDbFreshMs: Int64 = 60_000
     private let openDbUnavailableRetryMs: Int64 = 5 * 60 * 1000
     private let syncDataServerCacheBypassMs: Int64 = 30 * 1000
+    private let networkRequestTimeout: TimeInterval = 47
+    private let lrclibSignatureTimeout: TimeInterval = 18
 
     private var cache: [String: LyricsResult] = [:]
     private let diskCache = LyricsDiskCache(namespace: "base_lyrics", maxEntries: 350)
@@ -336,23 +338,35 @@ actor LyricsRepository {
         return SpotifyCredentialValidation(expiresInSeconds: response.expiresInSeconds, logs: logs)
     }
 
-    private func searchBestCandidate(track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, syncData: SyncDataResult?, log: (String) -> Void) async throws -> LrclibCandidate? {
+    private func searchBestCandidate(track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, syncData: SyncDataResult?, log: @escaping (String) -> Void) async throws -> LrclibCandidate? {
         var candidates: [LrclibCandidate] = []
         let spotifySearchTrack = buildSpotifyLrclibSearchTrack(track: track, spotifyMatch: spotifyMatch, log: log)
         let spotifySearchLabelPrefix = spotifyMatch?.hasEnglishMetadata == true ? "spotify-en" : "spotify"
 
-        try await appendUniqueCandidates(&candidates, searchLrclib(params: buildStructuredQuery(track), label: "structured", log: log))
-        try await appendSpotifyLrclibSearchCandidates(&candidates, spotifySearchTrack: spotifySearchTrack, labelPrefix: spotifySearchLabelPrefix, mode: "structured", log: log)
-        try await appendSpotifyLrclibSearchCandidates(&candidates, spotifySearchTrack: spotifySearchTrack, labelPrefix: spotifySearchLabelPrefix, mode: "q:title+artist", log: log)
-        try await appendSpotifyLrclibSearchCandidates(&candidates, spotifySearchTrack: spotifySearchTrack, labelPrefix: spotifySearchLabelPrefix, mode: "q:title", log: log)
-
-        var needsLegacyShapeMatch = needsLegacySyncLineShapeMatch(syncData, candidates)
-        if candidates.isEmpty || needsLegacyShapeMatch {
-            try await appendUniqueCandidates(&candidates, searchLrclib(params: ["q": "\(track.title) \(track.artist)"], label: "q:title+artist", log: log))
-            needsLegacyShapeMatch = needsLegacySyncLineShapeMatch(syncData, candidates)
+        if let signatureCandidate = try await fetchLrclibCandidateBySignature(track: track, spotifyMatch: spotifyMatch, log: log) {
+            appendUniqueCandidates(&candidates, [signatureCandidate])
         }
-        if candidates.isEmpty || needsLegacyShapeMatch {
-            try await appendUniqueCandidates(&candidates, searchLrclib(params: ["q": track.title], label: "q:title", log: log))
+
+        let signatureNeedsFallback = candidates.isEmpty
+            || needsLegacySyncLineShapeMatch(syncData, candidates)
+            || (shouldPreferSyncedLrclibFallback(syncData) && !candidates.contains(where: hasSyncedLyricsPayload))
+        if signatureNeedsFallback {
+            let trackMatches = try await searchLrclibFallbackBatch(
+                track: track,
+                labelPrefix: "",
+                includeAlbum: true,
+                log: log
+            )
+            appendUniqueCandidates(&candidates, trackMatches)
+            if let spotifySearchTrack {
+                let spotifyMatches = try await searchLrclibFallbackBatch(
+                    track: spotifySearchTrack,
+                    labelPrefix: spotifySearchLabelPrefix,
+                    includeAlbum: false,
+                    log: log
+                )
+                appendUniqueCandidates(&candidates, spotifyMatches)
+            }
         }
         guard !candidates.isEmpty else {
             log("lrclib search: no candidates")
@@ -383,26 +397,17 @@ actor LyricsRepository {
         }
 
         let best = selectSyncedFallbackCandidate(track: track, spotifySearchTrack: spotifySearchTrack, syncData: syncData, candidates: candidates, best: candidates[0], log: log)
+        if best.syncSourceMatchScore <= 0,
+           !best.syncLineExactMatch,
+           !isReasonableSyncedFallbackMatch(track: track, spotifySearchTrack: spotifySearchTrack, candidate: best) {
+            log("lrclib selected: rejected top candidate, artist or duration mismatch: \(describeLrclibCandidate(best))")
+            return nil
+        }
         if best.score <= 2.2 && best.syncSourceMatchScore <= 0 && !best.syncLineExactMatch {
             log("lrclib selected: rejected top candidate, score below threshold: \(fmt(best.score))")
             return nil
         }
         return best
-    }
-
-    private func appendSpotifyLrclibSearchCandidates(_ candidates: inout [LrclibCandidate], spotifySearchTrack: TrackSnapshot?, labelPrefix: String, mode: String, log: (String) -> Void) async throws {
-        guard let spotifySearchTrack, !spotifySearchTrack.title.isEmpty, !spotifySearchTrack.artist.isEmpty else { return }
-        let label = "\(labelPrefix.trimmed.isEmpty ? "spotify" : labelPrefix):\(mode)"
-        switch mode {
-        case "structured":
-            try await appendUniqueCandidates(&candidates, searchLrclib(params: buildStructuredQuery(spotifySearchTrack, includeAlbum: false), label: label, log: log))
-        case "q:title+artist":
-            try await appendUniqueCandidates(&candidates, searchLrclib(params: ["q": "\(spotifySearchTrack.title) \(spotifySearchTrack.artist)"], label: label, log: log))
-        case "q:title":
-            try await appendUniqueCandidates(&candidates, searchLrclib(params: ["q": spotifySearchTrack.title], label: label, log: log))
-        default:
-            break
-        }
     }
 
     func hydrateSpotifyTrackMetadata(track: TrackSnapshot, settings: AppSettings.Snapshot) async -> SpotifyTrackHydration {
@@ -542,6 +547,7 @@ actor LyricsRepository {
     }
 
     private func searchLrclib(params: [String: String], label: String, log: (String) -> Void) async throws -> [LrclibCandidate] {
+        let startedAt = ProcessInfo.processInfo.systemUptime
         log("lrclib search [\(label)]: \(describeParams(params))")
         let body = try await get("\(lrclibBase)/search?\(IvLyricsUtilities.encodeParams(params))")
         let array = try jsonArray(body)
@@ -550,8 +556,91 @@ actor LyricsRepository {
             let candidate = LrclibCandidate(json: object)
             return candidate.hasLyrics ? candidate : nil
         }
-        log("lrclib search [\(label)]: candidates=\(candidates.count)")
+        log("lrclib search [\(label)]: candidates=\(candidates.count) / elapsed=\(fmt(ProcessInfo.processInfo.systemUptime - startedAt))s")
         return candidates
+    }
+
+    private func searchLrclibFallback(params: [String: String], label: String, log: (String) -> Void) async throws -> [LrclibCandidate] {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        do {
+            return try await searchLrclib(params: params, label: label, log: log)
+        } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+            log("lrclib search [\(label)] failed after \(fmt(ProcessInfo.processInfo.systemUptime - startedAt))s: \(error.localizedDescription); continuing fallback")
+            return []
+        }
+    }
+
+    private func searchLrclibFallbackBatch(track: TrackSnapshot, labelPrefix: String, includeAlbum: Bool, log: @escaping (String) -> Void) async throws -> [LrclibCandidate] {
+        guard !track.title.isEmpty else { return [] }
+        let prefix = labelPrefix.trimmed.isEmpty ? "" : "\(labelPrefix.trimmed):"
+        async let structured = searchLrclibFallback(
+            params: buildStructuredQuery(track, includeAlbum: includeAlbum),
+            label: "\(prefix)structured",
+            log: log
+        )
+        async let titleArtist = searchLrclibFallback(
+            params: ["q": "\(track.title) \(track.artist)"],
+            label: "\(prefix)q:title+artist",
+            log: log
+        )
+        async let titleOnly = searchLrclibFallback(
+            params: ["q": track.title],
+            label: "\(prefix)q:title",
+            log: log
+        )
+
+        let batches = try await (structured, titleArtist, titleOnly)
+        var candidates: [LrclibCandidate] = []
+        appendUniqueCandidates(&candidates, batches.0)
+        appendUniqueCandidates(&candidates, batches.1)
+        appendUniqueCandidates(&candidates, batches.2)
+        return candidates
+    }
+
+    private func fetchLrclibCandidateBySignature(track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, log: (String) -> Void) async throws -> LrclibCandidate? {
+        let title = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.title, track.title)
+        let artist = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.artist, track.artist)
+        let album = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.album, track.album)
+        let spotifyDurationMs = spotifyMatch?.durationMs ?? 0
+        let durationMs = spotifyDurationMs > 0 ? spotifyDurationMs : track.durationMs
+        guard !title.isEmpty, !artist.isEmpty, !album.isEmpty, durationMs > 0 else {
+            log("lrclib signature: skipped, album or duration unavailable")
+            return nil
+        }
+
+        let params = [
+            "track_name": title,
+            "artist_name": artist,
+            "album_name": album,
+            "duration": String(Double(durationMs) / 1000.0)
+        ]
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        log("lrclib signature: \(describeParams(params))")
+        do {
+            let body = try await get(
+                "\(lrclibBase)/get?\(IvLyricsUtilities.encodeParams(params))",
+                timeoutInterval: lrclibSignatureTimeout
+            )
+            let candidate = LrclibCandidate(json: try jsonObject(body))
+            guard candidate.hasLyrics else {
+                log("lrclib signature: response has no lyrics payload")
+                return nil
+            }
+            log("lrclib signature: matched in \(fmt(ProcessInfo.processInfo.systemUptime - startedAt))s / \(describeLrclibCandidate(candidate))")
+            return candidate
+        } catch let error as HTTPStatusError where error.statusCode == 404 {
+            log("lrclib signature: no exact match after \(fmt(ProcessInfo.processInfo.systemUptime - startedAt))s")
+            return nil
+        } catch {
+            if isCancellationError(error) {
+                throw error
+            }
+            log("lrclib signature error after \(fmt(ProcessInfo.processInfo.systemUptime - startedAt))s: \(error.localizedDescription); continuing search")
+            return nil
+        }
     }
 
     private func fetchLrclibCandidateById(_ lrclibId: Int64, log: (String) -> Void) async -> LrclibCandidate? {
@@ -1321,12 +1410,12 @@ actor LyricsRepository {
         ]
     }
 
-    private func get(_ url: String, headers: [String: String] = [:]) async throws -> String {
+    private func get(_ url: String, headers: [String: String] = [:], timeoutInterval: TimeInterval? = nil) async throws -> String {
         guard let parsed = URL(string: url) else { throw URLError(.badURL) }
-        var request = URLRequest(url: parsed, timeoutInterval: 35)
+        var request = URLRequest(url: parsed, timeoutInterval: timeoutInterval ?? networkRequestTimeout)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("ivLyrics-Android/0.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("ivLyrics-iOS/0.1", forHTTPHeaderField: "User-Agent")
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
@@ -1334,15 +1423,22 @@ actor LyricsRepository {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
+    private func isCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        return (error as? URLError)?.code == .cancelled
+    }
+
     private func postForm(_ url: String, params: [String: String], headers: [String: String]) async throws -> String {
         guard let parsed = URL(string: url) else { throw URLError(.badURL) }
-        var request = URLRequest(url: parsed, timeoutInterval: 35)
+        var request = URLRequest(url: parsed, timeoutInterval: networkRequestTimeout)
         request.httpMethod = "POST"
         let body = IvLyricsUtilities.encodeParams(params).data(using: .utf8) ?? Data()
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("ivLyrics-Android/0.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("ivLyrics-iOS/0.1", forHTTPHeaderField: "User-Agent")
         request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)

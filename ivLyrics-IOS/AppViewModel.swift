@@ -1541,6 +1541,10 @@ final class AppViewModel: ObservableObject {
             resetCurrentFurigana()
             trackOffsetMs = settings.trackSyncOffsetMs(loaded.trackKey)
             videoOffsetMs = settings.trackVideoSyncOffsetMs(loaded.trackKey)
+            status = .loaded
+            appendLog("lyrics base ready: lines=\(baseResult.lines.count); supplements continue independently")
+            await Task.yield()
+            guard isLyricsLoadCurrent(requestID, trackKey: resolvedTrack.stableKey) else { return }
             requestMetadataTranslation(track: resolvedTrack, base: baseResult, bypassCache: bypassCache)
             let finalResult = await applyLyricsSupplements(track: resolvedTrack, base: baseResult, bypassCache: bypassCache)
             guard isLyricsLoadCurrent(requestID, trackKey: resolvedTrack.stableKey) else { return }
