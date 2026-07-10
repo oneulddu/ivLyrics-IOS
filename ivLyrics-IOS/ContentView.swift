@@ -2752,15 +2752,7 @@ private struct MainLyricPreviewRowView: View {
             }
             .frame(maxWidth: .infinity, alignment: .center)
         case .loading:
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
-                Text(row.text)
-                    .font(typography.font(slotId: row.slotId, baseSize: 17))
-                    .foregroundStyle(.white.opacity(0.86))
-                    .lineLimit(1)
-            }
+            MainLyricPreviewLoadingSkeleton()
             .frame(maxWidth: .infinity, alignment: .center)
         case .text:
             VStack(spacing: 1) {
@@ -2797,6 +2789,7 @@ private struct MainLyricPreviewRowView: View {
                 active: true,
                 activeColor: LyricSpeakerPalette.activeColor(speaker: row.speaker, settings: speakerColors),
                 alignment: .center,
+                kind: row.kind,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5)
             )
@@ -2819,14 +2812,111 @@ private struct MainLyricPreviewRowView: View {
 
 private struct MainLyricPreviewInterludeIcon: View {
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<4, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(.white.opacity(0.62))
-                    .frame(width: 4, height: CGFloat(10 + index * 4))
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
+            HStack(spacing: 4) {
+                ForEach(0..<4, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(.white.opacity(0.62))
+                        .frame(width: 4, height: interludeBarHeight(index: index, nowMs: nowMs, minimum: 7, maximum: 19))
+                }
             }
         }
     }
+}
+
+private struct MainLyricPreviewLoadingSkeleton: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
+            VStack(spacing: 6.6) {
+                ForEach(Array([0.54, 0.78, 0.42].enumerated()), id: \.offset) { index, widthFactor in
+                    KaraokeLoadingRail(
+                        widthFactor: widthFactor,
+                        height: 4.2,
+                        baseOpacity: index == 1 ? 76.0 / 255.0 : 46.0 / 255.0,
+                        shimmerOpacity: 0.72,
+                        phase: shimmerPhase(nowMs: nowMs, index: index, periodMs: 1_280, staggerMs: 145)
+                    )
+                }
+            }
+            .frame(width: 210)
+        }
+        .frame(height: 26)
+        .accessibilityLabel("Loading lyrics")
+    }
+}
+
+private struct LyricsLoadingSkeleton: View {
+    private let widths: [CGFloat] = [0.62, 0.86, 0.74, 0.92, 0.56]
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
+            VStack(alignment: .leading, spacing: 20) {
+                ForEach(Array(widths.enumerated()), id: \.offset) { index, widthFactor in
+                    let active = index == 2
+                    KaraokeLoadingRail(
+                        widthFactor: widthFactor,
+                        height: active ? 25 : 16,
+                        baseOpacity: active ? 82.0 / 255.0 : 36.0 / 255.0,
+                        shimmerOpacity: active ? 118.0 / 255.0 : 78.0 / 255.0,
+                        phase: shimmerPhase(nowMs: nowMs, index: index, periodMs: 1_350, staggerMs: 130),
+                        centered: false
+                    )
+                    .frame(height: active ? 25 : 16)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Loading lyrics")
+    }
+}
+
+private struct KaraokeLoadingRail: View {
+    var widthFactor: CGFloat
+    var height: CGFloat
+    var baseOpacity: Double
+    var shimmerOpacity: Double
+    var phase: CGFloat
+    var centered = true
+
+    var body: some View {
+        GeometryReader { geometry in
+            let availableWidth = max(1, geometry.size.width)
+            let rowWidth = max(42, availableWidth * widthFactor)
+            let shimmerWidth = max(28, rowWidth * 0.36)
+            let shimmerX = -shimmerWidth + (rowWidth + shimmerWidth * 2) * phase
+            let rowX = centered ? max(0, (availableWidth - rowWidth) * 0.5) : 0
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: height * 0.45)
+                    .fill(.white.opacity(baseOpacity))
+                LinearGradient(
+                    colors: [.clear, .white.opacity(shimmerOpacity), .clear],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: shimmerWidth)
+                .offset(x: shimmerX)
+            }
+            .frame(width: rowWidth, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: height * 0.45))
+            .offset(x: rowX)
+        }
+    }
+}
+
+private func shimmerPhase(nowMs: Double, index: Int, periodMs: Double, staggerMs: Double) -> CGFloat {
+    CGFloat((nowMs + Double(index) * staggerMs).truncatingRemainder(dividingBy: periodMs) / periodMs)
+}
+
+private func interludeBarHeight(index: Int, nowMs: Double, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
+    let phase = positiveSine(nowMs + Double(index) * 145, periodMs: 980)
+    return minimum + (maximum - minimum) * (0.18 + phase * 0.82)
+}
+
+private func positiveSine(_ timeMs: Double, periodMs: Double) -> CGFloat {
+    CGFloat((sin(timeMs.truncatingRemainder(dividingBy: periodMs) / periodMs * .pi * 2) + 1) * 0.5)
 }
 
 private struct LyricsMetaStrip: View {
@@ -2943,6 +3033,7 @@ private struct LyricsMetaStrip: View {
 struct LyricsTimelineView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    @State private var animatedCenterIndex: Double?
 
     var body: some View {
         let position = model.adjustedPositionMs
@@ -2966,18 +3057,24 @@ struct LyricsTimelineView: View {
             }
             return false
         } ?? 0)
+        let visualCenterIndex = animatedCenterIndex ?? Double(activeDisplayIndex)
         LazyVStack(spacing: 32) {
             if model.lyricsResult.lines.isEmpty {
-                Text(model.lyricsResult.detail)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.76))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
+                if model.status == .loading {
+                    LyricsLoadingSkeleton()
+                        .padding(.horizontal, 14)
+                } else {
+                    Text(model.lyricsResult.detail)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.76))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
+                }
             } else {
                 ForEach(Array(items.enumerated()), id: \.element.id) { displayIndex, item in
                     let itemActive = item.id == activeItemID
-                    let displayDistance = abs(Double(displayIndex - activeDisplayIndex))
+                    let displayDistance = abs(Double(displayIndex) - visualCenterIndex)
                     Group {
                         switch item {
                         case .line(let index, let line):
@@ -3003,6 +3100,19 @@ struct LyricsTimelineView: View {
                     }
                     .id(item.id)
                 }
+            }
+        }
+        .onAppear {
+            animatedCenterIndex = Double(activeDisplayIndex)
+        }
+        .onChange(of: activeDisplayIndex) { _, nextIndex in
+            let next = Double(nextIndex)
+            guard let current = animatedCenterIndex, abs(next - current) <= 3.2 else {
+                animatedCenterIndex = next
+                return
+            }
+            withAnimation(LyricsMotion.centering) {
+                animatedCenterIndex = next
             }
         }
     }
@@ -3114,11 +3224,15 @@ private struct LyricsTimelineScrollView: View {
             )
         }
         if animated {
-            withAnimation(.easeInOut(duration: 0.30), action)
+            withAnimation(LyricsMotion.centering, action)
         } else {
             action()
         }
     }
+}
+
+private enum LyricsMotion {
+    static let centering = Animation.timingCurve(0.16, 0.82, 0.20, 1, duration: 0.68)
 }
 
 private struct LyricsTimelineEdgeFadeMask: View {
@@ -3564,11 +3678,19 @@ struct LyricsInterludeView: View {
     }
 
     private var interludeBars: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<4, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(.white.opacity((active ? 0.42 : inactiveOpacity) + Double(index) * 0.07))
-                    .frame(width: 4, height: CGFloat(8 + index * 3))
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active)) { timeline in
+            let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
+            HStack(spacing: 3.8) {
+                ForEach(0..<4, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 2.25)
+                        .fill(.white.opacity(active ? 0.86 : inactiveOpacity))
+                        .frame(
+                            width: 3.2,
+                            height: active
+                                ? interludeBarHeight(index: index, nowMs: nowMs, minimum: 7, maximum: 23)
+                                : 11
+                        )
+                }
             }
         }
     }
@@ -3685,6 +3807,7 @@ struct LyricsLineView: View {
                             active: partActive,
                             activeColor: LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors),
                             alignment: textAlignment,
+                            kind: part.kind,
                             inactiveOpacity: vocalPartInactiveOpacity(speaker: part.speaker, active: partActive),
                             bounceEnabled: settings.karaokeBounceEffectEnabled,
                             bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
@@ -3706,6 +3829,7 @@ struct LyricsLineView: View {
                 active: active,
                 activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
                 alignment: textAlignment,
+                kind: line.kind,
                 inactiveOpacity: inactiveOriginalOpacity,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
@@ -3720,6 +3844,7 @@ struct LyricsLineView: View {
                 active: active,
                 activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
                 alignment: textAlignment,
+                kind: line.kind,
                 inactiveOpacity: inactiveOriginalOpacity,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
@@ -3811,23 +3936,40 @@ struct SyllableKaraokeText: View {
     var active: Bool
     var activeColor: Color
     var alignment: TextAlignment
+    var kind: String = "vocal"
     var inactiveOpacity: Double = 0.46
     var bounceEnabled: Bool = false
     var bounceTextSize: CGFloat = 22
     var syntheticTimingEnabled: Bool = false
 
     var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !requiresContinuousEffect)) { timeline in
+            karaokeBody(nowMs: timeline.date.timeIntervalSinceReferenceDate * 1_000)
+        }
+    }
+
+    @ViewBuilder
+    private func karaokeBody(nowMs: Double) -> some View {
         Group {
             if karaokeSegments.isEmpty {
                 Text(text.isEmpty ? " " : text)
                     .foregroundStyle(fallbackColor)
                     .multilineTextAlignment(alignment)
+                    .modifier(LyricGlyphEffectModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, color: activeColor))
+                    .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize))
             } else {
                 KaraokeSegmentFlowLayout(alignment: alignment) {
                     ForEach(karaokeSegments) { segment in
-                        KaraokeSyllableSegmentView(segment: segment)
+                        KaraokeSyllableSegmentView(
+                            segment: segment,
+                            kind: normalizedKind,
+                            active: active,
+                            nowMs: nowMs,
+                            textSize: bounceTextSize
+                        )
                     }
                 }
+                .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize))
                 .accessibilityLabel(text)
             }
         }
@@ -3841,7 +3983,7 @@ struct SyllableKaraokeText: View {
                 id: index,
                 text: syllable.text,
                 fill: fillFraction(for: syllable),
-                baseColor: active ? activeColor.opacity(0.34) : activeColor.opacity(inactiveOpacity),
+                baseColor: activeColor.opacity(inactiveOpacity),
                 activeColor: activeColor,
                 bounceOffsetY: bounce.offsetY,
                 bounceScale: bounce.scale,
@@ -3868,6 +4010,18 @@ struct SyllableKaraokeText: View {
 
     private var fallbackColor: Color {
         active ? activeColor : activeColor.opacity(inactiveOpacity)
+    }
+
+    private var normalizedKind: String {
+        let value = kind.trimmed.lowercased()
+        return value.isEmpty ? "vocal" : value
+    }
+
+    private var requiresContinuousEffect: Bool {
+        active && [
+            "effect", "adlib", "pulse", "bounce", "sway", "float", "pop", "glitch",
+            "wave", "sparkle", "echo", "whisper", "glow", "blur", "flicker"
+        ].contains(normalizedKind)
     }
 
     private func fillFraction(for syllable: LyricsLine.Syllable) -> CGFloat {
@@ -3978,6 +4132,10 @@ private struct KaraokeWhitespaceLayoutKey: LayoutValueKey {
 
 private struct KaraokeSyllableSegmentView: View {
     var segment: KaraokeSyllableSegment
+    var kind: String
+    var active: Bool
+    var nowMs: Double
+    var textSize: CGFloat
 
     var body: some View {
         Text(segment.text)
@@ -3993,9 +4151,127 @@ private struct KaraokeSyllableSegmentView: View {
             .fixedSize(horizontal: true, vertical: false)
             .scaleEffect(segment.bounceScale, anchor: .center)
             .offset(y: segment.bounceOffsetY)
-            .animation(.easeOut(duration: 0.10), value: segment.bounceOffsetY)
-            .animation(.easeOut(duration: 0.10), value: segment.bounceScale)
+            .modifier(LyricGlyphEffectModifier(kind: kind, active: active, nowMs: nowMs, textSize: textSize, segmentIndex: segment.id, color: segment.activeColor))
             .layoutValue(key: KaraokeWhitespaceLayoutKey.self, value: segment.isWhitespace)
+    }
+}
+
+private struct LyricLineMotionModifier: ViewModifier {
+    var kind: String
+    var active: Bool
+    var nowMs: Double
+    var textSize: CGFloat
+
+    func body(content: Content) -> some View {
+        let motion = motionValues
+        content
+            .offset(x: motion.x, y: motion.y)
+            .rotationEffect(.degrees(motion.rotation))
+            .scaleEffect(motion.scale)
+    }
+
+    private var motionValues: (x: CGFloat, y: CGFloat, rotation: Double, scale: CGFloat) {
+        guard active else { return (0, 0, 0, 1) }
+        switch kind {
+        case "effect":
+            let step = Int(nowMs / 45) % 4
+            let x: [CGFloat] = [0, -0.5, 0.45, -0.25]
+            let y: [CGFloat] = [0, 0.25, -0.25, -0.35]
+            return (x[step], y[step], 0, 1)
+        case "adlib":
+            return (0, -1.5 * signedSine(periodMs: 1_050), 0, 1)
+        case "pulse":
+            return (0, 0, 0, 1 + positiveSine(nowMs, periodMs: 940) * 0.025)
+        case "bounce":
+            return (0, -positiveSine(nowMs, periodMs: 780) * textSize * 0.12, 0, 1)
+        case "sway":
+            let wave = signedSine(periodMs: 1_350)
+            return (wave * textSize * 0.0245, 0, Double(wave * 0.84), 1)
+        case "float":
+            return (0, -positiveSine(nowMs, periodMs: 1_650) * textSize * 0.09, Double(signedSine(periodMs: 1_650) * 0.45), 1)
+        case "pop":
+            let phase = nowMs.truncatingRemainder(dividingBy: 1_080) / 1_080
+            return (0, 0, 0, phase < 0.18 ? 1.035 : (phase < 0.34 ? 0.996 : 1))
+        case "glitch":
+            let step = Int(nowMs / 35) % 32
+            if step == 5 || step == 19 { return (textSize * 0.035, -textSize * 0.01, 0, 1) }
+            if step == 6 || step == 20 { return (-textSize * 0.035, textSize * 0.01, 0, 1) }
+            return (0, 0, 0, 1)
+        default:
+            return (0, 0, 0, 1)
+        }
+    }
+
+    private func signedSine(periodMs: Double) -> CGFloat {
+        CGFloat(sin(nowMs.truncatingRemainder(dividingBy: periodMs) / periodMs * .pi * 2))
+    }
+}
+
+private struct LyricGlyphEffectModifier: ViewModifier {
+    var kind: String
+    var active: Bool
+    var nowMs: Double
+    var textSize: CGFloat
+    var segmentIndex: Int
+    var color: Color
+
+    func body(content: Content) -> some View {
+        let effect = effectValues
+        content
+            .opacity(effect.opacity)
+            .shadow(
+                color: effect.shadowColor,
+                radius: effect.shadowRadius,
+                x: effect.shadowX,
+                y: effect.shadowY
+            )
+            .offset(y: effect.waveOffset)
+    }
+
+    private var effectValues: (
+        opacity: Double,
+        shadowColor: Color,
+        shadowRadius: CGFloat,
+        shadowX: CGFloat,
+        shadowY: CGFloat,
+        waveOffset: CGFloat
+    ) {
+        guard active else { return (1, .clear, 0, 0, 0, 0) }
+        let waveOffset: CGFloat
+        if kind == "wave" {
+            let phaseTime = nowMs + Double(segmentIndex) * 62
+            let wave = CGFloat(sin(phaseTime.truncatingRemainder(dividingBy: 980) / 980 * .pi * 2))
+            let lift = positiveSine(nowMs + Double(segmentIndex) * 42, periodMs: 760) * textSize * 0.018
+            waveOffset = wave * textSize * 0.145 - lift
+        } else {
+            waveOffset = 0
+        }
+
+        switch kind {
+        case "sparkle":
+            let glow = positiveSine(nowMs, periodMs: 1_180)
+            return (1, color.opacity(Double(70 + glow * 90) / 255), textSize * (0.07 + glow * 0.18), 0, 0, waveOffset)
+        case "echo":
+            return (1, color.opacity(78.0 / 255.0), textSize * 0.12, textSize * 0.06, textSize * 0.035, waveOffset)
+        case "whisper":
+            let amount = positiveSine(nowMs, periodMs: 1_450)
+            return (0.76 + Double(1 - amount) * 0.12, .clear, 0, 0, 0, waveOffset)
+        case "glow":
+            let glow = 0.55 + positiveSine(nowMs, periodMs: 2_800) * 0.30
+            return (1, color.opacity(105.0 / 255.0), textSize * (0.14 + glow * 0.14), 0, 0, waveOffset)
+        case "blur":
+            let blur = 0.30 + positiveSine(nowMs, periodMs: 1_500) * 0.35
+            let opacity = 0.90 + Double(1 - blur) * 0.08
+            return (opacity, color.opacity(70.0 / 255.0), textSize * blur * 0.055, 0, 0, waveOffset)
+        case "flicker":
+            let phase = nowMs.truncatingRemainder(dividingBy: 1_220) / 1_220
+            let opacity = ((phase > 0.12 && phase < 0.15) || (phase > 0.52 && phase < 0.56)) ? 0.78 : 1
+            return (opacity, .clear, 0, 0, 0, waveOffset)
+        case "glitch":
+            return (1, Color(red: 111 / 255, green: 211 / 255, blue: 1).opacity(78.0 / 255.0), 0, textSize * 0.04, 0, waveOffset)
+        default:
+            return (1, .clear, 0, 0, 0, waveOffset)
+        }
     }
 }
 

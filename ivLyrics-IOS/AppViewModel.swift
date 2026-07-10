@@ -2065,14 +2065,14 @@ final class AppViewModel: ObservableObject {
     }
 
     private func startClock() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.nowPositionMs = self.currentTrack?.positionNow() ?? 0
                 self.updatePictureInPictureState()
             }
         }
-        timer?.tolerance = 0.02
+        timer?.tolerance = 0.008
     }
 
     private func updatePictureInPictureState(force: Bool = false) {

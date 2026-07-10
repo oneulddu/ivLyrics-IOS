@@ -90,7 +90,11 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             orientation: settings.pipOrientation,
             alignment: settings.pipLyricsTextAlignment,
             lyricsSizePercent: settings.pipLyricsSizePercent,
-            solidColor: settings.backgroundSolidColor
+            solidColor: settings.backgroundSolidColor,
+            syncedLyricsKaraokeAnimationEnabled: settings.syncedLyricsKaraokeAnimationEnabled,
+            karaokeBounceEffectEnabled: settings.karaokeBounceEffectEnabled,
+            karaokeDataAsLineSynced: settings.karaokeDataAsLineSynced,
+            speakerColors: settings.speakerColors
         )
         let forceRender = nextState.renderIdentity != state.renderIdentity
         state = nextState
@@ -323,30 +327,38 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
     private func drawKaraokeText(_ active: ActiveLine, in rect: CGRect, fontSize: CGFloat) {
-        let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
-        drawText(active.line.text, in: rect, font: font, color: UIColor.white.withAlphaComponent(0.38), alignment: state.textAlignment, lineLimit: 2)
-        guard active.progress > 0 else { return }
-        let text = active.line.text
-        let characterCount = text.count
-        guard characterCount > 0 else { return }
-        let filledCount = active.progress >= 1
-            ? characterCount
-            : max(0, min(characterCount, Int((Double(characterCount) * Double(active.progress)).rounded(.down))))
-        guard filledCount > 0 else { return }
-        let endIndex = text.index(text.startIndex, offsetBy: filledCount)
-        let filledRange = NSRange(text.startIndex..<endIndex, in: text)
-        let fullRange = NSRange(location: 0, length: (text as NSString).length)
-        let attributed = NSMutableAttributedString(
-            string: text,
-            attributes: textAttributes(font: font, color: .clear, alignment: state.textAlignment)
+        let text = active.line.text.trimmed.isEmpty
+            ? active.line.vocalParts.map { $0.text.trimmed }.filter { !$0.isEmpty }.joined(separator: " / ")
+            : active.line.text
+        guard !text.isEmpty, rect.width > 0, rect.height > 0 else { return }
+        let timedSyllables = state.karaokeDataAsLineSynced ? [] : active.line.syllables
+        let hasTimedSyllables = timedSyllables.contains { $0.endTimeMs > $0.startTimeMs }
+        let activeColor = LyricSpeakerPalette.activeColor(
+            speaker: active.line.speaker,
+            settings: state.speakerColors
         )
-        attributed.addAttribute(.foregroundColor, value: UIColor.clear, range: fullRange)
-        attributed.addAttribute(.foregroundColor, value: UIColor.white, range: filledRange)
-        attributed.draw(
-            with: rect,
-            options: [.usesLineFragmentOrigin, .usesFontLeading, .truncatesLastVisibleLine],
-            context: nil
+        let content = SyllableKaraokeText(
+            text: text,
+            syllables: hasTimedSyllables ? timedSyllables : [],
+            startTimeMs: active.line.startTimeMs,
+            endTimeMs: active.line.endTimeMs,
+            positionMs: state.positionMs,
+            active: true,
+            activeColor: activeColor,
+            alignment: state.swiftUITextAlignment,
+            kind: active.line.kind,
+            inactiveOpacity: 185.0 / 255.0,
+            bounceEnabled: state.karaokeBounceEffectEnabled,
+            bounceTextSize: fontSize,
+            syntheticTimingEnabled: !hasTimedSyllables && state.syncedLyricsKaraokeAnimationEnabled
         )
+        .font(.system(size: fontSize, weight: .bold))
+        .frame(width: rect.width, height: rect.height, alignment: state.swiftUIFrameAlignment)
+
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 1
+        renderer.proposedSize = ProposedViewSize(rect.size)
+        renderer.uiImage?.draw(in: rect)
     }
 
     private func drawText(
@@ -509,6 +521,10 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         var alignment: String
         var lyricsSizePercent: Int
         var solidColor: String
+        var syncedLyricsKaraokeAnimationEnabled: Bool
+        var karaokeBounceEffectEnabled: Bool
+        var karaokeDataAsLineSynced: Bool
+        var speakerColors: AppSettings.SpeakerColorSettings
 
         static let empty = RenderState(
             track: nil,
@@ -520,7 +536,11 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             orientation: AppSettings.pipOrientationSquare,
             alignment: "center",
             lyricsSizePercent: 150,
-            solidColor: "#1e3a8a"
+            solidColor: "#1e3a8a",
+            syncedLyricsKaraokeAnimationEnabled: true,
+            karaokeBounceEffectEnabled: true,
+            karaokeDataAsLineSynced: false,
+            speakerColors: .defaults
         )
 
         var renderSize: CGSize {
@@ -539,6 +559,22 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             case "right": return .right
             case "center": return .center
             default: return .left
+            }
+        }
+
+        var swiftUITextAlignment: TextAlignment {
+            switch AppSettings.normalizeLyricsAlignment(alignment) {
+            case "right": return .trailing
+            case "center": return .center
+            default: return .leading
+            }
+        }
+
+        var swiftUIFrameAlignment: Alignment {
+            switch AppSettings.normalizeLyricsAlignment(alignment) {
+            case "right": return .trailing
+            case "center": return .center
+            default: return .leading
             }
         }
 
@@ -580,7 +616,11 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 orientation,
                 alignment,
                 String(lyricsSizePercent),
-                solidColor
+                solidColor,
+                String(syncedLyricsKaraokeAnimationEnabled),
+                String(karaokeBounceEffectEnabled),
+                String(karaokeDataAsLineSynced),
+                String(speakerColors.hashValue)
             ].joined(separator: "|")
         }
     }
