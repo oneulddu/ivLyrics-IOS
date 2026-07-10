@@ -31,7 +31,7 @@ struct LyricsMetaMenuOverlay: View {
     @Binding var visible: Bool
     @Binding var selectedTab: LyricsMetaMenuTab
     var screenHeight: CGFloat
-    var openFloatingLyrics: () -> Void = {}
+    var openPictureInPicture: () -> Void = {}
     @State private var dragOffset: CGFloat = 0
     @State private var backgroundColorDraft = ""
     @State private var backgroundColorDraftInvalid = false
@@ -105,7 +105,7 @@ struct LyricsMetaMenuOverlay: View {
 
     private var topRow: some View {
         Button {
-            openFloatingLyrics()
+            openPictureInPicture()
             dismiss()
         } label: {
             Text(settings.t("pip.open_lyrics"))

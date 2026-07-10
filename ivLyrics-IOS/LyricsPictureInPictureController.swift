@@ -15,6 +15,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     var onSetPlaying: ((Bool) -> Void)?
     var onSkip: ((Int64) -> Void)?
     var onLog: ((String) -> Void)?
+    var onStartFailure: (() -> Void)?
 
     private let displayLayer = AVSampleBufferDisplayLayer()
     private var pictureInPictureController: AVPictureInPictureController?
@@ -124,6 +125,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             self.startRequested = false
             self.deactivateAudioSession()
             self.onLog?("lyrics pip: Picture in Picture is not currently available")
+            self.onStartFailure?()
         }
         return true
     }
@@ -267,15 +269,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
 
     private func drawLyrics(in rect: CGRect) {
         let metadataHeight = max(48, min(76, rect.height * 0.25))
-        // System PiP transport controls occupy the center of the video while visible.
-        // Keep lyrics in the lower safe band so they remain readable during interaction.
-        let lyricTop = max(rect.minY + metadataHeight, rect.minY + rect.height * 0.64)
-        let lyricRect = CGRect(
-            x: rect.minX,
-            y: lyricTop,
-            width: rect.width,
-            height: max(0, rect.maxY - lyricTop)
-        )
+        let lyricRect = CGRect(x: rect.minX, y: rect.minY + metadataHeight, width: rect.width, height: max(0, rect.height - metadataHeight))
         guard let active = state.activeLine else {
             drawText(
                 "ivLyrics",
@@ -292,11 +286,15 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let primarySize = max(15, min(34, lyricRect.width * 0.061 * scale))
         let supplementSize = max(10, primarySize * 0.48)
         let nextSize = max(11, primarySize * 0.56)
-        var cursor = lyricRect.minY
         let primaryHeight = min(lyricRect.height * 0.68, primarySize * 2.45)
-        let primaryRect = CGRect(x: lyricRect.minX, y: cursor, width: lyricRect.width, height: primaryHeight)
+        let centeredPrimaryY = rect.midY - primaryHeight / 2
+        let primaryY = min(
+            max(lyricRect.minY, centeredPrimaryY),
+            max(lyricRect.minY, lyricRect.maxY - primaryHeight)
+        )
+        let primaryRect = CGRect(x: lyricRect.minX, y: primaryY, width: lyricRect.width, height: primaryHeight)
         drawKaraokeText(active, in: primaryRect, fontSize: primarySize)
-        cursor = primaryRect.maxY + 2
+        var cursor = primaryRect.maxY + 2
 
         for supplement in active.supplementLines.prefix(2) {
             let supplementRect = CGRect(x: lyricRect.minX, y: cursor, width: lyricRect.width, height: supplementSize * 1.5)
@@ -664,6 +662,7 @@ extension LyricsPictureInPictureController: AVPictureInPictureControllerDelegate
             self?.startRequested = false
             self?.deactivateAudioSession()
             self?.onLog?("lyrics pip failed: \(error.localizedDescription)")
+            self?.onStartFailure?()
         }
     }
 

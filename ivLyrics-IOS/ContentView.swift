@@ -44,13 +44,15 @@ struct ContentView: View {
     @State private var lyricsMetaTipVisible = false
     @State private var lyricsMetaTipToken = UUID()
     @State private var inAppBrowserDragOffset: CGFloat = 0
-    @State private var showingFloatingLyrics = false
-    @State private var floatingLyricsDragOffset: CGSize = .zero
 
     var body: some View {
         GeometryReader { geometry in
             let isLandscape = geometry.size.width > geometry.size.height
-            rootContent(isLandscape: isLandscape, size: geometry.size)
+            rootContent(
+                isLandscape: isLandscape,
+                size: geometry.size,
+                safeAreaInsets: geometry.safeAreaInsets
+            )
             .contentShape(Rectangle())
             .onTapGesture {
                 showLandscapeControlsTemporarily(isLandscape: isLandscape)
@@ -108,9 +110,6 @@ struct ContentView: View {
                 }
                 updateLandscapeAutoHide(isLandscape: isLandscape)
             }
-            .onChange(of: showingFloatingLyrics) { _, _ in
-                updateLandscapeAutoHide(isLandscape: isLandscape)
-            }
             .onChange(of: model.inAppBrowserURL) { _, _ in
                 inAppBrowserDragOffset = 0
                 updateLandscapeAutoHide(isLandscape: isLandscape)
@@ -128,13 +127,15 @@ struct ContentView: View {
         }
     }
 
-    private func rootContent(isLandscape: Bool, size: CGSize) -> some View {
+    private func rootContent(isLandscape: Bool, size: CGSize, safeAreaInsets: EdgeInsets) -> some View {
         ZStack {
             PlayerBackgroundView()
             primaryContent(isLandscape: isLandscape, size: size)
-                .opacity(!isLandscape && lyricsPageVisible ? 0 : 1)
-                .animation(.easeOut(duration: lyricsPageVisible ? 0.20 : 0.16), value: lyricsPageVisible)
-            overlayContent(isLandscape: isLandscape, size: size)
+            overlayContent(
+                isLandscape: isLandscape,
+                size: size,
+                safeAreaInsets: safeAreaInsets
+            )
             LyricsPictureInPictureHostView(controller: model.pictureInPictureController)
                 .frame(width: 2, height: 2)
                 .opacity(0.01)
@@ -154,12 +155,11 @@ struct ContentView: View {
             landscapeContent(size: size)
         } else {
             portraitContent()
-                .ignoresSafeArea()
         }
     }
 
     @ViewBuilder
-    private func overlayContent(isLandscape: Bool, size: CGSize) -> some View {
+    private func overlayContent(isLandscape: Bool, size: CGSize, safeAreaInsets: EdgeInsets) -> some View {
         if !isLandscape && lyricsPageVisible {
             LyricsPageOverlay(
                 visible: $lyricsPageVisible,
@@ -167,7 +167,9 @@ struct ContentView: View {
                 showingMetaMenu: $showingLyricsMetaMenu,
                 selectedMetaMenuTab: $lyricsMetaMenuTab,
                 metaTipVisible: $lyricsMetaTipVisible,
-                screenHeight: size.height
+                screenHeight: size.height,
+                safeAreaTop: safeAreaInsets.top,
+                safeAreaBottom: safeAreaInsets.bottom
             )
             .transition(.move(edge: .bottom))
             .zIndex(5)
@@ -177,18 +179,9 @@ struct ContentView: View {
                 visible: $showingLyricsMetaMenu,
                 selectedTab: $lyricsMetaMenuTab,
                 screenHeight: size.height,
-                openFloatingLyrics: openFloatingLyrics
+                openPictureInPicture: openSystemLyricsPictureInPicture
             )
             .zIndex(8)
-        }
-        if showingFloatingLyrics {
-            FloatingLyricsOverlay(
-                visible: $showingFloatingLyrics,
-                dragOffset: $floatingLyricsDragOffset,
-                screenSize: size
-            )
-            .transition(.scale(scale: 0.90).combined(with: .opacity))
-            .zIndex(9)
         }
         if let browserURL = model.inAppBrowserURL {
             InAppBrowserOverlay(
@@ -320,9 +313,8 @@ struct ContentView: View {
                         showLyricsPage(true)
                     }
             }
-            .frame(width: max(0, width - 48), height: max(0, height - 46))
+            .frame(width: max(0, width - 48), height: max(0, height - 26))
             .padding(.horizontal, 24)
-            .padding(.top, 20)
             .padding(.bottom, 26)
             .foregroundStyle(.white)
         }
@@ -431,7 +423,7 @@ struct ContentView: View {
         }
         if environment["IVLYRICS_DEBUG_START_PIP"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                openFloatingLyrics()
+                openSystemLyricsPictureInPicture()
             }
         }
 #endif
@@ -584,15 +576,10 @@ struct ContentView: View {
         }
     }
 
-    private func openFloatingLyrics() {
-        if model.startLyricsPictureInPicture() {
-            showingLyricsMetaMenu = false
-            return
-        }
-        floatingLyricsDragOffset = .zero
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-            showingFloatingLyrics = true
-            showingLyricsMetaMenu = false
+    private func openSystemLyricsPictureInPicture() {
+        showingLyricsMetaMenu = false
+        if !model.startLyricsPictureInPicture() {
+            model.showSavedToast(settings.t("pip.unavailable"))
         }
     }
 
@@ -858,563 +845,6 @@ private struct ToastBanner: View {
     }
 }
 
-private struct FloatingLyricsOverlay: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var model: AppViewModel
-    @Binding var visible: Bool
-    @Binding var dragOffset: CGSize
-    var screenSize: CGSize
-    @GestureState private var gestureOffset: CGSize = .zero
-
-    var body: some View {
-        let size = stageSize
-        let liveOffset = CGSize(
-            width: dragOffset.width + gestureOffset.width,
-            height: dragOffset.height + gestureOffset.height
-        )
-        ZStack(alignment: .topTrailing) {
-            FloatingLyricsStage(size: size)
-                .environmentObject(settings)
-                .environmentObject(model)
-            Button {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    visible = false
-                }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(width: 30, height: 30)
-                    .background(.black.opacity(0.36), in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.12)))
-            }
-            .buttonStyle(.plain)
-            .padding(8)
-            .accessibilityLabel(settings.t("button.close"))
-        }
-        .frame(width: size.width, height: size.height)
-        .foregroundStyle(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.white.opacity(0.16)))
-        .shadow(color: .black.opacity(0.36), radius: 24, y: 14)
-        .position(x: basePosition(for: size).x + liveOffset.width, y: basePosition(for: size).y + liveOffset.height)
-        .gesture(
-            DragGesture(minimumDistance: 6)
-                .updating($gestureOffset) { value, state, _ in
-                    state = value.translation
-                }
-                .onEnded { value in
-                    let proposed = CGSize(
-                        width: dragOffset.width + value.translation.width,
-                        height: dragOffset.height + value.translation.height
-                    )
-                    dragOffset = clampedOffset(proposed, stageSize: size)
-                }
-        )
-        .accessibilityElement(children: .contain)
-    }
-
-    private var stageSize: CGSize {
-        let maxWidth = max(220, screenSize.width - 32)
-        let maxHeight = max(160, screenSize.height - 140)
-        switch AppSettings.normalizePipOrientation(settings.pipOrientation) {
-        case AppSettings.pipOrientationPortrait:
-            return aspectFit(aspect: 9.0 / 16.0, maxWidth: min(320, maxWidth), maxHeight: min(540, maxHeight))
-        case AppSettings.pipOrientationSquare:
-            let side = min(360, maxWidth, maxHeight)
-            return CGSize(width: max(220, side), height: max(220, side))
-        default:
-            return aspectFit(aspect: 16.0 / 9.0, maxWidth: min(560, maxWidth), maxHeight: min(320, maxHeight))
-        }
-    }
-
-    private func aspectFit(aspect: CGFloat, maxWidth: CGFloat, maxHeight: CGFloat) -> CGSize {
-        var width = maxWidth
-        var height = width / aspect
-        if height > maxHeight {
-            height = maxHeight
-            width = height * aspect
-        }
-        return CGSize(width: max(220, width), height: max(124, height))
-    }
-
-    private func basePosition(for stageSize: CGSize) -> CGPoint {
-        CGPoint(
-            x: screenSize.width - stageSize.width / 2 - 16,
-            y: min(
-                screenSize.height - stageSize.height / 2 - 12,
-                stageSize.height / 2 + 58
-            )
-        )
-    }
-
-    private func clampedOffset(_ offset: CGSize, stageSize: CGSize) -> CGSize {
-        let base = basePosition(for: stageSize)
-        let minX = stageSize.width / 2 + 10 - base.x
-        let maxX = screenSize.width - stageSize.width / 2 - 10 - base.x
-        let minY = stageSize.height / 2 + 10 - base.y
-        let maxY = screenSize.height - stageSize.height / 2 - 10 - base.y
-        return CGSize(
-            width: min(maxX, max(minX, offset.width)),
-            height: min(maxY, max(minY, offset.height))
-        )
-    }
-}
-
-private struct FloatingLyricsStage: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var model: AppViewModel
-    var size: CGSize
-
-    var body: some View {
-        let background = effectiveBackground
-        ZStack {
-            Color(red: 7.0 / 255.0, green: 9.0 / 255.0, blue: 16.0 / 255.0)
-            if backgroundShouldAnimate(background) {
-                TimelineView(.animation) { context in
-                    backgroundLayer(background: background, date: context.date)
-                }
-            } else {
-                backgroundLayer(background: background, date: nil)
-            }
-            Color.black.opacity(0.34)
-            foregroundLayer
-                .padding(contentPadding)
-        }
-        .frame(width: size.width, height: size.height)
-        .clipped()
-    }
-
-    @ViewBuilder
-    private var foregroundLayer: some View {
-        if settings.pipShowArtwork {
-            switch AppSettings.normalizePipOrientation(settings.pipOrientation) {
-            case AppSettings.pipOrientationLandscape:
-                HStack(spacing: 16) {
-                    VStack(spacing: 10) {
-                        FloatingArtworkView(size: min(150, max(86, size.height * 0.42)))
-                        FloatingMetadataView(centered: true)
-                    }
-                    .frame(width: min(188, size.width * 0.38))
-                    FloatingLyricsContent()
-                }
-            case AppSettings.pipOrientationPortrait:
-                VStack(spacing: 14) {
-                    FloatingMetadataBar(artworkSize: min(84, max(58, size.width * 0.26)))
-                    Spacer(minLength: 0)
-                    FloatingLyricsContent()
-                    Spacer(minLength: 0)
-                }
-            default:
-                VStack(spacing: 14) {
-                    FloatingMetadataBar(artworkSize: min(74, max(56, size.width * 0.23)))
-                    Spacer(minLength: 0)
-                    FloatingLyricsContent()
-                    Spacer(minLength: 0)
-                }
-            }
-        } else {
-            FloatingLyricsContent()
-        }
-    }
-
-    @ViewBuilder
-    private func backgroundLayer(background: AppSettings.BackgroundSettings, date: Date?) -> some View {
-        switch background.mode {
-        case AppSettings.backgroundSolid:
-            Color(hex: background.solidColor)
-        default:
-            AnimatedGradientBackgroundLayer(background: background, date: date)
-        }
-        if background.mode == AppSettings.backgroundVideo, let info = model.youtubeInfo {
-            YouTubeBackdropView(
-                info: info,
-                playerSeconds: model.youtubePlayerSeconds,
-                playing: model.currentTrack?.playing ?? false,
-                firstLyricSeconds: model.youtubeFirstLyricSeconds,
-                offsetSeconds: model.youtubeOffsetSeconds,
-                hasCaptionStartTime: info.hasCaptionStartTime,
-                captionStartTimeSeconds: info.captionStartTimeSeconds,
-                autoMatchedUnknownCaptionStart: info.isAutoMatchedUnknownCaptionStart,
-                brightness: background.brightness,
-                blur: background.blur,
-                videoScale: background.videoScale
-            )
-            .blur(radius: youtubeBackgroundBlurRadius(background.blur))
-            Color.black.opacity(youtubeBackgroundDimOpacity(background.brightness))
-        } else if let url = model.currentTrack?.artworkURL, background.mode == AppSettings.backgroundGradient {
-            MovingArtworkBlurLayer(
-                url: url,
-                blur: background.blur,
-                opacity: 0.32,
-                date: date,
-                reduceMotion: background.reduceMotion
-            )
-        }
-        if background.noise {
-            NoiseOverlay()
-                .opacity(0.16)
-        }
-    }
-
-    private var effectiveBackground: AppSettings.BackgroundSettings {
-        _ = settings.backgroundSettingsRevision
-        return settings.effectiveBackgroundSettings(trackKey: model.currentTrackKey)
-    }
-
-    private var contentPadding: CGFloat {
-        settings.pipShowArtwork ? 18 : 16
-    }
-}
-
-private struct FloatingMetadataBar: View {
-    var artworkSize: CGFloat
-
-    var body: some View {
-        HStack(spacing: 12) {
-            FloatingArtworkView(size: artworkSize)
-            FloatingMetadataView(centered: false)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct FloatingMetadataView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var model: AppViewModel
-    var centered: Bool
-
-    var body: some View {
-        let _ = settings.typographyRevision
-        let typography = settings.typographySettings()
-        VStack(alignment: centered ? .center : .leading, spacing: 4) {
-            Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
-                .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: centered ? 18 : 17))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-            Text(model.artistText.trimmed.isEmpty ? settings.t("status.waiting_spotify") : model.artistText)
-                .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: centered ? 12 : 12.5))
-                .foregroundStyle(.white.opacity(0.76))
-                .lineLimit(1)
-                .minimumScaleFactor(0.76)
-        }
-        .multilineTextAlignment(centered ? .center : .leading)
-        .shadow(color: .black.opacity(0.42), radius: 3, y: 1)
-        .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
-    }
-}
-
-private struct FloatingArtworkView: View {
-    @EnvironmentObject private var model: AppViewModel
-    var size: CGFloat
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(.white.opacity(0.10))
-            if let url = model.currentTrack?.artworkURL {
-                AsyncImage(url: url) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    fallback
-                }
-            } else {
-                fallback
-            }
-        }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.12)))
-        .shadow(color: .black.opacity(0.30), radius: 12, y: 6)
-    }
-
-    private var fallback: some View {
-        Image(systemName: "music.note")
-            .font(.system(size: max(22, size * 0.28), weight: .semibold))
-            .foregroundStyle(.white.opacity(0.56))
-    }
-}
-
-private struct FloatingLyricsContent: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var model: AppViewModel
-
-    var body: some View {
-        Group {
-            if model.lyricsResult.lines.isEmpty {
-                Text(model.lyricsResult.detail.trimmed.isEmpty ? settings.t("status.lyrics_waiting") : model.lyricsResult.detail)
-                    .font(.pretendard(18, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .multilineTextAlignment(textAlignment)
-                    .frame(maxWidth: .infinity, alignment: frameAlignment)
-            } else if let item = activeItem {
-                switch item {
-                case .line(_, let line):
-                    FloatingLyricsLineView(
-                        line: line,
-                        originalText: model.displayText(for: line),
-                        progress: model.progress(for: line),
-                        positionMs: model.adjustedPositionMs,
-                        alignment: settings.pipLyricsTextAlignment,
-                        sizeMultiplier: Double(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent)) / 100.0
-                    )
-                case .interlude(let info):
-                    FloatingLyricsInterludeView(
-                        info: info,
-                        showLabel: settings.interludeLabelsEnabled,
-                        alignment: settings.pipLyricsTextAlignment
-                    )
-                    .scaleEffect(Double(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent)) / 100.0)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: frameAlignment)
-    }
-
-    private var activeItem: LyricsTimelineDisplayItem? {
-        LyricsTimelineDisplayBuilder.previewItem(
-            lines: model.lyricsResult.lines,
-            positionMs: model.adjustedPositionMs,
-            trackDurationMs: model.durationMs,
-            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
-        )
-    }
-
-    private var textAlignment: TextAlignment {
-        let alignment = AppSettings.normalizeLyricsAlignment(settings.pipLyricsTextAlignment)
-        return alignment == "center" ? .center : (alignment == "right" ? .trailing : .leading)
-    }
-
-    private var frameAlignment: Alignment {
-        let alignment = AppSettings.normalizeLyricsAlignment(settings.pipLyricsTextAlignment)
-        return alignment == "center" ? .center : (alignment == "right" ? .trailing : .leading)
-    }
-}
-
-private struct FloatingLyricsLineView: View {
-    @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var model: AppViewModel
-    var line: LyricsLine
-    var originalText: String
-    var progress: Double
-    var positionMs: Int64
-    var alignment: String
-    var sizeMultiplier: Double
-
-    var body: some View {
-        let _ = settings.typographyRevision
-        let typography = settings.typographySettings()
-        let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line)
-        VStack(alignment: stackAlignment, spacing: max(3, 5 * sizeMultiplier)) {
-            originalLyricsView
-                .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier))
-            if !useVocalPartSupplements, settings.japaneseFuriganaEnabled, !line.furiganaText.trimmed.isEmpty {
-                Text(FuriganaRepository.rubyDisplayText(line.furiganaText))
-                    .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 11, multiplier: sizeMultiplier))
-                    .foregroundStyle(.white.opacity(0.70))
-                    .multilineTextAlignment(textAlignment)
-            }
-            if !useVocalPartSupplements, !line.pronunciationText.trimmed.isEmpty {
-                Text(line.pronunciationText)
-                    .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 13, multiplier: sizeMultiplier))
-                    .foregroundStyle(.white.opacity(0.76))
-                    .multilineTextAlignment(textAlignment)
-            } else if !useVocalPartSupplements, model.lyricsSupplementPronunciationLoading {
-                floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsPronunciation, baseSize: 13)
-            }
-            if !useVocalPartSupplements, !line.translationText.trimmed.isEmpty {
-                Text(line.translationText)
-                    .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 13, multiplier: sizeMultiplier))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .multilineTextAlignment(textAlignment)
-            } else if !useVocalPartSupplements, model.lyricsSupplementTranslationLoading {
-                floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsTranslation, baseSize: 13)
-            }
-        }
-        .lineLimit(3)
-        .minimumScaleFactor(0.68)
-        .frame(maxWidth: .infinity, alignment: frameAlignment)
-        .shadow(color: .black.opacity(0.46), radius: 4, y: 2)
-    }
-
-    private var typography: AppSettings.TypographySettings {
-        _ = settings.typographyRevision
-        return settings.typographySettings()
-    }
-
-    @ViewBuilder
-    private var originalLyricsView: some View {
-        if !line.vocalParts.isEmpty {
-            VStack(alignment: stackAlignment, spacing: 3) {
-                ForEach(Array(LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).enumerated()), id: \.offset) { _, part in
-                    let partActive = positionMs >= part.startTimeMs
-                    VStack(alignment: stackAlignment, spacing: max(1, 2 * sizeMultiplier)) {
-                        SyllableKaraokeText(
-                            text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
-                            syllables: shouldRenderTimedKaraoke ? part.syllables : [],
-                            startTimeMs: part.startTimeMs,
-                            endTimeMs: part.endTimeMs,
-                            positionMs: positionMs,
-                            active: partActive,
-                            activeColor: LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors),
-                            alignment: textAlignment,
-                            inactiveOpacity: LyricSpeakerPalette.inactiveOpacity(
-                                speaker: part.speaker,
-                                distance: partActive ? 0 : 0.45
-                            ),
-                            bounceEnabled: settings.karaokeBounceEffectEnabled,
-                            bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier)
-                        )
-                        if LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line) {
-                            floatingVocalPartSupplements(part, active: partActive)
-                        }
-                    }
-                }
-            }
-        } else if shouldRenderTimedKaraoke {
-            SyllableKaraokeText(
-                text: originalText.isEmpty ? " " : originalText,
-                syllables: line.syllables,
-                startTimeMs: line.startTimeMs,
-                endTimeMs: line.endTimeMs,
-                positionMs: positionMs,
-                active: true,
-                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
-                alignment: textAlignment,
-                bounceEnabled: settings.karaokeBounceEffectEnabled,
-                bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier)
-            )
-        } else if settings.syncedLyricsKaraokeAnimationEnabled {
-            SyllableKaraokeText(
-                text: originalText.isEmpty ? " " : originalText,
-                syllables: [],
-                startTimeMs: line.startTimeMs,
-                endTimeMs: line.endTimeMs,
-                positionMs: positionMs,
-                active: true,
-                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
-                alignment: textAlignment,
-                inactiveOpacity: 0.42,
-                bounceEnabled: settings.karaokeBounceEffectEnabled,
-                bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier),
-                syntheticTimingEnabled: true
-            )
-        } else {
-            Text(originalText.isEmpty ? " " : originalText)
-                .foregroundStyle(LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors))
-                .multilineTextAlignment(textAlignment)
-        }
-    }
-
-    @ViewBuilder
-    private func floatingVocalPartSupplements(_ part: LyricsLine.VocalPart, active: Bool) -> some View {
-        let speakerColor = LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors)
-        if settings.japaneseFuriganaEnabled, !part.furiganaText.trimmed.isEmpty {
-            Text(FuriganaRepository.rubyDisplayText(part.furiganaText))
-                .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 10, multiplier: sizeMultiplier))
-                .foregroundStyle(speakerColor.opacity(active ? 0.64 : 0.34))
-                .multilineTextAlignment(textAlignment)
-        }
-        if !part.pronunciationText.trimmed.isEmpty {
-            Text(part.pronunciationText)
-                .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 12, multiplier: sizeMultiplier))
-                .foregroundStyle(speakerColor.opacity(active ? 0.76 : 0.38))
-                .multilineTextAlignment(textAlignment)
-        } else if model.lyricsSupplementPronunciationLoading {
-            floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsPronunciation, baseSize: 12)
-        }
-        if !part.translationText.trimmed.isEmpty {
-            Text(part.translationText)
-                .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 12, multiplier: sizeMultiplier))
-                .foregroundStyle(speakerColor.opacity(active ? 0.68 : 0.34))
-                .multilineTextAlignment(textAlignment)
-        } else if model.lyricsSupplementTranslationLoading {
-            floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsTranslation, baseSize: 12)
-        }
-    }
-
-    private func floatingSupplementReserveText(_ text: String, slotId: String, baseSize: CGFloat) -> some View {
-        Text(text)
-            .font(typography.font(slotId: slotId, baseSize: baseSize, multiplier: sizeMultiplier))
-            .foregroundStyle(.clear)
-            .multilineTextAlignment(textAlignment)
-            .accessibilityHidden(true)
-    }
-
-    private var textAlignment: TextAlignment {
-        let normalized = AppSettings.normalizeLyricsAlignment(alignment)
-        return normalized == "center" ? .center : (normalized == "right" ? .trailing : .leading)
-    }
-
-    private var stackAlignment: HorizontalAlignment {
-        let normalized = AppSettings.normalizeLyricsAlignment(alignment)
-        return normalized == "center" ? .center : (normalized == "right" ? .trailing : .leading)
-    }
-
-    private var frameAlignment: Alignment {
-        let normalized = AppSettings.normalizeLyricsAlignment(alignment)
-        return normalized == "center" ? .center : (normalized == "right" ? .trailing : .leading)
-    }
-
-    private var shouldRenderTimedKaraoke: Bool {
-        !settings.karaokeDataAsLineSynced && line.syllables.contains { $0.endTimeMs > $0.startTimeMs }
-            || !settings.karaokeDataAsLineSynced && line.vocalParts.contains { part in
-                part.syllables.contains { $0.endTimeMs > $0.startTimeMs }
-            }
-    }
-
-    private var speakerColors: AppSettings.SpeakerColorSettings {
-        _ = settings.speakerColorRevision
-        return settings.speakerColorSettings()
-    }
-}
-
-private struct FloatingLyricsInterludeView: View {
-    @EnvironmentObject private var settings: AppSettings
-    var info: InterludeInfo
-    var showLabel: Bool
-    var alignment: String
-
-    var body: some View {
-        HStack(spacing: 9) {
-            if normalizedAlignment == "right" { Spacer(minLength: 0) }
-            interludeBars
-            if showLabel {
-                Text(label)
-                    .font(.pretendard(15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.82))
-            }
-            interludeBars
-            if normalizedAlignment != "right" { Spacer(minLength: 0) }
-        }
-        .frame(maxWidth: .infinity)
-        .shadow(color: .black.opacity(0.42), radius: 3, y: 1)
-        .accessibilityLabel(label)
-    }
-
-    private var interludeBars: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<4, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(.white.opacity(0.48 + Double(index) * 0.08))
-                    .frame(width: 4, height: CGFloat(9 + index * 3))
-            }
-        }
-    }
-
-    private var normalizedAlignment: String {
-        AppSettings.normalizeLyricsAlignment(alignment)
-    }
-
-    private var label: String {
-        switch info.kind {
-        case "prelude": return settings.t("interlude.prelude")
-        case "postlude": return settings.t("interlude.postlude")
-        default: return settings.t("interlude.break")
-        }
-    }
-}
-
 struct NoiseOverlay: View {
     var body: some View {
         Canvas { context, size in
@@ -1605,31 +1035,35 @@ private struct LyricsPageOverlay: View {
     @Binding var selectedMetaMenuTab: LyricsMetaMenuTab
     @Binding var metaTipVisible: Bool
     var screenHeight: CGFloat
+    var safeAreaTop: CGFloat
+    var safeAreaBottom: CGFloat
 
     var body: some View {
         ZStack {
+            PlayerBackgroundView()
             Color(red: 6.0 / 255.0, green: 7.0 / 255.0, blue: 12.0 / 255.0)
                 .opacity(54.0 / 255.0)
                 .ignoresSafeArea()
             VStack(spacing: 0) {
                 header
-                    .padding(.top, 10)
+                    .padding(.top, safeAreaTop + 10)
                     .padding(.horizontal, 24)
                     .contentShape(Rectangle())
                     .gesture(dismissDragGesture)
 
                 LyricsTimelineScrollView(
                     topPadding: 16,
-                    bottomPadding: 28,
-                    horizontalPadding: 24
+                    bottomPadding: safeAreaBottom + 28,
+                    horizontalPadding: 24,
+                    centerAnchorY: 0.42
                 )
             }
-            .background(.black.opacity(0.10))
-            .clipShape(RoundedRectangle(cornerRadius: dragOffset > 1 ? 28 : 0, style: .continuous))
-            .offset(y: dragOffset)
-            .animation(.easeOut(duration: 0.21), value: dragOffset)
         }
-        .ignoresSafeArea(edges: .bottom)
+        .background(.black.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: dragOffset > 1 ? 28 : 0, style: .continuous))
+        .offset(y: dragOffset)
+        .animation(.easeOut(duration: 0.21), value: dragOffset)
+        .ignoresSafeArea()
     }
 
     private var header: some View {
@@ -2150,7 +1584,6 @@ private struct LandscapePlayerPane: View {
                 }
                 .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
             }
-            .offset(y: controlsVisible ? 0 : 42)
 
             if controlsVisible {
                 LandscapeTransportControls()
@@ -3586,6 +3019,7 @@ private struct LyricsTimelineScrollView: View {
     var bottomPadding: CGFloat = 0
     var horizontalPadding: CGFloat = 0
     var trailingPadding: CGFloat = 0
+    var centerAnchorY: CGFloat = 0.5
 
     private let resumeTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     private static let manualScrollHoldSeconds: TimeInterval = 4.0
@@ -3674,7 +3108,10 @@ private struct LyricsTimelineScrollView: View {
         guard force || lastScrolledTargetID != targetID else { return }
         lastScrolledTargetID = targetID
         let action = {
-            proxy.scrollTo(targetID, anchor: .center)
+            proxy.scrollTo(
+                targetID,
+                anchor: UnitPoint(x: 0.5, y: min(1, max(0, centerAnchorY)))
+            )
         }
         if animated {
             withAnimation(.easeInOut(duration: 0.30), action)

@@ -177,6 +177,10 @@ final class AppViewModel: ObservableObject {
         pictureInPictureController.onLog = { [weak self] message in
             self?.appendLog(message)
         }
+        pictureInPictureController.onStartFailure = { [weak self] in
+            guard let self else { return }
+            self.showSavedToast(self.settings.t("pip.enter_failed"))
+        }
         startBluetoothRouteMonitoring()
         startClock()
     }
