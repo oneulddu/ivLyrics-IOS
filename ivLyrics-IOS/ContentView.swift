@@ -2845,6 +2845,7 @@ private struct MainLyricPreviewInterludeIcon: View {
                 }
             }
         }
+        .frame(height: 22, alignment: .center)
     }
 }
 
@@ -3720,6 +3721,7 @@ struct LyricsInterludeView: View {
                 }
             }
         }
+        .frame(height: 23, alignment: .center)
     }
 
     private var label: String {
@@ -4504,6 +4506,9 @@ private struct LyricsMotionDebugPreview: View {
                 showLabel: true,
                 alignment: "left"
             )
+            Text("Stable lyric below")
+                .font(.pretendard(28, weight: .bold))
+                .foregroundStyle(.white)
 
             Text("Main preview loading")
                 .font(.pretendard(15, weight: .semibold))
