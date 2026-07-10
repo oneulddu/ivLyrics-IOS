@@ -4068,9 +4068,9 @@ struct LyricsLineView: View {
 
     @ViewBuilder
     private var originalLyricsView: some View {
-        if !line.vocalParts.isEmpty {
-            VStack(alignment: stackAlignment, spacing: 3) {
-                ForEach(Array(LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).enumerated()), id: \.offset) { index, part in
+        if !displayVocalParts.isEmpty {
+            VStack(alignment: stackAlignment, spacing: 0) {
+                ForEach(Array(displayVocalParts.enumerated()), id: \.offset) { index, part in
                     let partActive = active && positionMs >= part.startTimeMs
                     VStack(alignment: stackAlignment, spacing: 2) {
                         SyllableKaraokeText(
@@ -4094,6 +4094,7 @@ struct LyricsLineView: View {
                             vocalPartSupplements(part, active: partActive)
                         }
                     }
+                    .padding(.top, vocalPartTopSpacing(index: index, parts: displayVocalParts))
                 }
             }
         } else if shouldRenderTimedKaraoke {
@@ -4144,6 +4145,20 @@ struct LyricsLineView: View {
                 inactiveColor: inactiveOriginalColor
             )
         }
+    }
+
+    private var displayVocalParts: [LyricsLine.VocalPart] {
+        LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).filter {
+            !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
+        }
+    }
+
+    private func vocalPartTopSpacing(index: Int, parts: [LyricsLine.VocalPart]) -> CGFloat {
+        guard index > 0, parts.indices.contains(index) else { return 0 }
+        if settings.japaneseFuriganaEnabled, parts[index].furiganaText.contains("<ruby>") {
+            return 8
+        }
+        return 4
     }
 
     @ViewBuilder

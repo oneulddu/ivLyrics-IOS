@@ -822,7 +822,7 @@ struct PictureInPictureKaraokeContent: View {
                     inactiveDistance: 0
                 )
             } else {
-                VStack(alignment: horizontalAlignment, spacing: 3) {
+                VStack(alignment: horizontalAlignment, spacing: 0) {
                     ForEach(Array(displayParts.enumerated()), id: \.offset) { index, part in
                         let partActive = positionMs >= part.startTimeMs
                         karaokeText(
@@ -839,6 +839,7 @@ struct PictureInPictureKaraokeContent: View {
                             inactiveDistance: partActive ? 0 : 0.45,
                             effectRowSeed: index
                         )
+                        .padding(.top, vocalPartTopSpacing(index: index))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: frameAlignment)
@@ -858,6 +859,11 @@ struct PictureInPictureKaraokeContent: View {
         case .trailing: return .trailing
         default: return .leading
         }
+    }
+
+    private func vocalPartTopSpacing(index: Int) -> CGFloat {
+        guard index > 0, displayParts.indices.contains(index) else { return 0 }
+        return displayParts[index].furiganaText.contains("<ruby>") ? 8 : 4
     }
 
     private func karaokeText(
