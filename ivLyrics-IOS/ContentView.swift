@@ -1046,7 +1046,7 @@ private struct LyricsPageOverlay: View {
                 .ignoresSafeArea()
             VStack(spacing: 0) {
                 header
-                    .padding(.top, safeAreaTop + 10)
+                    .padding(.top, headerTopPadding)
                     .padding(.horizontal, 24)
                     .contentShape(Rectangle())
                     .gesture(dismissDragGesture)
@@ -1062,8 +1062,12 @@ private struct LyricsPageOverlay: View {
         .background(.black.opacity(0.10))
         .clipShape(RoundedRectangle(cornerRadius: dragOffset > 1 ? 28 : 0, style: .continuous))
         .offset(y: dragOffset)
-        .animation(.easeOut(duration: 0.21), value: dragOffset)
         .ignoresSafeArea()
+    }
+
+    private var headerTopPadding: CGFloat {
+        let collapse = min(1, max(0, dragOffset) / 120)
+        return max(0, safeAreaTop + 10 - collapse * 24)
     }
 
     private var header: some View {
@@ -1143,13 +1147,13 @@ private struct LyricsPageOverlay: View {
     private var dismissDragGesture: some Gesture {
         DragGesture(minimumDistance: 12)
             .onChanged { value in
-                dragOffset = max(0, value.translation.height)
+                dragOffset = min(screenHeight, max(0, value.translation.height))
             }
             .onEnded { value in
                 let shouldClose = dragOffset > screenHeight * 0.30
                     || (value.predictedEndTranslation.height > 160 && dragOffset > 42)
                 if shouldClose {
-                    dismiss()
+                    dismissFromDrag()
                 } else {
                     withAnimation(.easeOut(duration: 0.21)) {
                         dragOffset = 0
@@ -1158,9 +1162,24 @@ private struct LyricsPageOverlay: View {
             }
     }
 
-    private func dismiss() {
-        dragOffset = 0
+    private func dismissFromDrag() {
         withAnimation(.easeOut(duration: 0.28)) {
+            dragOffset = screenHeight
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            guard dragOffset >= screenHeight * 0.9 else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                visible = false
+                dragOffset = 0
+            }
+        }
+    }
+
+    private func dismiss() {
+        withAnimation(.easeOut(duration: 0.28)) {
+            dragOffset = 0
             visible = false
         }
     }
