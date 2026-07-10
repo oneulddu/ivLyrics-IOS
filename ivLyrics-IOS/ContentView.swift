@@ -39,6 +39,7 @@ struct ContentView: View {
     @State private var landscapeAutoHideToken = UUID()
     @State private var lyricsPageVisible = false
     @State private var lyricsPageDragOffset: CGFloat = 0
+    @State private var lyricsPageAnimationHeight: CGFloat = 1
     @State private var showingLyricsMetaMenu = false
     @State private var lyricsMetaMenuTab: LyricsMetaMenuTab = .language
     @State private var lyricsMetaTipVisible = false
@@ -61,6 +62,7 @@ struct ContentView: View {
             }
             .font(.pretendard(16))
             .onAppear {
+                lyricsPageAnimationHeight = max(1, geometry.size.height)
                 applyKeepScreenOn(settings.keepScreenOn)
                 updateLandscapeAutoHide(isLandscape: isLandscape)
                 model.maybeShowInitialSetup()
@@ -73,6 +75,9 @@ struct ContentView: View {
             }
             .onChange(of: settings.keepScreenOn) { _, enabled in
                 applyKeepScreenOn(enabled)
+            }
+            .onChange(of: geometry.size.height) { _, height in
+                lyricsPageAnimationHeight = max(1, height)
             }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
@@ -169,11 +174,23 @@ struct ContentView: View {
 
     @ViewBuilder
     private func primaryContent(isLandscape: Bool, size: CGSize, safeAreaInsets: EdgeInsets) -> some View {
-        if isLandscape {
-            landscapeContent(size: size)
-        } else {
-            portraitContent(safeAreaInsets: safeAreaInsets)
+        Group {
+            if isLandscape {
+                landscapeContent(size: size)
+            } else {
+                portraitContent(safeAreaInsets: safeAreaInsets)
+            }
         }
+        .mask(alignment: .top) {
+            Rectangle()
+                .frame(height: mainPageRevealHeight(isLandscape: isLandscape, screenHeight: size.height))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+    }
+
+    private func mainPageRevealHeight(isLandscape: Bool, screenHeight: CGFloat) -> CGFloat {
+        guard !isLandscape, lyricsPageVisible else { return screenHeight }
+        return min(screenHeight, max(0, lyricsPageDragOffset))
     }
 
     @ViewBuilder
@@ -189,7 +206,6 @@ struct ContentView: View {
                 safeAreaTop: safeAreaInsets.top,
                 safeAreaBottom: safeAreaInsets.bottom
             )
-            .transition(.move(edge: .bottom))
             .zIndex(5)
         }
         if showingLyricsMetaMenu {
@@ -546,14 +562,36 @@ struct ContentView: View {
     }
 
     private func showLyricsPage(_ show: Bool) {
-        lyricsPageDragOffset = 0
-        withAnimation(.easeOut(duration: show ? 0.33 : 0.28)) {
-            lyricsPageVisible = show
-        }
         if show {
+            guard !lyricsPageVisible else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                lyricsPageDragOffset = lyricsPageAnimationHeight
+                lyricsPageVisible = true
+            }
+            DispatchQueue.main.async {
+                guard lyricsPageVisible else { return }
+                withAnimation(.easeOut(duration: 0.33)) {
+                    lyricsPageDragOffset = 0
+                }
+            }
             scheduleLyricsMetaTip()
         } else {
+            guard lyricsPageVisible else { return }
             dismissLyricsMetaTip()
+            withAnimation(.easeOut(duration: 0.28)) {
+                lyricsPageDragOffset = lyricsPageAnimationHeight
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                guard lyricsPageDragOffset >= lyricsPageAnimationHeight * 0.9 else { return }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    lyricsPageVisible = false
+                    lyricsPageDragOffset = 0
+                }
+            }
         }
     }
 
@@ -1234,7 +1272,6 @@ private struct LyricsPageOverlay: View {
 
     var body: some View {
         ZStack {
-            PlayerBackgroundView()
             Color(red: 6.0 / 255.0, green: 7.0 / 255.0, blue: 12.0 / 255.0)
                 .opacity(54.0 / 255.0)
                 .ignoresSafeArea()
@@ -1347,7 +1384,7 @@ private struct LyricsPageOverlay: View {
                 let shouldClose = dragOffset > screenHeight * 0.30
                     || (value.predictedEndTranslation.height > 160 && dragOffset > 42)
                 if shouldClose {
-                    dismissFromDrag()
+                    dismiss()
                 } else {
                     withAnimation(.easeOut(duration: 0.21)) {
                         dragOffset = 0
@@ -1356,7 +1393,7 @@ private struct LyricsPageOverlay: View {
             }
     }
 
-    private func dismissFromDrag() {
+    private func dismiss() {
         withAnimation(.easeOut(duration: 0.28)) {
             dragOffset = screenHeight
         }
@@ -1368,13 +1405,6 @@ private struct LyricsPageOverlay: View {
                 visible = false
                 dragOffset = 0
             }
-        }
-    }
-
-    private func dismiss() {
-        withAnimation(.easeOut(duration: 0.28)) {
-            dragOffset = 0
-            visible = false
         }
     }
 
