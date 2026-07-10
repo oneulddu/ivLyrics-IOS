@@ -249,6 +249,8 @@ struct ContentView: View {
             let height = proxy.size.height
             let artworkSize = max(180, min(width - 32, height * 0.45))
             let typography = settings.typographySettings()
+            let artworkMetadataSpacing = min(30, max(18, height * 0.034))
+            let metadataControlsSpacing = min(38, max(28, height * 0.045))
 
             VStack(spacing: 0) {
                 ZStack(alignment: .topTrailing) {
@@ -273,8 +275,8 @@ struct ContentView: View {
                 ArtworkView(size: artworkSize, cornerRadius: 24)
                     .padding(.bottom, 8)
 
-                Spacer(minLength: 0)
-                    .frame(maxHeight: 16)
+                Color.clear
+                    .frame(height: artworkMetadataSpacing)
 
                 VStack(alignment: .leading, spacing: 7) {
                     Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
@@ -305,7 +307,7 @@ struct ContentView: View {
                     onSeek: model.seek(toPlaybackPositionMs:)
                 )
                 .padding(.horizontal, 2)
-                .padding(.top, 26)
+                .padding(.top, metadataControlsSpacing)
 
                 HStack(spacing: 0) {
                     Text(androidPlayerTime(model.nowPositionMs))
@@ -328,9 +330,8 @@ struct ContentView: View {
                         showLyricsPage(true)
                     }
             }
-            .frame(width: max(0, width - 48), height: max(0, height - 26))
+            .frame(width: max(0, width - 48), height: max(0, height))
             .padding(.horizontal, 24)
-            .padding(.bottom, 26)
             .foregroundStyle(.white)
         }
         .simultaneousGesture(
