@@ -1,25 +1,6702 @@
+import Combine
 import SwiftUI
-import Playgrounds
+import WebKit
 
-@main struct MyApp: App {
+#if os(iOS)
+import UIKit
+#endif
+
+@main
+struct IvLyricsIOSApp: App {
+    @StateObject private var settings = AppSettings.shared
+    @StateObject private var viewModel = AppViewModel(settings: .shared)
+
+    init() {
+        IvLyricsFontLoader.registerPretendard()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(settings)
+                .environmentObject(viewModel)
+                .onOpenURL { url in
+                    viewModel.handleOpenURL(url)
+                }
         }
     }
 }
 
 struct ContentView: View {
+    private static let lyricsMetaTipShownKey = "lyrics_meta_menu_tip_shown"
+
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var showingSettings = false
+    @State private var showingLogs = false
+    @State private var landscapeControlsVisible = true
+    @State private var landscapeAutoHideToken = UUID()
+    @State private var lyricsPageVisible = false
+    @State private var lyricsPageDragOffset: CGFloat = 0
+    @State private var showingLyricsMetaMenu = false
+    @State private var lyricsMetaMenuTab: LyricsMetaMenuTab = .language
+    @State private var lyricsMetaTipVisible = false
+    @State private var lyricsMetaTipToken = UUID()
+    @State private var inAppBrowserDragOffset: CGFloat = 0
+    @State private var showingFloatingLyrics = false
+    @State private var floatingLyricsDragOffset: CGSize = .zero
+
     var body: some View {
-        Text("Hello, world!")
-            .padding()
+        GeometryReader { geometry in
+            let isLandscape = geometry.size.width > geometry.size.height
+            rootContent(isLandscape: isLandscape, size: geometry.size)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                showLandscapeControlsTemporarily(isLandscape: isLandscape)
+            }
+            .font(.pretendard(16))
+            .onAppear {
+                applyKeepScreenOn(settings.keepScreenOn)
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+                model.maybeShowInitialSetup()
+                model.maybeStartAutomaticUpdateCheck()
+                model.resumeSpotifyLiveIfAuthorized()
+                applyDebugPresentationOverrides()
+            }
+            .onDisappear {
+                landscapeAutoHideToken = UUID()
+            }
+            .onChange(of: settings.keepScreenOn) { _, enabled in
+                applyKeepScreenOn(enabled)
+            }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .active:
+                    model.appDidBecomeActive()
+                case .background:
+                    model.appDidEnterBackground()
+                case .inactive:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+            .onChange(of: settings.landscapeAutoHideControls) { _, _ in
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
+            .onChange(of: isLandscape) { _, landscape in
+                if landscape {
+                    showLyricsPage(false)
+                    showingLyricsMetaMenu = false
+                    dismissLyricsMetaTip()
+                }
+                updateLandscapeAutoHide(isLandscape: landscape)
+            }
+            .onChange(of: showingSettings) { _, _ in
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
+            .onChange(of: showingLogs) { _, _ in
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
+            .onChange(of: model.tmiPresented) { _, _ in
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
+            .onChange(of: showingLyricsMetaMenu) { _, _ in
+                if showingLyricsMetaMenu {
+                    dismissLyricsMetaTip()
+                }
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
+            .onChange(of: showingFloatingLyrics) { _, _ in
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
+            .onChange(of: model.inAppBrowserURL) { _, _ in
+                inAppBrowserDragOffset = 0
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
+            .fullScreenCover(isPresented: $showingSettings) {
+                SettingsView()
+                    .environmentObject(settings)
+                    .environmentObject(model)
+            }
+            .fullScreenCover(isPresented: $model.initialSetupPresented) {
+                InitialSetupView()
+                    .environmentObject(settings)
+                    .environmentObject(model)
+            }
+        }
+    }
+
+    private func rootContent(isLandscape: Bool, size: CGSize) -> some View {
+        ZStack {
+            PlayerBackgroundView()
+            primaryContent(isLandscape: isLandscape, size: size)
+                .opacity(!isLandscape && lyricsPageVisible ? 0 : 1)
+                .animation(.easeOut(duration: lyricsPageVisible ? 0.20 : 0.16), value: lyricsPageVisible)
+            overlayContent(isLandscape: isLandscape, size: size)
+            LyricsPictureInPictureHostView(controller: model.pictureInPictureController)
+                .frame(width: 2, height: 2)
+                .opacity(0.01)
+                .allowsHitTesting(false)
+#if DEBUG
+            if ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_KARAOKE_PREVIEW"] == "1" {
+                KaraokeDebugPreview()
+                    .zIndex(100)
+            }
+#endif
+        }
+    }
+
+    @ViewBuilder
+    private func primaryContent(isLandscape: Bool, size: CGSize) -> some View {
+        if isLandscape {
+            landscapeContent(size: size)
+        } else {
+            portraitContent()
+                .ignoresSafeArea()
+        }
+    }
+
+    @ViewBuilder
+    private func overlayContent(isLandscape: Bool, size: CGSize) -> some View {
+        if !isLandscape && lyricsPageVisible {
+            LyricsPageOverlay(
+                visible: $lyricsPageVisible,
+                dragOffset: $lyricsPageDragOffset,
+                showingMetaMenu: $showingLyricsMetaMenu,
+                selectedMetaMenuTab: $lyricsMetaMenuTab,
+                metaTipVisible: $lyricsMetaTipVisible,
+                screenHeight: size.height
+            )
+            .transition(.move(edge: .bottom))
+            .zIndex(5)
+        }
+        if showingLyricsMetaMenu {
+            LyricsMetaMenuOverlay(
+                visible: $showingLyricsMetaMenu,
+                selectedTab: $lyricsMetaMenuTab,
+                screenHeight: size.height,
+                openFloatingLyrics: openFloatingLyrics
+            )
+            .zIndex(8)
+        }
+        if showingFloatingLyrics {
+            FloatingLyricsOverlay(
+                visible: $showingFloatingLyrics,
+                dragOffset: $floatingLyricsDragOffset,
+                screenSize: size
+            )
+            .transition(.scale(scale: 0.90).combined(with: .opacity))
+            .zIndex(9)
+        }
+        if let browserURL = model.inAppBrowserURL {
+            InAppBrowserOverlay(
+                visible: inAppBrowserVisibleBinding,
+                dragOffset: $inAppBrowserDragOffset,
+                url: browserURL,
+                screenHeight: size.height
+            )
+            .transition(.move(edge: .bottom))
+            .zIndex(10)
+        }
+        if showingLogs {
+            LogsView(visible: $showingLogs)
+                .transition(.opacity)
+                .zIndex(11)
+        }
+        if model.tmiPresented {
+            TmiSheetView()
+                .transition(.opacity)
+                .zIndex(12)
+        }
+        if model.updateDialogPresented {
+            UpdateSheetView()
+                .transition(.opacity)
+                .zIndex(13)
+        }
+        if !model.toastMessage.trimmed.isEmpty {
+            ToastBanner(
+                message: model.toastMessage,
+                bottomPadding: isLandscape ? 24 : (lyricsPageVisible ? 24 : 86)
+            )
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+            .zIndex(20)
+        }
+    }
+
+    private var inAppBrowserVisibleBinding: Binding<Bool> {
+        Binding(
+            get: { model.inAppBrowserURL != nil },
+            set: { visible in
+                if !visible {
+                    closeInAppBrowser()
+                }
+            }
+        )
+    }
+
+    private func portraitContent() -> some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let height = proxy.size.height
+            let artworkSize = min(max(180, width - 48), max(180, height * 0.45))
+            let typography = settings.typographySettings()
+
+            VStack(spacing: 0) {
+                ZStack(alignment: .topTrailing) {
+                    Color.clear
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 23, weight: .bold))
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .accessibilityLabel(settings.t("settings.title"))
+                    .padding(.top, 8)
+                }
+                .frame(height: 56)
+
+                Spacer(minLength: 0)
+                    .frame(maxHeight: 20)
+
+                ArtworkView(size: artworkSize, cornerRadius: 24)
+                    .padding(.bottom, 8)
+
+                Spacer(minLength: 0)
+                    .frame(maxHeight: 16)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
+                        .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 28))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Text(model.artistText.trimmed.isEmpty ? settings.t("status.waiting_spotify") : model.artistText)
+                        .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: 18))
+                        .foregroundStyle(.white.opacity(190.0 / 255.0))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    model.openSpotifyForCurrentTrack()
+                }
+                .onLongPressGesture {
+                    performMainMetaHaptic()
+                    lyricsMetaMenuTab = .language
+                    showingLyricsMetaMenu = true
+                }
+
+                PlayerProgressBar(
+                    positionMs: model.nowPositionMs,
+                    durationMs: model.durationMs,
+                    height: 24,
+                    onSeek: model.seek(toPlaybackPositionMs:)
+                )
+                .padding(.horizontal, 2)
+                .padding(.top, 26)
+
+                HStack(spacing: 0) {
+                    Text(androidPlayerTime(model.nowPositionMs))
+                    Spacer()
+                    Text("-" + androidPlayerTime(max(0, model.durationMs - model.nowPositionMs)))
+                }
+                .font(.pretendard(12))
+                .foregroundStyle(.white.opacity(0.76))
+
+                androidTransportControls
+                    .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76)
+                    .padding(.top, 8)
+
+                Spacer(minLength: 12)
+
+                MainLyricPreviewPanel(chromeless: true)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showLyricsPage(true)
+                    }
+            }
+            .frame(width: max(0, width - 48), height: max(0, height - 46))
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 26)
+            .foregroundStyle(.white)
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 18)
+                .onEnded { value in
+                    if value.translation.height < -56 {
+                        showLyricsPage(true)
+                    }
+                }
+        )
+    }
+
+    private var androidTransportControls: some View {
+        HStack(spacing: 30) {
+            Button {
+                model.skipToPreviousTrack()
+            } label: {
+                Image(systemName: "backward.end.fill")
+                    .font(.system(size: 29, weight: .medium))
+                    .frame(width: 62, height: 62)
+            }
+            .accessibilityLabel(settings.t("button.prev_track"))
+
+            Button {
+                model.togglePlayback()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 246.0 / 255.0, green: 246.0 / 255.0, blue: 250.0 / 255.0))
+                    Image(systemName: model.currentTrack?.playing == true ? "pause.fill" : "play.fill")
+                        .font(.system(size: 27, weight: .bold))
+                        .foregroundStyle(Color(red: 14.0 / 255.0, green: 15.0 / 255.0, blue: 20.0 / 255.0))
+                        .offset(x: model.currentTrack?.playing == true ? 0 : 1)
+                }
+                .frame(width: 72, height: 72)
+            }
+            .accessibilityLabel(settings.t("debug.play_pause"))
+
+            Button {
+                model.skipToNextTrack()
+            } label: {
+                Image(systemName: "forward.end.fill")
+                    .font(.system(size: 29, weight: .medium))
+                    .frame(width: 62, height: 62)
+            }
+            .accessibilityLabel(settings.t("button.next_track"))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(238.0 / 255.0))
+    }
+
+    private func androidPlayerTime(_ milliseconds: Int64) -> String {
+        let total = max(0, Int(milliseconds / 1000))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private func performMainMetaHaptic() {
+#if os(iOS)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+#endif
+    }
+
+    private func applyDebugPresentationOverrides() {
+#if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        if environment["IVLYRICS_DEBUG_SHOW_LYRICS"] == "1" {
+            DispatchQueue.main.async {
+                showLyricsPage(true)
+            }
+        }
+        if environment["IVLYRICS_DEBUG_SHOW_META_MENU"] == "1" {
+            if let rawTab = environment["IVLYRICS_DEBUG_META_TAB"],
+               let tab = LyricsMetaMenuTab(rawValue: rawTab) {
+                lyricsMetaMenuTab = tab
+            }
+            DispatchQueue.main.async {
+                showLyricsPage(true)
+                showingLyricsMetaMenu = true
+            }
+        }
+        if environment["IVLYRICS_DEBUG_SHOW_SETTINGS"] == "1" {
+            DispatchQueue.main.async {
+                showingSettings = true
+            }
+        }
+        if environment["IVLYRICS_DEBUG_SHOW_LOGS"] == "1" {
+            DispatchQueue.main.async {
+                showingLogs = true
+            }
+        }
+        if environment["IVLYRICS_DEBUG_SHOW_TMI"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                model.showTmiForCurrentTrack(bypassCache: false)
+            }
+        }
+        if environment["IVLYRICS_DEBUG_SHOW_UPDATE"] == "1" {
+            DispatchQueue.main.async {
+                model.updateDialogPresented = true
+            }
+        }
+        if environment["IVLYRICS_DEBUG_SHOW_ONBOARDING"] == "1" {
+            DispatchQueue.main.async {
+                model.initialSetupPresented = true
+            }
+        }
+        if environment["IVLYRICS_DEBUG_START_PIP"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                openFloatingLyrics()
+            }
+        }
+#endif
+    }
+
+    private func landscapeContent(size: CGSize) -> some View {
+        let controlsShown = shouldShowLandscapeControls
+        let centerPlayer = shouldCenterLandscapePlayer
+        let horizontalPadding: CGFloat = 22
+        let spacing: CGFloat = centerPlayer ? 0 : 18
+        let availableWidth = max(320, size.width - horizontalPadding * 2 - spacing)
+        let playerWidth = centerPlayer
+            ? min(size.width - horizontalPadding * 2, size.width > 900 ? 720 : 560)
+            : availableWidth * 0.44
+        let lyricsWidth = availableWidth - playerWidth
+
+        return HStack(spacing: spacing) {
+            LandscapePlayerPane(
+                controlsVisible: controlsShown,
+                centered: centerPlayer,
+                containerSize: size
+            )
+            .frame(width: playerWidth, height: max(1, size.height - 32))
+
+            if !centerPlayer {
+                LandscapeLyricsPane()
+                    .frame(width: max(280, lyricsWidth), height: max(1, size.height - 32))
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, 16)
+        .overlay(alignment: .topTrailing) {
+            if controlsShown {
+                LandscapeCommandBar(
+                    showingSettings: $showingSettings
+                )
+                .padding(.top, 16)
+                .padding(.trailing, 22)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: controlsShown ? 0.18 : 0.26), value: controlsShown)
+        .animation(.easeInOut(duration: 0.18), value: centerPlayer)
+    }
+
+    private var shouldShowLandscapeControls: Bool {
+        !settings.landscapeAutoHideControls
+            || showingSettings
+            || showingLogs
+            || landscapeControlsVisible
+    }
+
+    private var shouldCenterLandscapePlayer: Bool {
+        settings.landscapeCenterNoLyrics
+            && model.status != .loading
+            && model.lyricsResult.lines.isEmpty
+    }
+
+    private func showLandscapeControlsTemporarily(isLandscape: Bool) {
+        guard isLandscape, settings.landscapeAutoHideControls else {
+            landscapeControlsVisible = true
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            landscapeControlsVisible = true
+        }
+        scheduleLandscapeControlsAutoHide(isLandscape: isLandscape)
+    }
+
+    private func updateLandscapeAutoHide(isLandscape: Bool) {
+        landscapeAutoHideToken = UUID()
+        landscapeControlsVisible = true
+        guard isLandscape,
+              settings.landscapeAutoHideControls,
+              !showingSettings,
+              !showingLogs else {
+            return
+        }
+        scheduleLandscapeControlsAutoHide(isLandscape: isLandscape)
+    }
+
+    private func scheduleLandscapeControlsAutoHide(isLandscape: Bool) {
+        guard isLandscape,
+              settings.landscapeAutoHideControls,
+              !showingSettings,
+              !showingLogs else {
+            return
+        }
+        let token = UUID()
+        landscapeAutoHideToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+            guard landscapeAutoHideToken == token,
+                  settings.landscapeAutoHideControls,
+                  !showingSettings,
+                  !showingLogs else {
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.26)) {
+                landscapeControlsVisible = false
+            }
+        }
+    }
+
+    private func showLyricsPage(_ show: Bool) {
+        lyricsPageDragOffset = 0
+        withAnimation(.easeOut(duration: show ? 0.33 : 0.28)) {
+            lyricsPageVisible = show
+        }
+        if show {
+            scheduleLyricsMetaTip()
+        } else {
+            dismissLyricsMetaTip()
+        }
+    }
+
+    private func scheduleLyricsMetaTip() {
+        guard !UserDefaults.standard.bool(forKey: Self.lyricsMetaTipShownKey) else { return }
+        let token = UUID()
+        lyricsMetaTipToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            guard lyricsMetaTipToken == token,
+                  lyricsPageVisible,
+                  !showingLyricsMetaMenu else { return }
+            UserDefaults.standard.set(true, forKey: Self.lyricsMetaTipShownKey)
+            withAnimation(.easeOut(duration: 0.18)) {
+                lyricsMetaTipVisible = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.2) {
+                guard lyricsMetaTipToken == token else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    lyricsMetaTipVisible = false
+                }
+            }
+        }
+    }
+
+    private func dismissLyricsMetaTip() {
+        lyricsMetaTipToken = UUID()
+        withAnimation(.easeOut(duration: 0.18)) {
+            lyricsMetaTipVisible = false
+        }
+    }
+
+    private func closeInAppBrowser() {
+        inAppBrowserDragOffset = 0
+        withAnimation(.easeOut(duration: 0.26)) {
+            model.closeInAppBrowser()
+        }
+    }
+
+    private func openFloatingLyrics() {
+        if model.startLyricsPictureInPicture() {
+            showingLyricsMetaMenu = false
+            return
+        }
+        floatingLyricsDragOffset = .zero
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            showingFloatingLyrics = true
+            showingLyricsMetaMenu = false
+        }
+    }
+
+    private func applyKeepScreenOn(_ enabled: Bool) {
+        #if os(iOS)
+        UIApplication.shared.isIdleTimerDisabled = enabled
+        #endif
     }
 }
 
-#Preview {
-    ContentView()
+struct PlayerBackgroundView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        let background = effectiveBackground
+        Group {
+            if backgroundShouldAnimate(background) {
+                TimelineView(.animation) { context in
+                    backgroundContent(background: background, date: context.date)
+                }
+            } else {
+                backgroundContent(background: background, date: nil)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func backgroundContent(background: AppSettings.BackgroundSettings, date: Date?) -> some View {
+        ZStack {
+            if background.mode == AppSettings.backgroundGradient, let url = model.currentTrack?.artworkURL {
+                MovingArtworkBlurLayer(
+                    url: url,
+                    blur: background.blur,
+                    opacity: 1,
+                    scale: background.blur >= 55 ? 2.55 : 2.2,
+                    date: date,
+                    reduceMotion: background.reduceMotion
+                )
+                .ignoresSafeArea()
+                AndroidArtworkDimmingGradient(brightness: background.brightness)
+                    .ignoresSafeArea()
+            } else {
+                backgroundBase(background: background, date: date)
+            }
+            if background.mode == AppSettings.backgroundVideo, let info = model.youtubeInfo {
+                YouTubeBackdropView(
+                    info: info,
+                    playerSeconds: model.youtubePlayerSeconds,
+                    playing: model.currentTrack?.playing ?? false,
+                    firstLyricSeconds: model.youtubeFirstLyricSeconds,
+                    offsetSeconds: model.youtubeOffsetSeconds,
+                    hasCaptionStartTime: info.hasCaptionStartTime,
+                    captionStartTimeSeconds: info.captionStartTimeSeconds,
+                    autoMatchedUnknownCaptionStart: info.isAutoMatchedUnknownCaptionStart,
+                    brightness: background.brightness,
+                    blur: background.blur,
+                    videoScale: background.videoScale
+                )
+                .blur(radius: youtubeBackgroundBlurRadius(background.blur))
+                .ignoresSafeArea()
+                Color.black.opacity(youtubeBackgroundDimOpacity(background.brightness))
+                    .ignoresSafeArea()
+            }
+            if background.mode != AppSettings.backgroundGradient {
+                Color.black.opacity(0.24).ignoresSafeArea()
+            }
+            if background.noise {
+                NoiseOverlay()
+                    .opacity(0.18)
+                    .ignoresSafeArea()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func backgroundBase(background: AppSettings.BackgroundSettings, date: Date?) -> some View {
+        switch background.mode {
+        case AppSettings.backgroundSolid:
+            Color(hex: background.solidColor).ignoresSafeArea()
+        default:
+            AnimatedGradientBackgroundLayer(background: background, date: date)
+            .ignoresSafeArea()
+        }
+    }
+
+    private var effectiveBackground: AppSettings.BackgroundSettings {
+        _ = settings.backgroundSettingsRevision
+        return settings.effectiveBackgroundSettings(trackKey: model.currentTrackKey)
+    }
 }
 
-#Playground {
-    _ = 1 + 2
+private func backgroundShouldAnimate(_ background: AppSettings.BackgroundSettings) -> Bool {
+    guard !background.reduceMotion else { return false }
+    return background.mode == AppSettings.backgroundGradient || background.mode == AppSettings.backgroundBlurGradient
+}
+
+private struct AnimatedGradientBackgroundLayer: View {
+    private static let blobColors = [
+        Color(red: 0.28, green: 0.25, blue: 0.49),
+        Color(red: 0.57, green: 0.33, blue: 0.51),
+        Color(red: 0.24, green: 0.37, blue: 0.51),
+        Color(red: 0.25, green: 0.45, blue: 0.40),
+        Color(red: 0.50, green: 0.23, blue: 0.33),
+        Color(red: 0.18, green: 0.30, blue: 0.48)
+    ]
+    private static let radii: [CGFloat] = [0.80, 0.70, 0.55, 0.75, 0.50, 0.90]
+
+    var background: AppSettings.BackgroundSettings
+    var date: Date?
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack {
+                Color(red: 0.08, green: 0.10, blue: 0.14)
+                ForEach(0..<Self.blobColors.count, id: \.self) { index in
+                    blob(index: index, size: size)
+                }
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.02, green: 0.03, blue: 0.07).opacity(0.45),
+                        Color(red: 0.07, green: 0.05, blue: 0.13).opacity(0.42),
+                        Color(red: 0.03, green: 0.04, blue: 0.08).opacity(0.52)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(width: size.width, height: size.height)
+            .clipped()
+        }
+    }
+
+    private func blob(index: Int, size: CGSize) -> some View {
+        let radius = max(size.width, size.height) * Self.radii[index]
+        let center = blobCenter(index: index, size: size)
+        let alpha = max(0.16, 0.35 - Double(index) * 0.025)
+        return Circle()
+            .fill(
+                RadialGradient(
+                    colors: [
+                        Self.blobColors[index].opacity(alpha),
+                        Self.blobColors[index].opacity(alpha * 0.45),
+                        .clear
+                    ],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: radius
+                )
+            )
+            .frame(width: radius * 2, height: radius * 2)
+            .position(center)
+    }
+
+    private func blobCenter(index: Int, size: CGSize) -> CGPoint {
+        let seconds = date?.timeIntervalSinceReferenceDate ?? 0
+        let speed = 0.010 + Double(index) * 0.0027
+        let phaseX = 0.83 * Double(index) + 0.71
+        let phaseY = 0.61 * Double(index) + 1.37
+        let x = animatedBackgroundValue(seconds: seconds, speed: speed, phase: phaseX, min: -0.18, max: 1.18, reduceMotion: background.reduceMotion)
+        let y = animatedBackgroundValue(seconds: seconds, speed: speed * 1.21, phase: phaseY, min: -0.18, max: 1.18, reduceMotion: background.reduceMotion)
+        return CGPoint(x: size.width * x, y: size.height * y)
+    }
+}
+
+private struct MovingArtworkBlurLayer: View {
+    var url: URL
+    var blur: Int
+    var opacity: Double
+    var scale: CGFloat = 1.34
+    var date: Date?
+    var reduceMotion: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            let transform = artworkTransform(size: proxy.size)
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Color.clear
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .scaleEffect(transform.scale)
+            .offset(transform.offset)
+            .blur(radius: max(8, CGFloat(blur) * 0.72))
+            .opacity(opacity)
+            .clipped()
+        }
+    }
+
+    private func artworkTransform(size: CGSize) -> (scale: CGFloat, offset: CGSize) {
+        let effectiveScale: CGFloat = reduceMotion ? max(1.16, scale * 0.92) : scale
+        guard !reduceMotion else {
+            return (effectiveScale, .zero)
+        }
+        let seconds = date?.timeIntervalSinceReferenceDate ?? 0
+        let maxX = max(0, (effectiveScale - 1) * size.width * 0.38)
+        let maxY = max(0, (effectiveScale - 1) * size.height * 0.38)
+        let x = maxX * (0.72 * CGFloat(sin(seconds * 0.034 + 0.71)) + 0.28 * CGFloat(sin(seconds * 0.016 + 1.93)))
+        let y = maxY * (0.70 * CGFloat(sin(seconds * 0.030 + 1.37)) + 0.30 * CGFloat(sin(seconds * 0.014 + 0.29)))
+        return (effectiveScale, CGSize(width: x, height: y))
+    }
+}
+
+private struct AndroidArtworkDimmingGradient: View {
+    var brightness: Int
+
+    var body: some View {
+        let dim = max(0, min(255, Int((214.0 - Double(brightness) * 1.28).rounded())))
+        LinearGradient(
+            stops: [
+                .init(color: Color(red: 6.0 / 255.0, green: 8.0 / 255.0, blue: 18.0 / 255.0).opacity(Double(max(50, dim - 52)) / 255.0), location: 0),
+                .init(color: Color(red: 18.0 / 255.0, green: 13.0 / 255.0, blue: 34.0 / 255.0).opacity(Double(max(68, dim - 24)) / 255.0), location: 0.52),
+                .init(color: Color(red: 7.0 / 255.0, green: 9.0 / 255.0, blue: 20.0 / 255.0).opacity(Double(max(86, dim)) / 255.0), location: 1)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
+private func animatedBackgroundValue(seconds: Double, speed: Double, phase: Double, min: CGFloat, max: CGFloat, reduceMotion: Bool) -> CGFloat {
+    if reduceMotion {
+        return (min + max) * 0.5
+    }
+    let wave = (sin(seconds * speed + phase) + 1.0) * 0.5
+    return min + (max - min) * CGFloat(wave)
+}
+
+private func youtubeBackgroundBlurRadius(_ blur: Int) -> CGFloat {
+    let effectiveBlur = min(200, max(0, blur * 2))
+    return effectiveBlur <= 0 ? 0 : min(36, CGFloat(effectiveBlur) * 0.16)
+}
+
+private func youtubeBackgroundDimOpacity(_ brightness: Int) -> Double {
+    let alpha = max(42, min(220, Int((214.0 - Double(brightness) * 1.28).rounded())))
+    return Double(alpha) / 255.0
+}
+
+private struct ToastBanner: View {
+    let message: String
+    let bottomPadding: CGFloat
+
+    var body: some View {
+        VStack {
+            Spacer(minLength: 0)
+            Text(message)
+                .font(.pretendard(14, weight: .semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 11)
+                .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.12)))
+                .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
+                .padding(.horizontal, 18)
+                .padding(.bottom, bottomPadding)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+    }
+}
+
+private struct FloatingLyricsOverlay: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @Binding var visible: Bool
+    @Binding var dragOffset: CGSize
+    var screenSize: CGSize
+    @GestureState private var gestureOffset: CGSize = .zero
+
+    var body: some View {
+        let size = stageSize
+        let liveOffset = CGSize(
+            width: dragOffset.width + gestureOffset.width,
+            height: dragOffset.height + gestureOffset.height
+        )
+        ZStack(alignment: .topTrailing) {
+            FloatingLyricsStage(size: size)
+                .environmentObject(settings)
+                .environmentObject(model)
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    visible = false
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 30, height: 30)
+                    .background(.black.opacity(0.36), in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .accessibilityLabel(settings.t("button.close"))
+        }
+        .frame(width: size.width, height: size.height)
+        .foregroundStyle(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.white.opacity(0.16)))
+        .shadow(color: .black.opacity(0.36), radius: 24, y: 14)
+        .position(x: basePosition(for: size).x + liveOffset.width, y: basePosition(for: size).y + liveOffset.height)
+        .gesture(
+            DragGesture(minimumDistance: 6)
+                .updating($gestureOffset) { value, state, _ in
+                    state = value.translation
+                }
+                .onEnded { value in
+                    let proposed = CGSize(
+                        width: dragOffset.width + value.translation.width,
+                        height: dragOffset.height + value.translation.height
+                    )
+                    dragOffset = clampedOffset(proposed, stageSize: size)
+                }
+        )
+        .accessibilityElement(children: .contain)
+    }
+
+    private var stageSize: CGSize {
+        let maxWidth = max(220, screenSize.width - 32)
+        let maxHeight = max(160, screenSize.height - 140)
+        switch AppSettings.normalizePipOrientation(settings.pipOrientation) {
+        case AppSettings.pipOrientationPortrait:
+            return aspectFit(aspect: 9.0 / 16.0, maxWidth: min(320, maxWidth), maxHeight: min(540, maxHeight))
+        case AppSettings.pipOrientationSquare:
+            let side = min(360, maxWidth, maxHeight)
+            return CGSize(width: max(220, side), height: max(220, side))
+        default:
+            return aspectFit(aspect: 16.0 / 9.0, maxWidth: min(560, maxWidth), maxHeight: min(320, maxHeight))
+        }
+    }
+
+    private func aspectFit(aspect: CGFloat, maxWidth: CGFloat, maxHeight: CGFloat) -> CGSize {
+        var width = maxWidth
+        var height = width / aspect
+        if height > maxHeight {
+            height = maxHeight
+            width = height * aspect
+        }
+        return CGSize(width: max(220, width), height: max(124, height))
+    }
+
+    private func basePosition(for stageSize: CGSize) -> CGPoint {
+        CGPoint(
+            x: screenSize.width - stageSize.width / 2 - 16,
+            y: min(
+                screenSize.height - stageSize.height / 2 - 12,
+                stageSize.height / 2 + 58
+            )
+        )
+    }
+
+    private func clampedOffset(_ offset: CGSize, stageSize: CGSize) -> CGSize {
+        let base = basePosition(for: stageSize)
+        let minX = stageSize.width / 2 + 10 - base.x
+        let maxX = screenSize.width - stageSize.width / 2 - 10 - base.x
+        let minY = stageSize.height / 2 + 10 - base.y
+        let maxY = screenSize.height - stageSize.height / 2 - 10 - base.y
+        return CGSize(
+            width: min(maxX, max(minX, offset.width)),
+            height: min(maxY, max(minY, offset.height))
+        )
+    }
+}
+
+private struct FloatingLyricsStage: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var size: CGSize
+
+    var body: some View {
+        let background = effectiveBackground
+        ZStack {
+            Color(red: 7.0 / 255.0, green: 9.0 / 255.0, blue: 16.0 / 255.0)
+            if backgroundShouldAnimate(background) {
+                TimelineView(.animation) { context in
+                    backgroundLayer(background: background, date: context.date)
+                }
+            } else {
+                backgroundLayer(background: background, date: nil)
+            }
+            Color.black.opacity(0.34)
+            foregroundLayer
+                .padding(contentPadding)
+        }
+        .frame(width: size.width, height: size.height)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private var foregroundLayer: some View {
+        if settings.pipShowArtwork {
+            switch AppSettings.normalizePipOrientation(settings.pipOrientation) {
+            case AppSettings.pipOrientationLandscape:
+                HStack(spacing: 16) {
+                    VStack(spacing: 10) {
+                        FloatingArtworkView(size: min(150, max(86, size.height * 0.42)))
+                        FloatingMetadataView(centered: true)
+                    }
+                    .frame(width: min(188, size.width * 0.38))
+                    FloatingLyricsContent()
+                }
+            case AppSettings.pipOrientationPortrait:
+                VStack(spacing: 14) {
+                    FloatingMetadataBar(artworkSize: min(84, max(58, size.width * 0.26)))
+                    Spacer(minLength: 0)
+                    FloatingLyricsContent()
+                    Spacer(minLength: 0)
+                }
+            default:
+                VStack(spacing: 14) {
+                    FloatingMetadataBar(artworkSize: min(74, max(56, size.width * 0.23)))
+                    Spacer(minLength: 0)
+                    FloatingLyricsContent()
+                    Spacer(minLength: 0)
+                }
+            }
+        } else {
+            FloatingLyricsContent()
+        }
+    }
+
+    @ViewBuilder
+    private func backgroundLayer(background: AppSettings.BackgroundSettings, date: Date?) -> some View {
+        switch background.mode {
+        case AppSettings.backgroundSolid:
+            Color(hex: background.solidColor)
+        default:
+            AnimatedGradientBackgroundLayer(background: background, date: date)
+        }
+        if background.mode == AppSettings.backgroundVideo, let info = model.youtubeInfo {
+            YouTubeBackdropView(
+                info: info,
+                playerSeconds: model.youtubePlayerSeconds,
+                playing: model.currentTrack?.playing ?? false,
+                firstLyricSeconds: model.youtubeFirstLyricSeconds,
+                offsetSeconds: model.youtubeOffsetSeconds,
+                hasCaptionStartTime: info.hasCaptionStartTime,
+                captionStartTimeSeconds: info.captionStartTimeSeconds,
+                autoMatchedUnknownCaptionStart: info.isAutoMatchedUnknownCaptionStart,
+                brightness: background.brightness,
+                blur: background.blur,
+                videoScale: background.videoScale
+            )
+            .blur(radius: youtubeBackgroundBlurRadius(background.blur))
+            Color.black.opacity(youtubeBackgroundDimOpacity(background.brightness))
+        } else if let url = model.currentTrack?.artworkURL, background.mode == AppSettings.backgroundGradient {
+            MovingArtworkBlurLayer(
+                url: url,
+                blur: background.blur,
+                opacity: 0.32,
+                date: date,
+                reduceMotion: background.reduceMotion
+            )
+        }
+        if background.noise {
+            NoiseOverlay()
+                .opacity(0.16)
+        }
+    }
+
+    private var effectiveBackground: AppSettings.BackgroundSettings {
+        _ = settings.backgroundSettingsRevision
+        return settings.effectiveBackgroundSettings(trackKey: model.currentTrackKey)
+    }
+
+    private var contentPadding: CGFloat {
+        settings.pipShowArtwork ? 18 : 16
+    }
+}
+
+private struct FloatingMetadataBar: View {
+    var artworkSize: CGFloat
+
+    var body: some View {
+        HStack(spacing: 12) {
+            FloatingArtworkView(size: artworkSize)
+            FloatingMetadataView(centered: false)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct FloatingMetadataView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var centered: Bool
+
+    var body: some View {
+        let _ = settings.typographyRevision
+        let typography = settings.typographySettings()
+        VStack(alignment: centered ? .center : .leading, spacing: 4) {
+            Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
+                .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: centered ? 18 : 17))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            Text(model.artistText.trimmed.isEmpty ? settings.t("status.waiting_spotify") : model.artistText)
+                .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: centered ? 12 : 12.5))
+                .foregroundStyle(.white.opacity(0.76))
+                .lineLimit(1)
+                .minimumScaleFactor(0.76)
+        }
+        .multilineTextAlignment(centered ? .center : .leading)
+        .shadow(color: .black.opacity(0.42), radius: 3, y: 1)
+        .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
+    }
+}
+
+private struct FloatingArtworkView: View {
+    @EnvironmentObject private var model: AppViewModel
+    var size: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.white.opacity(0.10))
+            if let url = model.currentTrack?.artworkURL {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    fallback
+                }
+            } else {
+                fallback
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.12)))
+        .shadow(color: .black.opacity(0.30), radius: 12, y: 6)
+    }
+
+    private var fallback: some View {
+        Image(systemName: "music.note")
+            .font(.system(size: max(22, size * 0.28), weight: .semibold))
+            .foregroundStyle(.white.opacity(0.56))
+    }
+}
+
+private struct FloatingLyricsContent: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        Group {
+            if model.lyricsResult.lines.isEmpty {
+                Text(model.lyricsResult.detail.trimmed.isEmpty ? settings.t("status.lyrics_waiting") : model.lyricsResult.detail)
+                    .font(.pretendard(18, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .multilineTextAlignment(textAlignment)
+                    .frame(maxWidth: .infinity, alignment: frameAlignment)
+            } else if let item = activeItem {
+                switch item {
+                case .line(_, let line):
+                    FloatingLyricsLineView(
+                        line: line,
+                        originalText: model.displayText(for: line),
+                        progress: model.progress(for: line),
+                        positionMs: model.adjustedPositionMs,
+                        alignment: settings.pipLyricsTextAlignment,
+                        sizeMultiplier: Double(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent)) / 100.0
+                    )
+                case .interlude(let info):
+                    FloatingLyricsInterludeView(
+                        info: info,
+                        showLabel: settings.interludeLabelsEnabled,
+                        alignment: settings.pipLyricsTextAlignment
+                    )
+                    .scaleEffect(Double(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent)) / 100.0)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: frameAlignment)
+    }
+
+    private var activeItem: LyricsTimelineDisplayItem? {
+        LyricsTimelineDisplayBuilder.previewItem(
+            lines: model.lyricsResult.lines,
+            positionMs: model.adjustedPositionMs,
+            trackDurationMs: model.durationMs,
+            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+        )
+    }
+
+    private var textAlignment: TextAlignment {
+        let alignment = AppSettings.normalizeLyricsAlignment(settings.pipLyricsTextAlignment)
+        return alignment == "center" ? .center : (alignment == "right" ? .trailing : .leading)
+    }
+
+    private var frameAlignment: Alignment {
+        let alignment = AppSettings.normalizeLyricsAlignment(settings.pipLyricsTextAlignment)
+        return alignment == "center" ? .center : (alignment == "right" ? .trailing : .leading)
+    }
+}
+
+private struct FloatingLyricsLineView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var line: LyricsLine
+    var originalText: String
+    var progress: Double
+    var positionMs: Int64
+    var alignment: String
+    var sizeMultiplier: Double
+
+    var body: some View {
+        let _ = settings.typographyRevision
+        let typography = settings.typographySettings()
+        let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line)
+        VStack(alignment: stackAlignment, spacing: max(3, 5 * sizeMultiplier)) {
+            originalLyricsView
+                .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier))
+            if !useVocalPartSupplements, settings.japaneseFuriganaEnabled, !line.furiganaText.trimmed.isEmpty {
+                Text(FuriganaRepository.rubyDisplayText(line.furiganaText))
+                    .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 11, multiplier: sizeMultiplier))
+                    .foregroundStyle(.white.opacity(0.70))
+                    .multilineTextAlignment(textAlignment)
+            }
+            if !useVocalPartSupplements, !line.pronunciationText.trimmed.isEmpty {
+                Text(line.pronunciationText)
+                    .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 13, multiplier: sizeMultiplier))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .multilineTextAlignment(textAlignment)
+            } else if !useVocalPartSupplements, model.lyricsSupplementPronunciationLoading {
+                floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsPronunciation, baseSize: 13)
+            }
+            if !useVocalPartSupplements, !line.translationText.trimmed.isEmpty {
+                Text(line.translationText)
+                    .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 13, multiplier: sizeMultiplier))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .multilineTextAlignment(textAlignment)
+            } else if !useVocalPartSupplements, model.lyricsSupplementTranslationLoading {
+                floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsTranslation, baseSize: 13)
+            }
+        }
+        .lineLimit(3)
+        .minimumScaleFactor(0.68)
+        .frame(maxWidth: .infinity, alignment: frameAlignment)
+        .shadow(color: .black.opacity(0.46), radius: 4, y: 2)
+    }
+
+    private var typography: AppSettings.TypographySettings {
+        _ = settings.typographyRevision
+        return settings.typographySettings()
+    }
+
+    @ViewBuilder
+    private var originalLyricsView: some View {
+        if !line.vocalParts.isEmpty {
+            VStack(alignment: stackAlignment, spacing: 3) {
+                ForEach(Array(LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).enumerated()), id: \.offset) { _, part in
+                    let partActive = positionMs >= part.startTimeMs
+                    VStack(alignment: stackAlignment, spacing: max(1, 2 * sizeMultiplier)) {
+                        SyllableKaraokeText(
+                            text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
+                            syllables: shouldRenderTimedKaraoke ? part.syllables : [],
+                            startTimeMs: part.startTimeMs,
+                            endTimeMs: part.endTimeMs,
+                            positionMs: positionMs,
+                            active: partActive,
+                            activeColor: LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors),
+                            alignment: textAlignment,
+                            inactiveOpacity: LyricSpeakerPalette.inactiveOpacity(
+                                speaker: part.speaker,
+                                distance: partActive ? 0 : 0.45
+                            ),
+                            bounceEnabled: settings.karaokeBounceEffectEnabled,
+                            bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier)
+                        )
+                        if LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line) {
+                            floatingVocalPartSupplements(part, active: partActive)
+                        }
+                    }
+                }
+            }
+        } else if shouldRenderTimedKaraoke {
+            SyllableKaraokeText(
+                text: originalText.isEmpty ? " " : originalText,
+                syllables: line.syllables,
+                startTimeMs: line.startTimeMs,
+                endTimeMs: line.endTimeMs,
+                positionMs: positionMs,
+                active: true,
+                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
+                alignment: textAlignment,
+                bounceEnabled: settings.karaokeBounceEffectEnabled,
+                bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier)
+            )
+        } else if settings.syncedLyricsKaraokeAnimationEnabled {
+            SyllableKaraokeText(
+                text: originalText.isEmpty ? " " : originalText,
+                syllables: [],
+                startTimeMs: line.startTimeMs,
+                endTimeMs: line.endTimeMs,
+                positionMs: positionMs,
+                active: true,
+                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
+                alignment: textAlignment,
+                inactiveOpacity: 0.42,
+                bounceEnabled: settings.karaokeBounceEffectEnabled,
+                bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: 22, multiplier: sizeMultiplier),
+                syntheticTimingEnabled: true
+            )
+        } else {
+            Text(originalText.isEmpty ? " " : originalText)
+                .foregroundStyle(LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors))
+                .multilineTextAlignment(textAlignment)
+        }
+    }
+
+    @ViewBuilder
+    private func floatingVocalPartSupplements(_ part: LyricsLine.VocalPart, active: Bool) -> some View {
+        let speakerColor = LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors)
+        if settings.japaneseFuriganaEnabled, !part.furiganaText.trimmed.isEmpty {
+            Text(FuriganaRepository.rubyDisplayText(part.furiganaText))
+                .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 10, multiplier: sizeMultiplier))
+                .foregroundStyle(speakerColor.opacity(active ? 0.64 : 0.34))
+                .multilineTextAlignment(textAlignment)
+        }
+        if !part.pronunciationText.trimmed.isEmpty {
+            Text(part.pronunciationText)
+                .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 12, multiplier: sizeMultiplier))
+                .foregroundStyle(speakerColor.opacity(active ? 0.76 : 0.38))
+                .multilineTextAlignment(textAlignment)
+        } else if model.lyricsSupplementPronunciationLoading {
+            floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsPronunciation, baseSize: 12)
+        }
+        if !part.translationText.trimmed.isEmpty {
+            Text(part.translationText)
+                .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 12, multiplier: sizeMultiplier))
+                .foregroundStyle(speakerColor.opacity(active ? 0.68 : 0.34))
+                .multilineTextAlignment(textAlignment)
+        } else if model.lyricsSupplementTranslationLoading {
+            floatingSupplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsTranslation, baseSize: 12)
+        }
+    }
+
+    private func floatingSupplementReserveText(_ text: String, slotId: String, baseSize: CGFloat) -> some View {
+        Text(text)
+            .font(typography.font(slotId: slotId, baseSize: baseSize, multiplier: sizeMultiplier))
+            .foregroundStyle(.clear)
+            .multilineTextAlignment(textAlignment)
+            .accessibilityHidden(true)
+    }
+
+    private var textAlignment: TextAlignment {
+        let normalized = AppSettings.normalizeLyricsAlignment(alignment)
+        return normalized == "center" ? .center : (normalized == "right" ? .trailing : .leading)
+    }
+
+    private var stackAlignment: HorizontalAlignment {
+        let normalized = AppSettings.normalizeLyricsAlignment(alignment)
+        return normalized == "center" ? .center : (normalized == "right" ? .trailing : .leading)
+    }
+
+    private var frameAlignment: Alignment {
+        let normalized = AppSettings.normalizeLyricsAlignment(alignment)
+        return normalized == "center" ? .center : (normalized == "right" ? .trailing : .leading)
+    }
+
+    private var shouldRenderTimedKaraoke: Bool {
+        !settings.karaokeDataAsLineSynced && line.syllables.contains { $0.endTimeMs > $0.startTimeMs }
+            || !settings.karaokeDataAsLineSynced && line.vocalParts.contains { part in
+                part.syllables.contains { $0.endTimeMs > $0.startTimeMs }
+            }
+    }
+
+    private var speakerColors: AppSettings.SpeakerColorSettings {
+        _ = settings.speakerColorRevision
+        return settings.speakerColorSettings()
+    }
+}
+
+private struct FloatingLyricsInterludeView: View {
+    @EnvironmentObject private var settings: AppSettings
+    var info: InterludeInfo
+    var showLabel: Bool
+    var alignment: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            if normalizedAlignment == "right" { Spacer(minLength: 0) }
+            interludeBars
+            if showLabel {
+                Text(label)
+                    .font(.pretendard(15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+            }
+            interludeBars
+            if normalizedAlignment != "right" { Spacer(minLength: 0) }
+        }
+        .frame(maxWidth: .infinity)
+        .shadow(color: .black.opacity(0.42), radius: 3, y: 1)
+        .accessibilityLabel(label)
+    }
+
+    private var interludeBars: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<4, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(.white.opacity(0.48 + Double(index) * 0.08))
+                    .frame(width: 4, height: CGFloat(9 + index * 3))
+            }
+        }
+    }
+
+    private var normalizedAlignment: String {
+        AppSettings.normalizeLyricsAlignment(alignment)
+    }
+
+    private var label: String {
+        switch info.kind {
+        case "prelude": return settings.t("interlude.prelude")
+        case "postlude": return settings.t("interlude.postlude")
+        default: return settings.t("interlude.break")
+        }
+    }
+}
+
+struct NoiseOverlay: View {
+    var body: some View {
+        Canvas { context, size in
+            var generator = SeededRandomNumberGenerator(seed: UInt64(size.width.rounded()) << 32 ^ UInt64(size.height.rounded()) ^ 0x9e3779b97f4a7c15)
+            let count = min(1400, max(280, Int(size.width * size.height / 620)))
+            for _ in 0..<count {
+                let x = Double.random(in: 0...Double(max(1, size.width)), using: &generator)
+                let y = Double.random(in: 0...Double(max(1, size.height)), using: &generator)
+                let alpha = Double.random(in: 0.05...0.20, using: &generator)
+                let rect = CGRect(x: x, y: y, width: 1, height: 1)
+                context.fill(Path(rect), with: .color(.white.opacity(alpha)))
+            }
+        }
+        .blendMode(.overlay)
+        .allowsHitTesting(false)
+    }
+}
+
+struct SeededRandomNumberGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed == 0 ? 0x123456789abcdef : seed
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9e3779b97f4a7c15
+        var value = state
+        value = (value ^ (value >> 30)) &* 0xbf58476d1ce4e5b9
+        value = (value ^ (value >> 27)) &* 0x94d049bb133111eb
+        return value ^ (value >> 31)
+    }
+}
+
+struct HeaderBar: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @Binding var showingSettings: Bool
+    @Binding var showingLogs: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image("IvLyricsOverlaySymbol")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 36, height: 36)
+                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("ivLyrics")
+                    .font(.pretendard(21, weight: .bold))
+                Text(model.status.text(settings: settings))
+                    .font(.pretendard(12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer()
+            Button {
+                showingLogs = true
+            } label: {
+                Image(systemName: "terminal")
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .foregroundStyle(.white)
+    }
+}
+
+struct ManualTrackPanel: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                ArtworkView()
+                VStack(spacing: 8) {
+                    TextField(settings.t("field.title"), text: $model.inputTitle)
+                        .textInputAutocapitalization(.words)
+                    TextField(settings.t("field.artist"), text: $model.inputArtist)
+                        .textInputAutocapitalization(.words)
+                    TextField(settings.t("field.album"), text: $model.inputAlbum)
+                        .textInputAutocapitalization(.words)
+                }
+                .frame(minWidth: 0, maxWidth: .infinity)
+                .layoutPriority(1)
+                .textFieldStyle(PlayerTextFieldStyle())
+            }
+            .frame(maxWidth: .infinity)
+
+            HStack(spacing: 8) {
+                TextField(settings.t("field.duration_hint"), text: $model.inputDuration)
+                    .keyboardType(.numbersAndPunctuation)
+                    .frame(width: 104)
+                TextField(settings.t("field.spotify_id"), text: $model.inputSpotifyId)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .frame(minWidth: 0, maxWidth: .infinity)
+                Button {
+                    model.resolveSpotifyMetadata()
+                } label: {
+                    Image(systemName: model.resolvingSpotifyMetadata ? "hourglass" : "link.badge.plus")
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!model.canResolveSpotifyMetadata || model.resolvingSpotifyMetadata)
+            }
+            .frame(maxWidth: .infinity)
+            .textFieldStyle(PlayerTextFieldStyle())
+
+            HStack(spacing: 8) {
+                TextField(settings.t("field.isrc"), text: $model.inputIsrc)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                Button {
+                    model.applyManualTrack()
+                } label: {
+                    Label(settings.t("button.load"), systemImage: "arrow.down.circle")
+                        .frame(minWidth: 92)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.hasTrackInput)
+            }
+            .frame(maxWidth: .infinity)
+            .textFieldStyle(PlayerTextFieldStyle())
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Button {
+                        model.spotifyLivePolling ? model.stopSpotifyLivePolling() : model.connectSpotifyUserAndStartPolling()
+                    } label: {
+                        Label(
+                            model.spotifyLivePolling ? settings.t("spotify.live.connected") : settings.t("spotify.live.connect"),
+                            systemImage: model.spotifyLivePolling ? "dot.radiowaves.left.and.right" : "person.crop.circle.badge.plus"
+                        )
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button {
+                        Task { await model.refreshSpotifyPlayback(loadLyricsIfNeeded: true) }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!model.spotifyUserConnected)
+                }
+                Text(spotifyLiveStatusText)
+                    .font(.pretendard(12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(1)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(.black.opacity(0.26), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.09)))
+    }
+
+    private var spotifyLiveStatusText: String {
+        if model.spotifyAppRemoteConnected {
+            return settings.t("spotify.source.app_remote")
+        }
+        if !model.spotifyDeviceName.trimmed.isEmpty {
+            return model.spotifyDeviceName
+        }
+        return model.spotifyUserConnected ? settings.t("spotify.source.web_api") : settings.t("spotify.source.off")
+    }
+}
+
+private struct LyricsPageOverlay: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @Binding var visible: Bool
+    @Binding var dragOffset: CGFloat
+    @Binding var showingMetaMenu: Bool
+    @Binding var selectedMetaMenuTab: LyricsMetaMenuTab
+    @Binding var metaTipVisible: Bool
+    var screenHeight: CGFloat
+
+    var body: some View {
+        ZStack {
+            Color(red: 6.0 / 255.0, green: 7.0 / 255.0, blue: 12.0 / 255.0)
+                .opacity(54.0 / 255.0)
+                .ignoresSafeArea()
+            VStack(spacing: 0) {
+                header
+                    .padding(.top, 10)
+                    .padding(.horizontal, 24)
+                    .contentShape(Rectangle())
+                    .gesture(dismissDragGesture)
+
+                LyricsTimelineScrollView(
+                    topPadding: 16,
+                    bottomPadding: 28,
+                    horizontalPadding: 24
+                )
+            }
+            .background(.black.opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: dragOffset > 1 ? 28 : 0, style: .continuous))
+            .offset(y: dragOffset)
+            .animation(.easeOut(duration: 0.21), value: dragOffset)
+        }
+        .ignoresSafeArea(edges: .bottom)
+    }
+
+    private var header: some View {
+        let _ = settings.typographyRevision
+        let typography = settings.typographySettings()
+        return VStack(spacing: 12) {
+            Button {
+                dismiss()
+            } label: {
+                Capsule()
+                    .fill(.white.opacity(0.32))
+                    .frame(width: 42, height: 3)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
+                    .font(typography.font(slotId: AppSettings.typoLyricsHeaderTitle, baseSize: 19))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(model.artistText.trimmed.isEmpty ? " " : model.artistText)
+                        .font(typography.font(slotId: AppSettings.typoLyricsHeaderArtist, baseSize: 14))
+                        .foregroundStyle(.white.opacity(0.74))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                        .layoutPriority(1)
+                    Spacer(minLength: 8)
+                    if model.status == .loading {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    }
+                    LyricsMetaStrip(inline: true) {
+                        openMetaMenu(.language)
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(2)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                model.openSpotifyForCurrentTrack()
+            }
+            .onLongPressGesture {
+                openMetaMenu(.language)
+            }
+
+            if metaTipVisible && !showingMetaMenu {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        metaTipVisible = false
+                    }
+                } label: {
+                    Text(settings.t("lyrics.menu_tip"))
+                        .font(.pretendard(12, weight: .semibold))
+                        .lineSpacing(2)
+                        .multilineTextAlignment(.leading)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: 278, alignment: .leading)
+                        .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var dismissDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                dragOffset = max(0, value.translation.height)
+            }
+            .onEnded { value in
+                let shouldClose = dragOffset > screenHeight * 0.30
+                    || (value.predictedEndTranslation.height > 160 && dragOffset > 42)
+                if shouldClose {
+                    dismiss()
+                } else {
+                    withAnimation(.easeOut(duration: 0.21)) {
+                        dragOffset = 0
+                    }
+                }
+            }
+    }
+
+    private func dismiss() {
+        dragOffset = 0
+        withAnimation(.easeOut(duration: 0.28)) {
+            visible = false
+        }
+    }
+
+    private func openMetaMenu(_ tab: LyricsMetaMenuTab) {
+        selectedMetaMenuTab = tab
+        metaTipVisible = false
+        withAnimation(.easeOut(duration: 0.18)) {
+            showingMetaMenu = true
+        }
+    }
+}
+
+private struct InAppBrowserOverlay: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Binding var visible: Bool
+    @Binding var dragOffset: CGFloat
+    var url: URL
+    var screenHeight: CGFloat
+    @State private var loading = true
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.22)
+                .ignoresSafeArea()
+            VStack(spacing: 0) {
+                InAppBrowserWebView(
+                    initialURL: url,
+                    colorScheme: colorScheme,
+                    loading: $loading
+                )
+                .background(browserBackground)
+                .overlay {
+                    if loading {
+                        InAppBrowserLoadingView()
+                            .transition(.opacity)
+                    }
+                }
+            }
+            .background(browserBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(alignment: .top) {
+                handle
+            }
+            .padding(.top, sheetTopMargin)
+            .offset(y: dragOffset)
+            .animation(.easeOut(duration: 0.21), value: dragOffset)
+        }
+        .ignoresSafeArea(edges: .bottom)
+    }
+
+    private var handle: some View {
+        Button {
+            dismiss()
+        } label: {
+            Capsule()
+                .fill(handleColor)
+                .frame(width: 42, height: 3)
+                .padding(.top, 12)
+                .padding(.bottom, 19)
+                .frame(width: 110, height: 34)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .gesture(dismissDragGesture)
+    }
+
+    private var dismissDragGesture: some Gesture {
+        DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                dragOffset = max(0, value.translation.height)
+            }
+            .onEnded { value in
+                let shouldClose = dragOffset > screenHeight * 0.24
+                    || (value.predictedEndTranslation.height > 150 && dragOffset > 36)
+                if shouldClose {
+                    dismiss()
+                } else {
+                    withAnimation(.easeOut(duration: 0.21)) {
+                        dragOffset = 0
+                    }
+                }
+            }
+    }
+
+    private var browserBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.055, green: 0.067, blue: 0.086)
+            : Color(red: 0.984, green: 0.984, blue: 0.988)
+    }
+
+    private var handleColor: Color {
+        colorScheme == .dark
+            ? Color.white.opacity(0.34)
+            : Color.black.opacity(0.30)
+    }
+
+    private var sheetTopMargin: CGFloat {
+        18
+    }
+
+    private func dismiss() {
+        dragOffset = 0
+        withAnimation(.easeOut(duration: 0.26)) {
+            visible = false
+        }
+    }
+}
+
+private struct InAppBrowserLoadingView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var pulse = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                skeleton(width: 118, height: 16, radius: 8, strong: true)
+                Spacer()
+                skeleton(width: 40, height: 34, radius: 17)
+                skeleton(width: 76, height: 34, radius: 17)
+            }
+            .frame(height: 44)
+
+            VStack(spacing: 16) {
+                HStack(spacing: 16) {
+                    skeleton(width: 78, height: 78, radius: 39, strong: true)
+                    VStack(alignment: .leading, spacing: 10) {
+                        skeleton(width: 142, height: 24, radius: 10, strong: true)
+                        skeleton(width: 190, height: 14, radius: 7)
+                        skeleton(width: 98, height: 14, radius: 7)
+                    }
+                    Spacer()
+                }
+                HStack(spacing: 10) {
+                    skeleton(width: nil, height: 54, radius: 14)
+                    skeleton(width: nil, height: 54, radius: 14)
+                }
+            }
+            .padding(20)
+            .background(surfaceColor, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+            HStack(spacing: 8) {
+                skeleton(width: 92, height: 34, radius: 17, strong: true)
+                skeleton(width: 82, height: 34, radius: 17)
+                Spacer()
+            }
+
+            ForEach(0..<4, id: \.self) { index in
+                HStack(spacing: 12) {
+                    skeleton(width: 44, height: 44, radius: 14)
+                    VStack(alignment: .leading, spacing: 9) {
+                        skeleton(width: index % 2 == 0 ? 184 : 138, height: 17, radius: 8, strong: true)
+                        skeleton(width: index % 3 == 0 ? 126 : 162, height: 13, radius: 7)
+                    }
+                    Spacer()
+                    skeleton(width: 34, height: 34, radius: 17)
+                }
+                .padding(14)
+                .background(surfaceColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 28)
+        .padding(.bottom, 18)
+        .background(backgroundColor)
+        .opacity(pulse ? 1 : 0.58)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.86).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+    }
+
+    private func skeleton(width: CGFloat?, height: CGFloat, radius: CGFloat, strong: Bool = false) -> some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(strong ? skeletonStrongColor : skeletonColor)
+            .frame(width: width, height: height)
+            .frame(maxWidth: width == nil ? .infinity : nil)
+    }
+
+    private var backgroundColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.055, green: 0.067, blue: 0.086)
+            : Color(red: 0.984, green: 0.984, blue: 0.988)
+    }
+
+    private var surfaceColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.098, green: 0.110, blue: 0.133)
+            : .white
+    }
+
+    private var skeletonColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.176, green: 0.192, blue: 0.227)
+            : Color(red: 0.925, green: 0.933, blue: 0.945)
+    }
+
+    private var skeletonStrongColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.227, green: 0.247, blue: 0.282)
+            : Color(red: 0.878, green: 0.890, blue: 0.910)
+    }
+}
+
+#if os(iOS)
+private struct InAppBrowserWebView: UIViewRepresentable {
+    var initialURL: URL
+    var colorScheme: ColorScheme
+    @Binding var loading: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(initialURL: initialURL, colorScheme: colorScheme, loading: $loading)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.backgroundColor = browserUIColor
+        webView.scrollView.backgroundColor = browserUIColor
+        webView.allowsBackForwardNavigationGestures = true
+        webView.load(URLRequest(url: initialURL))
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.colorScheme = colorScheme
+        if context.coordinator.initialURL != initialURL {
+            context.coordinator.initialURL = initialURL
+            webView.load(URLRequest(url: initialURL))
+        }
+        webView.backgroundColor = browserUIColor
+        webView.scrollView.backgroundColor = browserUIColor
+    }
+
+    private var browserUIColor: UIColor {
+        colorScheme == .dark
+            ? UIColor(red: 14 / 255, green: 17 / 255, blue: 22 / 255, alpha: 1)
+            : UIColor(red: 251 / 255, green: 251 / 255, blue: 252 / 255, alpha: 1)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var initialURL: URL
+        var colorScheme: ColorScheme
+        @Binding var loading: Bool
+
+        init(initialURL: URL, colorScheme: ColorScheme, loading: Binding<Bool>) {
+            self.initialURL = initialURL
+            self.colorScheme = colorScheme
+            _loading = loading
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            loading = true
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            injectProfileChrome(into: webView, url: webView.url)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                self.loading = false
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            loading = false
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            loading = false
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard navigationAction.targetFrame?.isMainFrame != false,
+                  let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+            if shouldOpenExternally(url) {
+                UIApplication.shared.open(url)
+                decisionHandler(.cancel)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
+
+        private func shouldOpenExternally(_ url: URL) -> Bool {
+            let scheme = url.scheme?.lowercased() ?? ""
+            if url.absoluteString.hasPrefix("about:") || url.absoluteString.hasPrefix("data:") {
+                return false
+            }
+            guard scheme == "http" || scheme == "https" else {
+                return false
+            }
+            if normalizedBrowserURL(url) == normalizedBrowserURL(initialURL) {
+                return false
+            }
+            if sameLyricsProfileNavigation(url, initialURL) {
+                return false
+            }
+            return true
+        }
+
+        private func injectProfileChrome(into webView: WKWebView, url: URL?) {
+            guard let url, isLyricsProfileURL(url) else { return }
+            let theme = colorScheme == .dark ? "dark" : "light"
+            let css = """
+            .login-btn,.credit[href*="github.com/ivLis-Studio/ivLyrics"],.theme-toggle,.topbar .handle,.topbar .handle .dot{display:none!important;}
+            html,body,.page,.shell,.profile,.tracks,.track,*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none!important;}
+            img,a{-webkit-user-drag:none!important;user-drag:none!important;}
+            .page{padding-bottom:28px!important;}
+            """
+            let js = """
+            (function(){
+            var theme=\(Self.jsString(theme));
+            try{localStorage.setItem('ivlyrics_profile_theme',theme);}catch(error){}
+            document.documentElement.dataset.theme=theme;
+            document.documentElement.style.colorScheme=theme;
+            var id='ivlyrics-ios-profile-style';
+            var old=document.getElementById(id);
+            if(old){old.remove();}
+            var style=document.createElement('style');
+            style.id=id;
+            style.textContent=\(Self.jsString(css));
+            (document.head||document.documentElement).appendChild(style);
+            var block=function(event){event.preventDefault();return false;};
+            document.addEventListener('contextmenu',block,true);
+            document.addEventListener('selectstart',block,true);
+            document.addEventListener('dragstart',block,true);
+            document.oncontextmenu=function(){return false;};
+            })();
+            """
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+
+        private func isLyricsProfileURL(_ url: URL) -> Bool {
+            (url.host?.lowercased() == "lyrics.ivl.is") && url.path.hasPrefix("/@")
+        }
+
+        private func sameLyricsProfileNavigation(_ nextURL: URL, _ initialURL: URL) -> Bool {
+            let nextPath = lyricsProfilePath(nextURL)
+            let initialPath = lyricsProfilePath(initialURL)
+            return !nextPath.isEmpty && nextPath == initialPath
+        }
+
+        private func lyricsProfilePath(_ url: URL) -> String {
+            let scheme = url.scheme?.lowercased() ?? ""
+            guard (scheme == "http" || scheme == "https"),
+                  url.host?.lowercased() == "lyrics.ivl.is" else {
+                return ""
+            }
+            var path = url.path
+            while path.hasSuffix("/") && path.count > 1 {
+                path.removeLast()
+            }
+            guard path.hasPrefix("/@"), path.dropFirst(2).contains("/") == false else {
+                return ""
+            }
+            return path
+        }
+
+        private func normalizedBrowserURL(_ url: URL) -> String {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.fragment = nil
+            var value = (components?.url ?? url).absoluteString
+            while value.hasSuffix("/") {
+                value.removeLast()
+            }
+            return value
+        }
+
+        private static func jsString(_ value: String) -> String {
+            guard let data = try? JSONSerialization.data(withJSONObject: [value]),
+                  let encoded = String(data: data, encoding: .utf8) else {
+                return "\"\""
+            }
+            return String(encoded.dropFirst().dropLast())
+        }
+    }
+}
+#else
+private struct InAppBrowserWebView: View {
+    var initialURL: URL
+    var colorScheme: ColorScheme
+    @Binding var loading: Bool
+
+    var body: some View {
+        Text(initialURL.absoluteString)
+            .onAppear { loading = false }
+    }
+}
+#endif
+
+private struct LandscapePlayerPane: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var controlsVisible: Bool
+    var centered: Bool
+    var containerSize: CGSize
+
+    var body: some View {
+        let _ = settings.typographyRevision
+        let typography = settings.typographySettings()
+        VStack(spacing: 10) {
+            Spacer(minLength: controlsVisible ? 4 : 16)
+            VStack(spacing: 8) {
+                LandscapeArtworkView(size: artworkSize)
+                    .scaleEffect(controlsVisible ? 1 : 1.08)
+                VStack(spacing: 4) {
+                    Text(model.titleText.trimmed.isEmpty ? settings.t("label.no_current_track") : model.titleText)
+                        .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 23))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.76)
+                    Text(model.artistText.trimmed.isEmpty ? " " : model.artistText)
+                        .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: 15))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
+                .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
+            }
+            .offset(y: controlsVisible ? 0 : 42)
+
+            if controlsVisible {
+                LandscapeTransportControls()
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            Spacer(minLength: controlsVisible ? 2 : 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .foregroundStyle(.white)
+        .animation(.easeInOut(duration: controlsVisible ? 0.18 : 0.26), value: controlsVisible)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var artworkSize: CGFloat {
+        let tablet = containerSize.width > 900
+        let heightFraction: CGFloat = tablet ? 0.53 : 0.45
+        let widthFraction: CGFloat = centered ? (tablet ? 0.28 : 0.30) : (tablet ? 0.28 : 0.23)
+        let rawSize = min(containerSize.height * heightFraction, containerSize.width * widthFraction)
+        let minimum: CGFloat = tablet ? 190 : 132
+        return min(max(minimum, rawSize), centered ? 280 : 240)
+    }
+}
+
+private struct LandscapeArtworkView: View {
+    @EnvironmentObject private var model: AppViewModel
+    var size: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 20)
+                .fill(.white.opacity(0.10))
+            if let url = model.currentTrack?.artworkURL {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Image(systemName: "music.note")
+                        .font(.system(size: max(34, size * 0.22), weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.50))
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+            } else {
+                Image(systemName: "music.note")
+                    .font(.system(size: max(34, size * 0.22), weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.50))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipped()
+        .shadow(color: .black.opacity(0.32), radius: 18, y: 10)
+        .artworkSwipeActions(size: size)
+    }
+}
+
+private struct LandscapeTransportControls: View {
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        VStack(spacing: 5) {
+            PlayerProgressBar(
+                positionMs: model.nowPositionMs,
+                durationMs: model.durationMs,
+                height: 22,
+                onSeek: model.seek(toPlaybackPositionMs:)
+            )
+
+            HStack {
+                Text(timeText(model.nowPositionMs))
+                Spacer()
+                Text("-" + timeText(max(0, model.durationMs - model.nowPositionMs)))
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.white.opacity(0.74))
+
+            HStack(spacing: 13) {
+                Button { model.skipToPreviousTrack() } label: {
+                    Image(systemName: "backward.end.fill")
+                        .font(.system(size: 22, weight: .semibold))
+                        .frame(width: 54, height: 54)
+                }
+                Button { model.togglePlayback() } label: {
+                    Image(systemName: model.currentTrack?.playing == true ? "pause.fill" : "play.fill")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 62, height: 62)
+                        .background(.white, in: Circle())
+                }
+                Button { model.skipToNextTrack() } label: {
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 22, weight: .semibold))
+                        .frame(width: 54, height: 54)
+                }
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 2)
+    }
+
+    private func timeText(_ ms: Int64) -> String {
+        let total = max(0, Int(ms / 1000))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+private struct PlayerProgressBar: View {
+    var positionMs: Int64
+    var durationMs: Int64
+    var height: CGFloat = 28
+    var onSeek: (Int64) -> Void
+
+    @State private var dragPositionMs: Int64?
+
+    private let trackStroke: CGFloat = 3.6
+    private let thumbRadius: CGFloat = 5.0
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(1, geometry.size.width)
+            let track = trackRange(width: width)
+            Canvas { context, size in
+                let centerY = size.height * 0.5
+                let endX = track.start + (track.end - track.start) * CGFloat(progress)
+                var basePath = Path()
+                basePath.move(to: CGPoint(x: track.start, y: centerY))
+                basePath.addLine(to: CGPoint(x: track.end, y: centerY))
+                context.stroke(
+                    basePath,
+                    with: .color(.white.opacity(66.0 / 255.0)),
+                    style: StrokeStyle(lineWidth: trackStroke, lineCap: .round)
+                )
+
+                var progressPath = Path()
+                progressPath.move(to: CGPoint(x: track.start, y: centerY))
+                progressPath.addLine(to: CGPoint(x: endX, y: centerY))
+                context.stroke(
+                    progressPath,
+                    with: .color(.white.opacity(217.0 / 255.0)),
+                    style: StrokeStyle(lineWidth: trackStroke, lineCap: .round)
+                )
+
+                var thumbPath = Path()
+                thumbPath.addEllipse(in: CGRect(
+                    x: endX - thumbRadius,
+                    y: centerY - thumbRadius,
+                    width: thumbRadius * 2,
+                    height: thumbRadius * 2
+                ))
+                context.fill(thumbPath, with: .color(.white.opacity(242.0 / 255.0)))
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard canSeek else { return }
+                        dragPositionMs = position(for: value.location.x, width: width)
+                    }
+                    .onEnded { value in
+                        guard canSeek else {
+                            dragPositionMs = nil
+                            return
+                        }
+                        let target = position(for: value.location.x, width: width)
+                        dragPositionMs = nil
+                        onSeek(target)
+                    }
+            )
+        }
+        .frame(height: height)
+        .opacity(canSeek ? 1 : 0.58)
+        .focusable(canSeek)
+        .onKeyPress(keys: [.leftArrow, .rightArrow, .return], phases: [.down, .repeat]) { press in
+            handleKeyPress(press)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityValue("\(timeText(displayPositionMs)) / \(timeText(durationMs))")
+        .accessibilityAdjustableAction { direction in
+            guard canSeek else { return }
+            switch direction {
+            case .increment:
+                seekBy(5_000)
+            case .decrement:
+                seekBy(-5_000)
+            default:
+                break
+            }
+        }
+    }
+
+    private var canSeek: Bool {
+        durationMs > 0
+    }
+
+    private var displayPositionMs: Int64 {
+        clamp(dragPositionMs ?? positionMs)
+    }
+
+    private var progress: Double {
+        guard durationMs > 0 else { return 0 }
+        return max(0, min(1, Double(displayPositionMs) / Double(durationMs)))
+    }
+
+    private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
+        guard canSeek else { return .ignored }
+        switch press.key {
+        case .leftArrow:
+            seekBy(press.modifiers.contains(.shift) ? -30_000 : -5_000)
+            return .handled
+        case .rightArrow:
+            seekBy(press.modifiers.contains(.shift) ? 30_000 : 5_000)
+            return .handled
+        case .return:
+            onSeek(displayPositionMs)
+            return .handled
+        default:
+            return .ignored
+        }
+    }
+
+    private func seekBy(_ deltaMs: Int64) {
+        onSeek(clamp(displayPositionMs + deltaMs))
+    }
+
+    private func position(for x: CGFloat, width: CGFloat) -> Int64 {
+        let track = trackRange(width: max(1, width))
+        let fraction = track.end <= track.start ? 0 : max(0, min(1, (x - track.start) / (track.end - track.start)))
+        return clamp(Int64((Double(durationMs) * Double(fraction)).rounded()))
+    }
+
+    private func trackRange(width: CGFloat) -> (start: CGFloat, end: CGFloat) {
+        let horizontalInset = thumbRadius + max(1, trackStroke * 0.25)
+        let start = min(horizontalInset, width * 0.5)
+        let end = max(start, width - horizontalInset)
+        return (start, end)
+    }
+
+    private func clamp(_ value: Int64) -> Int64 {
+        if durationMs > 0 {
+            return max(0, min(durationMs, value))
+        }
+        return max(0, value)
+    }
+
+    private func timeText(_ ms: Int64) -> String {
+        let total = max(0, Int(ms / 1000))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+private struct LandscapeCommandBar: View {
+    @EnvironmentObject private var settings: AppSettings
+    @Binding var showingSettings: Bool
+
+    var body: some View {
+        Button {
+            showingSettings = true
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 23, weight: .bold))
+                .frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .accessibilityLabel(settings.t("settings.title"))
+    }
+}
+
+private struct LandscapeLyricsPane: View {
+    var body: some View {
+        LyricsTimelineScrollView(
+            topPadding: 6,
+            bottomPadding: 6,
+            trailingPadding: 8
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct ArtworkView: View {
+    @EnvironmentObject private var model: AppViewModel
+    var size: CGFloat = 88
+    var cornerRadius: CGFloat = 8
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .fill(.white.opacity(0.10))
+            if let url = model.currentTrack?.artworkURL {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Image(systemName: "music.note")
+                        .font(.title2)
+                        .foregroundStyle(.white.opacity(0.50))
+                }
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+            } else {
+                Image(systemName: "music.note")
+                    .font(.title2)
+                    .foregroundStyle(.white.opacity(0.50))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipped()
+        .artworkSwipeActions(size: size)
+    }
+}
+
+private struct ArtworkSwipeActionsModifier: ViewModifier {
+    @EnvironmentObject private var model: AppViewModel
+    @State private var swipeOffset: CGFloat = 0
+    @State private var isDragging = false
+
+    var size: CGFloat
+
+    func body(content: Content) -> some View {
+        let maxOffset = max(26, size * 0.12)
+        content
+            .offset(x: swipeOffset)
+            .rotationEffect(.degrees(Double(swipeOffset / max(maxOffset, 1)) * 1.6))
+            .animation(.easeOut(duration: 0.15), value: swipeOffset)
+            .onLongPressGesture {
+                performLongPressHaptic()
+                model.showTmiForCurrentTrack(bypassCache: false)
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 16)
+                    .onChanged { value in
+                        let dx = value.translation.width
+                        let dy = value.translation.height
+                        guard isDragging || (abs(dx) > 16 && abs(dx) > abs(dy) * 1.15) else {
+                            return
+                        }
+                        isDragging = true
+                        swipeOffset = max(-maxOffset, min(maxOffset, dx * 0.16))
+                    }
+                    .onEnded { value in
+                        defer { settle() }
+                        guard isDragging else { return }
+                        let dx = value.translation.width
+                        let predictedDx = value.predictedEndTranslation.width
+                        let quickSwipe = abs(predictedDx - dx) > max(70, size * 0.22)
+                        let shouldSwitch = abs(dx) > size * 0.18 || quickSwipe
+                        guard shouldSwitch else { return }
+                        if dx < 0 {
+                            model.skipToNextTrack()
+                        } else {
+                            model.skipToPreviousTrack()
+                        }
+                    }
+            )
+    }
+
+    private func settle() {
+        isDragging = false
+        swipeOffset = 0
+    }
+
+    private func performLongPressHaptic() {
+#if os(iOS)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+#endif
+    }
+}
+
+private extension View {
+    func artworkSwipeActions(size: CGFloat) -> some View {
+        modifier(ArtworkSwipeActionsModifier(size: size))
+    }
+}
+
+private struct TmiSheetView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    private var track: TrackSnapshot? {
+        model.tmiTrack ?? model.currentTrack
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.52)
+                    .ignoresSafeArea()
+                    .onTapGesture { dismissDialog() }
+
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+
+                    ScrollView {
+                        content
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .frame(height: tmiBodyHeight(geometry.size.height))
+                    .padding(.top, 14)
+
+                    HStack(spacing: 8) {
+                        Button(settings.t("tmi.regenerate")) {
+                            model.regenerateTmiForCurrentTrack()
+                        }
+                        .androidDebugButton()
+                        .disabled(model.tmiLoading)
+                        .opacity(model.tmiLoading ? 0.52 : 1)
+
+                        Button(settings.t("button.close")) {
+                            dismissDialog()
+                        }
+                        .androidDebugButton()
+                    }
+                    .padding(.top, 14)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
+                .foregroundStyle(.white)
+                .frame(maxWidth: min(430, max(300, geometry.size.width - 32)))
+                .background(
+                    Color(red: 18.0 / 255.0, green: 20.0 / 255.0, blue: 30.0 / 255.0),
+                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                )
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private func tmiBodyHeight(_ screenHeight: CGFloat) -> CGFloat {
+        min(460, max(220, screenHeight * 0.54))
+    }
+
+    private func dismissDialog() {
+        withAnimation(.easeOut(duration: 0.16)) {
+            model.tmiPresented = false
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.white.opacity(0.10))
+                if let url = track?.artworkURL {
+                    AsyncImage(url: url) { image in
+                        image.resizable().scaledToFill()
+                    } placeholder: {
+                        Image(systemName: "music.note")
+                            .foregroundStyle(.white.opacity(0.58))
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    Image(systemName: "music.note")
+                        .foregroundStyle(.white.opacity(0.58))
+                }
+            }
+            .frame(width: 56, height: 56)
+            .clipped()
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(settings.t("tmi.title"))
+                    .font(.pretendard(11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.67))
+                    .lineLimit(1)
+                Text(track?.title.trimmed.isEmpty == false ? track!.title : settings.t("label.no_current_track"))
+                    .font(.pretendard(17, weight: .bold))
+                    .lineLimit(1)
+                    .padding(.top, 6)
+                Text(track?.artist.trimmed.isEmpty == false ? track!.artist : " ")
+                    .font(.pretendard(13))
+                    .foregroundStyle(.white.opacity(0.80))
+                    .lineLimit(1)
+                    .padding(.top, 5)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                dismissDialog()
+            } label: {
+                Text("×")
+                    .font(.pretendard(25))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .frame(width: 40, height: 40)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(settings.t("button.close"))
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if model.tmiLoading {
+            HStack(spacing: 12) {
+                ProgressView()
+                    .tint(.white)
+                Text(settings.t("tmi.loading"))
+                    .font(.pretendard(13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(28.0 / 255.0), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else if !model.tmiError.trimmed.isEmpty {
+            VStack(alignment: .leading, spacing: 9) {
+                Label(settings.t("tmi.error_fetch"), systemImage: "exclamationmark.triangle")
+                    .font(.subheadline.weight(.semibold))
+                Text(model.tmiError)
+                    .font(.pretendard(13))
+                    .foregroundStyle(.white.opacity(0.70))
+            }
+            .foregroundStyle(.red)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        } else if let info = model.tmiInfo, info.hasContent {
+            tmiInfoContent(info)
+        } else {
+            Text(settings.t("tmi.no_data"))
+                .font(.pretendard(13))
+                .foregroundStyle(.white.opacity(0.68))
+                .frame(maxWidth: .infinity, minHeight: 140)
+        }
+    }
+
+    private func tmiInfoContent(_ info: AiLyricsRepository.TmiInfo) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if !info.description.isEmpty {
+                Text(info.description)
+                    .font(.pretendard(14))
+                    .lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            if !info.trivia.isEmpty {
+                Text(settings.t("tmi.did_you_know"))
+                    .font(.pretendard(14, weight: .bold))
+                ForEach(Array(info.trivia.enumerated()), id: \.offset) { _, value in
+                    Text(value)
+                        .font(.pretendard(13))
+                        .lineSpacing(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            }
+
+            if !info.confidence.isEmpty {
+                Text(settings.tf("tmi.confidence_format", info.confidence))
+                    .font(.pretendard(11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+
+            sourceGroup(title: settings.t("tmi.verified_sources"), sources: info.verifiedSources)
+            sourceGroup(title: settings.t("tmi.related_sources"), sources: info.relatedSources)
+            sourceGroup(title: settings.t("tmi.other_sources"), sources: info.otherSources)
+        }
+    }
+
+    @ViewBuilder
+    private func sourceGroup(title: String, sources: [AiLyricsRepository.TmiSource]) -> some View {
+        if !sources.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.pretendard(14, weight: .bold))
+                ForEach(sources, id: \.self) { source in
+                    if let url = URL(string: source.url) {
+                        Link(destination: url) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "link")
+                                    .font(.caption.weight(.bold))
+                                Text(source.displayTitle)
+                                    .font(.pretendard(13, weight: .semibold))
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                Image(systemName: "arrow.up.right")
+                                    .font(.caption.weight(.bold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct TransportPanel: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        let _ = settings.typographyRevision
+        let typography = settings.typographySettings()
+        VStack(spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.titleText.trimmed.isEmpty ? settings.t("label.no_current_track") : model.titleText)
+                        .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 21))
+                        .lineLimit(1)
+                    Text(model.artistText.trimmed.isEmpty ? " " : model.artistText)
+                        .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: 15))
+                        .foregroundStyle(.white.opacity(0.70))
+                        .lineLimit(1)
+                }
+                Spacer()
+                Text(timeText(model.nowPositionMs) + " / " + timeText(model.durationMs))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.66))
+            }
+            PlayerProgressBar(
+                positionMs: model.nowPositionMs,
+                durationMs: model.durationMs,
+                height: 28,
+                onSeek: model.seek(toPlaybackPositionMs:)
+            )
+            HStack(spacing: 14) {
+                Button { model.skipToPreviousTrack() } label: {
+                    Image(systemName: "backward.end.fill")
+                        .frame(width: 40, height: 36)
+                }
+                Button { model.togglePlayback() } label: {
+                    Image(systemName: model.currentTrack?.playing == true ? "pause.fill" : "play.fill")
+                        .font(.title3.weight(.bold))
+                        .frame(width: 52, height: 40)
+                }
+                .buttonStyle(.borderedProminent)
+                Button { model.skipToNextTrack() } label: {
+                    Image(systemName: "forward.end.fill")
+                        .frame(width: 40, height: 36)
+                }
+                Spacer()
+                if model.hasBluetoothAudioDevice {
+                    Text(model.bluetoothAudioDeviceName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(.bordered)
+
+            VStack(spacing: 6) {
+                compactOffsetRow(
+                    title: settings.t("lyrics.sync.title"),
+                    value: model.trackOffsetMs,
+                    decrement: { model.adjustTrackOffsetMs(-100) },
+                    increment: { model.adjustTrackOffsetMs(100) }
+                )
+                compactOffsetRow(
+                    title: settings.t("lyrics.bluetooth_sync.title"),
+                    value: model.bluetoothOffsetMs,
+                    enabled: model.hasBluetoothAudioDevice,
+                    decrement: { model.adjustBluetoothOffsetMs(-100) },
+                    increment: { model.adjustBluetoothOffsetMs(100) }
+                )
+                compactOffsetRow(
+                    title: settings.t("lyrics.video_sync.title"),
+                    value: model.videoOffsetMs,
+                    decrement: { model.adjustVideoOffsetMs(-100) },
+                    increment: { model.adjustVideoOffsetMs(100) }
+                )
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(12)
+        .foregroundStyle(.white)
+        .background(.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.09)))
+    }
+
+    private func compactOffsetRow(
+        title: String,
+        value: Int,
+        enabled: Bool = true,
+        decrement: @escaping () -> Void,
+        increment: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.68))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 4)
+            OffsetStepper(title: title, value: value, decrement: decrement, increment: increment)
+        }
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.45)
+    }
+
+    private func timeText(_ ms: Int64) -> String {
+        let total = max(0, Int(ms / 1000))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+struct OffsetStepper: View {
+    var title: String
+    var value: Int
+    var decrement: () -> Void
+    var increment: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(action: decrement) { Image(systemName: "minus") }
+            Text(formatSignedMs(value))
+                .font(.caption.monospacedDigit())
+                .frame(width: 64)
+            Button(action: increment) { Image(systemName: "plus") }
+        }
+        .accessibilityLabel(title)
+    }
+
+    private func formatSignedMs(_ offsetMs: Int) -> String {
+        offsetMs > 0 ? "+\(offsetMs)ms" : "\(offsetMs)ms"
+    }
+}
+
+struct BluetoothSyncOffsetControls: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        DetailedOffsetControls(
+            title: settings.t("lyrics.bluetooth_sync.title"),
+            subtitle: scopeText,
+            help: settings.t("lyrics.bluetooth_sync.help"),
+            value: model.bluetoothOffsetMs,
+            resetTitle: settings.t("lyrics.bluetooth_sync.reset"),
+            contentOpacity: model.hasBluetoothAudioDevice ? 1 : 0.45,
+            adjust: { model.adjustBluetoothOffsetMs($0) },
+            reset: { model.setBluetoothOffsetMs(0, notify: true) }
+        )
+    }
+
+    private var scopeText: String {
+        model.hasBluetoothAudioDevice
+            ? settings.tf("lyrics.bluetooth_sync.device_scope", model.bluetoothAudioDeviceName)
+            : settings.t("lyrics.bluetooth_sync.no_device")
+    }
+}
+
+struct DetailedOffsetControls: View {
+    var title: String
+    var subtitle: String? = nil
+    var help: String
+    var value: Int
+    var resetTitle: String
+    var contentOpacity: Double = 1
+    var adjust: (Int) -> Void
+    var reset: () -> Void
+
+    private let negativeSteps = [-100, -50, -10]
+    private let positiveSteps = [10, 50, 100]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(help)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text(formatSignedMs(value))
+                .font(.title3.monospacedDigit().weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            offsetButtonRow(negativeSteps)
+            offsetButtonRow(positiveSteps)
+            Button(resetTitle) {
+                reset()
+            }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity)
+        }
+        .opacity(contentOpacity)
+    }
+
+    private func offsetButtonRow(_ steps: [Int]) -> some View {
+        HStack(spacing: 8) {
+            ForEach(steps, id: \.self) { delta in
+                Button(formatSignedMs(delta)) {
+                    adjust(delta)
+                }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    private func formatSignedMs(_ offsetMs: Int) -> String {
+        offsetMs > 0 ? "+\(offsetMs)ms" : "\(offsetMs)ms"
+    }
+}
+
+struct MainLyricPreviewPanel: View {
+    private static let emptyLyricsPreviewVisibleSeconds: TimeInterval = 3
+
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var chromeless = false
+    @State private var emptyLyricsPreviewKey = ""
+    @State private var hiddenEmptyLyricsPreviewKey = ""
+    @State private var emptyLyricsPreviewToken = UUID()
+
+    var body: some View {
+        let previewItems = AppSettings.normalizePreviewItems(settings.previewItems)
+        Group {
+            if previewItems != AppSettings.previewItemNone {
+                let rows = previewRows(previewItems: previewItems)
+                if !rows.isEmpty {
+                    VStack(spacing: 5) {
+                        ForEach(rows) { row in
+                            MainLyricPreviewRowView(row: row, positionMs: model.adjustedPositionMs)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: rows.count > 1 ? 88 : 58, alignment: .center)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .foregroundStyle(.white)
+                    .background(.black.opacity(chromeless ? 0 : 0.22), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(chromeless ? 0 : 0.08)))
+                }
+            }
+        }
+        .onAppear {
+            updateEmptyLyricsPreviewTimer(for: emptyLyricsPreviewCandidateKey)
+        }
+        .onChange(of: emptyLyricsPreviewCandidateKey) { _, key in
+            updateEmptyLyricsPreviewTimer(for: key)
+        }
+        .onDisappear {
+            resetEmptyLyricsPreviewTimer()
+        }
+    }
+
+    private func previewRows(previewItems: Int) -> [MainLyricPreviewRow] {
+        if model.lyricsResult.lines.isEmpty {
+            return emptyPreviewRows()
+        }
+        guard let entry = LyricsTimelineDisplayBuilder.previewItem(
+            lines: model.lyricsResult.lines,
+            positionMs: model.adjustedPositionMs,
+            trackDurationMs: model.durationMs,
+            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+        ) else {
+            return [MainLyricPreviewRow(text: settings.t("status.lyrics_waiting"), primary: true)]
+        }
+
+        switch entry {
+        case .interlude(let info):
+            return [MainLyricPreviewRow.interlude(interludeLabel(info.kind))]
+        case .line(_, let line):
+            return previewRows(for: line, previewItems: previewItems)
+        }
+    }
+
+    private func emptyPreviewRows() -> [MainLyricPreviewRow] {
+        let detail = model.lyricsResult.detail.trimmed
+        if model.status == .loading || isLoadingLyricsPreview(detail) {
+            return [.loading(settings.t("status.lyrics_loading"))]
+        }
+        if hiddenEmptyLyricsPreviewKey == buildEmptyLyricsPreviewKey(detail: detail) {
+            return []
+        }
+        return [MainLyricPreviewRow(text: detail.isEmpty ? settings.t("status.lyrics_waiting") : detail, primary: true)]
+    }
+
+    private func previewRows(for line: LyricsLine, previewItems: Int) -> [MainLyricPreviewRow] {
+        var rows: [MainLyricPreviewRow] = []
+        let original = originalPreviewText(line)
+        if AppSettings.previewItemEnabled(previewItems, AppSettings.previewItemOriginal) {
+            addPreviewRow(&rows, text: original.text, rubyText: original.rubyText, syllables: original.syllables, kind: original.kind, speaker: line.speaker, slotId: AppSettings.typoMainPreviewOriginal)
+        }
+        if AppSettings.previewItemEnabled(previewItems, AppSettings.previewItemPronunciation) {
+            addSupplementPreviewRow(
+                &rows,
+                text: line.pronunciationText,
+                generatingText: settings.t("loading.pronunciation"),
+                fallback: original,
+                speaker: line.speaker,
+                generating: model.lyricsSupplementPronunciationLoading,
+                slotId: AppSettings.typoMainPreviewPronunciation
+            )
+        }
+        if AppSettings.previewItemEnabled(previewItems, AppSettings.previewItemTranslation) {
+            addSupplementPreviewRow(
+                &rows,
+                text: line.translationText,
+                generatingText: settings.t("loading.translation"),
+                fallback: original,
+                speaker: line.speaker,
+                generating: model.lyricsSupplementTranslationLoading,
+                slotId: AppSettings.typoMainPreviewTranslation
+            )
+        }
+        if rows.isEmpty {
+            addPreviewRow(&rows, text: original.text, rubyText: original.rubyText, syllables: original.syllables, kind: original.kind, speaker: line.speaker, slotId: AppSettings.typoMainPreviewOriginal)
+        }
+        return rows
+    }
+
+    private func addSupplementPreviewRow(
+        _ rows: inout [MainLyricPreviewRow],
+        text: String,
+        generatingText: String,
+        fallback: MainLyricPreviewText,
+        speaker: String,
+        generating: Bool,
+        slotId: String
+    ) {
+        var value = text.trimmed
+        var rubyText = ""
+        var syllables: [LyricsLine.Syllable] = []
+        var kind = "vocal"
+        if value.isEmpty {
+            if generating {
+                value = generatingText
+            } else {
+                value = fallback.text
+                rubyText = fallback.rubyText
+                syllables = fallback.syllables
+                kind = fallback.kind
+            }
+        }
+        if samePreviewTextAlreadyShown(rows, value) {
+            return
+        }
+        addPreviewRow(&rows, text: value, rubyText: rubyText, syllables: syllables, kind: kind, speaker: speaker, slotId: slotId)
+    }
+
+    private func addPreviewRow(
+        _ rows: inout [MainLyricPreviewRow],
+        text: String,
+        rubyText: String,
+        syllables: [LyricsLine.Syllable],
+        kind: String,
+        speaker: String,
+        slotId: String
+    ) {
+        let value = text.trimmed
+        guard !value.isEmpty else { return }
+        rows.append(MainLyricPreviewRow(
+            text: value,
+            rubyText: rubyText,
+            primary: rows.isEmpty,
+            syllables: syllables,
+            kind: kind,
+            speaker: speaker,
+            slotId: slotId
+        ))
+    }
+
+    private func samePreviewTextAlreadyShown(_ rows: [MainLyricPreviewRow], _ text: String) -> Bool {
+        let value = text.trimmed
+        return rows.contains { $0.text == value }
+    }
+
+    private func originalPreviewText(_ line: LyricsLine) -> MainLyricPreviewText {
+        if !hasMultiplePreviewVocalParts(line), !line.text.trimmed.isEmpty {
+            let text = line.text.trimmed
+            return MainLyricPreviewText(
+                text: text,
+                rubyText: previewLineRubyText(line),
+                syllables: previewKaraokeSyllables(for: text, syllables: line.syllables),
+                kind: line.kind
+            )
+        }
+
+        var textParts: [String] = []
+        var rubyParts: [String] = []
+        var syllables: [LyricsLine.Syllable] = []
+        var syllablesUsable = true
+        for part in line.vocalParts {
+            let partText = part.text.trimmed
+            guard !partText.isEmpty else { continue }
+            if !textParts.isEmpty {
+                syllables.append(spaceSyllable(previous: syllables, nextPart: part))
+            }
+            textParts.append(partText)
+            rubyParts.append(previewPartRubyText(part, fallbackText: partText))
+            let partSyllables = previewKaraokeSyllables(for: partText, syllables: part.syllables)
+            if partSyllables.isEmpty {
+                syllablesUsable = false
+            }
+            syllables.append(contentsOf: partSyllables)
+        }
+        if textParts.isEmpty {
+            return MainLyricPreviewText(text: "♪", rubyText: "", syllables: [], kind: line.kind)
+        }
+        return MainLyricPreviewText(
+            text: textParts.joined(separator: " "),
+            rubyText: rubyParts.joined(separator: " "),
+            syllables: syllablesUsable ? syllables : [],
+            kind: line.kind
+        )
+    }
+
+    private func previewLineRubyText(_ line: LyricsLine) -> String {
+        settings.japaneseFuriganaEnabled ? line.furiganaText.trimmed : ""
+    }
+
+    private func previewPartRubyText(_ part: LyricsLine.VocalPart, fallbackText: String) -> String {
+        guard settings.japaneseFuriganaEnabled else { return fallbackText }
+        let rubyText = part.furiganaText.trimmed
+        return rubyText.isEmpty ? fallbackText : rubyText
+    }
+
+    private func previewKaraokeSyllables(for text: String, syllables: [LyricsLine.Syllable]) -> [LyricsLine.Syllable] {
+        let value = text.trimmed
+        guard !value.isEmpty, !syllables.isEmpty else { return [] }
+        let usable = syllables.filter { !$0.text.isEmpty }
+        guard usable.map(\.text).joined().trimmed == value else { return [] }
+        return trimPreviewSyllables(usable)
+    }
+
+    private func trimPreviewSyllables(_ syllables: [LyricsLine.Syllable]) -> [LyricsLine.Syllable] {
+        var start = 0
+        var end = syllables.count - 1
+        while start <= end, isWhitespaceSyllable(syllables[start]) {
+            start += 1
+        }
+        while end >= start, isWhitespaceSyllable(syllables[end]) {
+            end -= 1
+        }
+        guard start <= end else { return [] }
+        return Array(syllables[start...end])
+    }
+
+    private func isWhitespaceSyllable(_ syllable: LyricsLine.Syllable) -> Bool {
+        syllable.text.isEmpty || syllable.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+    }
+
+    private func spaceSyllable(previous: [LyricsLine.Syllable], nextPart: LyricsLine.VocalPart) -> LyricsLine.Syllable {
+        let start = previous.last?.endTimeMs ?? nextPart.startTimeMs
+        let end = max(start, nextPart.startTimeMs)
+        return LyricsLine.Syllable(text: " ", startTimeMs: start, endTimeMs: end)
+    }
+
+    private func hasMultiplePreviewVocalParts(_ line: LyricsLine) -> Bool {
+        line.vocalParts.filter { !$0.text.trimmed.isEmpty }.count > 1
+    }
+
+    private func interludeLabel(_ kind: String) -> String {
+        guard settings.interludeLabelsEnabled else { return "" }
+        switch kind {
+        case "prelude": return settings.t("interlude.prelude")
+        case "postlude": return settings.t("interlude.postlude")
+        default: return settings.t("interlude.break")
+        }
+    }
+
+    private func isLoadingLyricsPreview(_ detail: String) -> Bool {
+        let value = detail.lowercased()
+        return value.contains("loading") || value.contains("불러")
+    }
+
+    private var emptyLyricsPreviewCandidateKey: String {
+        let previewItems = AppSettings.normalizePreviewItems(settings.previewItems)
+        guard previewItems != AppSettings.previewItemNone,
+              model.lyricsResult.lines.isEmpty else {
+            return ""
+        }
+        let detail = model.lyricsResult.detail.trimmed
+        guard model.status != .loading, !isLoadingLyricsPreview(detail) else {
+            return ""
+        }
+        return buildEmptyLyricsPreviewKey(detail: detail)
+    }
+
+    private func buildEmptyLyricsPreviewKey(detail: String) -> String {
+        "\(model.currentTrackKey)\n\(detail.trimmed)"
+    }
+
+    private func updateEmptyLyricsPreviewTimer(for key: String) {
+        guard !key.isEmpty else {
+            resetEmptyLyricsPreviewTimer()
+            return
+        }
+        guard key != emptyLyricsPreviewKey else { return }
+        emptyLyricsPreviewKey = key
+        hiddenEmptyLyricsPreviewKey = ""
+        scheduleEmptyLyricsPreviewClear(for: key)
+    }
+
+    private func scheduleEmptyLyricsPreviewClear(for key: String) {
+        let token = UUID()
+        emptyLyricsPreviewToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.emptyLyricsPreviewVisibleSeconds) {
+            guard emptyLyricsPreviewToken == token,
+                  emptyLyricsPreviewCandidateKey == key else {
+                return
+            }
+            hiddenEmptyLyricsPreviewKey = key
+        }
+    }
+
+    private func resetEmptyLyricsPreviewTimer() {
+        if emptyLyricsPreviewKey.isEmpty,
+           hiddenEmptyLyricsPreviewKey.isEmpty {
+            return
+        }
+        emptyLyricsPreviewToken = UUID()
+        emptyLyricsPreviewKey = ""
+        hiddenEmptyLyricsPreviewKey = ""
+    }
+}
+
+private struct MainLyricPreviewText {
+    var text: String
+    var rubyText: String
+    var syllables: [LyricsLine.Syllable]
+    var kind: String
+}
+
+private enum MainLyricPreviewRowType: String {
+    case text
+    case interlude
+    case loading
+}
+
+private struct MainLyricPreviewRow: Identifiable {
+    var text: String
+    var rubyText: String = ""
+    var primary: Bool
+    var syllables: [LyricsLine.Syllable] = []
+    var kind: String = "vocal"
+    var speaker: String = ""
+    var type: MainLyricPreviewRowType = .text
+    var slotId: String = AppSettings.typoMainPreviewOriginal
+
+    var id: String {
+        "\(type.rawValue)-\(slotId)-\(primary)-\(text)-\(rubyText)-\(syllables.count)"
+    }
+
+    static func interlude(_ text: String) -> MainLyricPreviewRow {
+        MainLyricPreviewRow(text: text, primary: true, type: .interlude)
+    }
+
+    static func loading(_ text: String) -> MainLyricPreviewRow {
+        MainLyricPreviewRow(text: text, primary: true, type: .loading)
+    }
+}
+
+private struct MainLyricPreviewRowView: View {
+    @EnvironmentObject private var settings: AppSettings
+    var row: MainLyricPreviewRow
+    var positionMs: Int64
+
+    var body: some View {
+        switch row.type {
+        case .interlude:
+            HStack(spacing: 10) {
+                MainLyricPreviewInterludeIcon()
+                if !row.text.trimmed.isEmpty {
+                    Text(row.text)
+                        .font(typography.font(slotId: row.slotId, baseSize: 17))
+                        .foregroundStyle(.white.opacity(0.88))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        case .loading:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+                Text(row.text)
+                    .font(typography.font(slotId: row.slotId, baseSize: 17))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        case .text:
+            VStack(spacing: 1) {
+                if settings.japaneseFuriganaEnabled, row.rubyText.contains("<ruby>") {
+                    Text(FuriganaRepository.rubyDisplayText(row.rubyText))
+                        .font(typography.font(slotId: row.slotId, baseSize: row.primary ? 9 : 8))
+                        .foregroundStyle(.white.opacity(row.primary ? 0.64 : 0.48))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                previewTextView
+                    .font(typography.font(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private var typography: AppSettings.TypographySettings {
+        _ = settings.typographyRevision
+        return settings.typographySettings()
+    }
+
+    @ViewBuilder
+    private var previewTextView: some View {
+        if shouldRenderTimedKaraoke {
+            SyllableKaraokeText(
+                text: row.text,
+                syllables: row.syllables,
+                startTimeMs: row.syllables.first?.startTimeMs ?? 0,
+                endTimeMs: row.syllables.last?.endTimeMs ?? 0,
+                positionMs: positionMs,
+                active: true,
+                activeColor: LyricSpeakerPalette.activeColor(speaker: row.speaker, settings: speakerColors),
+                alignment: .center,
+                bounceEnabled: settings.karaokeBounceEffectEnabled,
+                bounceTextSize: typography.scaledSize(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5)
+            )
+        } else {
+            Text(row.text)
+                .foregroundStyle(row.primary ? .white.opacity(0.96) : .white.opacity(0.78))
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    private var shouldRenderTimedKaraoke: Bool {
+        !settings.karaokeDataAsLineSynced && row.syllables.contains { $0.endTimeMs > $0.startTimeMs }
+    }
+
+    private var speakerColors: AppSettings.SpeakerColorSettings {
+        _ = settings.speakerColorRevision
+        return settings.speakerColorSettings()
+    }
+}
+
+private struct MainLyricPreviewInterludeIcon: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<4, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(.white.opacity(0.62))
+                    .frame(width: 4, height: CGFloat(10 + index * 4))
+            }
+        }
+    }
+}
+
+private struct LyricsMetaStrip: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var inline = false
+    var onOpenMenu: () -> Void = {}
+
+    @ViewBuilder
+    var body: some View {
+        if inline {
+            if !visibleContributors.isEmpty {
+                contributorRow
+                    .contentShape(Rectangle())
+                    .onLongPressGesture {
+                        onOpenMenu()
+                    }
+            }
+        } else if hasContent {
+            VStack(alignment: .leading, spacing: 5) {
+                if !sourceStatusText.isEmpty {
+                    Text(sourceStatusText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.64))
+                        .lineLimit(2)
+                }
+                if !visibleContributors.isEmpty {
+                    contributorRow
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.05)))
+            .contentShape(Rectangle())
+            .onLongPressGesture {
+                onOpenMenu()
+            }
+        }
+    }
+
+    private var hasContent: Bool {
+        !sourceStatusText.isEmpty || !visibleContributors.isEmpty
+    }
+
+    private var sourceStatusText: String {
+        let provider = model.lyricsResult.providerLabel.trimmed
+        let detail = model.lyricsResult.detail.trimmed
+        if provider.isEmpty {
+            return model.status == .idle && model.currentTrack == nil && model.lyricsResult.lines.isEmpty ? "" : detail
+        }
+        return detail.isEmpty ? provider : "\(provider) / \(detail)"
+    }
+
+    private var visibleContributors: [LyricsResult.SyncContributor] {
+        Array(model.lyricsResult.contributors.prefix(3))
+    }
+
+    private var remainingContributorCount: Int {
+        max(0, model.lyricsResult.contributors.count - visibleContributors.count)
+    }
+
+    private var contributorRow: some View {
+        let parts = syncCreditFormatParts
+        return HStack(spacing: 0) {
+            Text(parts.prefix)
+                .foregroundStyle(.white.opacity(0.45))
+            ForEach(Array(visibleContributors.enumerated()), id: \.offset) { index, contributor in
+                if index > 0 {
+                    Text(", ")
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+                contributorNameView(contributor)
+            }
+            if remainingContributorCount > 0 {
+                Text(" +\(remainingContributorCount)")
+                    .foregroundStyle(.white.opacity(0.56))
+            }
+            Text(parts.suffix)
+                .foregroundStyle(.white.opacity(0.45))
+        }
+        .font(.caption2)
+        .lineLimit(1)
+    }
+
+    private var syncCreditFormatParts: (prefix: String, suffix: String) {
+        let format = settings.t("lyrics.credit_sync_by_format")
+        guard let range = format.range(of: "%s") else {
+            return (format.isEmpty ? "" : format + " ", "")
+        }
+        return (String(format[..<range.lowerBound]), String(format[range.upperBound...]))
+    }
+
+    @ViewBuilder
+    private func contributorNameView(_ contributor: LyricsResult.SyncContributor) -> some View {
+        if contributor.profileAvailable, !contributor.userHash.trimmed.isEmpty {
+            Button {
+                Task {
+                    await model.openSyncContributorProfile(contributor)
+                }
+            } label: {
+                Text(contributor.name)
+                    .foregroundStyle(.white.opacity(0.76))
+            }
+            .buttonStyle(.plain)
+        } else {
+            Text(contributor.name)
+                .foregroundStyle(.white.opacity(0.56))
+        }
+    }
+}
+
+struct LyricsTimelineView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        let position = model.adjustedPositionMs
+        let items = LyricsTimelineDisplayBuilder.items(
+            lines: model.lyricsResult.lines,
+            positionMs: position,
+            trackDurationMs: model.durationMs,
+            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+        )
+        let activeItemID = LyricsTimelineDisplayBuilder.previewItem(
+            lines: model.lyricsResult.lines,
+            positionMs: position,
+            trackDurationMs: model.durationMs,
+            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+        )?.id
+        let activeDisplayIndex = activeItemID.flatMap { id in
+            items.firstIndex { $0.id == id }
+        } ?? max(0, items.firstIndex { item in
+            if case .line(let index, _) = item {
+                return index == model.activeLineIndex
+            }
+            return false
+        } ?? 0)
+        LazyVStack(spacing: 32) {
+            if model.lyricsResult.lines.isEmpty {
+                Text(model.lyricsResult.detail)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                ForEach(Array(items.enumerated()), id: \.element.id) { displayIndex, item in
+                    let itemActive = item.id == activeItemID
+                    let displayDistance = abs(Double(displayIndex - activeDisplayIndex))
+                    Group {
+                        switch item {
+                        case .line(let index, let line):
+                            LyricsLineView(
+                                lineIndex: index,
+                                line: line,
+                                originalText: model.displayText(for: line),
+                                active: itemActive || (activeItemID == nil && index == model.activeLineIndex),
+                                displayDistance: displayDistance,
+                                progress: model.progress(for: line),
+                                positionMs: position,
+                                alignment: settings.lyricsTextAlignment
+                            )
+                        case .interlude(let info):
+                            LyricsInterludeView(
+                                info: info,
+                                active: itemActive,
+                                displayDistance: displayDistance,
+                                showLabel: settings.interludeLabelsEnabled,
+                                alignment: settings.lyricsTextAlignment
+                            )
+                        }
+                    }
+                    .id(item.id)
+                }
+            }
+        }
+    }
+}
+
+private struct LyricsTimelineScrollView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @State private var autoScrollPaused = false
+    @State private var autoScrollPauseUntil = Date.distantPast
+    @State private var lastScrolledTargetID: String?
+
+    var topPadding: CGFloat = 0
+    var bottomPadding: CGFloat = 0
+    var horizontalPadding: CGFloat = 0
+    var trailingPadding: CGFloat = 0
+
+    private let resumeTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+    private static let manualScrollHoldSeconds: TimeInterval = 4.0
+
+    var body: some View {
+        let targetID = activeTargetID
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        if hasScrollableLyrics {
+                            Color.clear
+                                .frame(height: edgeInset(for: geometry.size.height))
+                        }
+                        LyricsTimelineView()
+                            .padding(.top, topPadding)
+                            .padding(.bottom, bottomPadding)
+                            .padding(.leading, horizontalPadding)
+                            .padding(.trailing, max(horizontalPadding, trailingPadding))
+                        if hasScrollableLyrics {
+                            Color.clear
+                            .frame(height: edgeInset(for: geometry.size.height))
+                        }
+                    }
+                }
+                .mask {
+                    if hasScrollableLyrics {
+                        LyricsTimelineEdgeFadeMask(height: geometry.size.height)
+                    } else {
+                        Rectangle().fill(.white)
+                    }
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 8)
+                        .onChanged { _ in
+                            pauseAutoScroll()
+                        }
+                        .onEnded { _ in
+                            pauseAutoScroll()
+                        }
+                )
+                .onAppear {
+                    scrollToTarget(targetID, proxy: proxy, animated: false, force: true)
+                }
+                .onChange(of: targetID) { _, nextID in
+                    if nextID == nil {
+                        lastScrolledTargetID = nil
+                    }
+                    guard !autoScrollPaused else { return }
+                    scrollToTarget(nextID, proxy: proxy, animated: true)
+                }
+                .onReceive(resumeTimer) { _ in
+                    guard autoScrollPaused, Date() >= autoScrollPauseUntil else { return }
+                    autoScrollPaused = false
+                    scrollToTarget(activeTargetID, proxy: proxy, animated: true, force: true)
+                }
+            }
+        }
+    }
+
+    private var hasScrollableLyrics: Bool {
+        !model.lyricsResult.lines.isEmpty
+    }
+
+    private var activeTargetID: String? {
+        LyricsTimelineDisplayBuilder.scrollTargetID(
+            lines: model.lyricsResult.lines,
+            positionMs: model.adjustedPositionMs,
+            trackDurationMs: model.durationMs,
+            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled,
+            vocalPartAnchorsEnabled: !settings.karaokeDataAsLineSynced
+        )
+    }
+
+    private func edgeInset(for height: CGFloat) -> CGFloat {
+        max(24, height * 0.38)
+    }
+
+    private func pauseAutoScroll() {
+        autoScrollPaused = true
+        autoScrollPauseUntil = Date().addingTimeInterval(Self.manualScrollHoldSeconds)
+    }
+
+    private func scrollToTarget(_ targetID: String?, proxy: ScrollViewProxy, animated: Bool, force: Bool = false) {
+        guard let targetID else { return }
+        guard force || lastScrolledTargetID != targetID else { return }
+        lastScrolledTargetID = targetID
+        let action = {
+            proxy.scrollTo(targetID, anchor: .center)
+        }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.30), action)
+        } else {
+            action()
+        }
+    }
+}
+
+private struct LyricsTimelineEdgeFadeMask: View {
+    var height: CGFloat
+
+    var body: some View {
+        let topFadeHeight = min(height * 0.28, 150)
+        let bottomFadeHeight = min(34, height * 0.12)
+        let centerHeight = max(0, height - topFadeHeight - bottomFadeHeight)
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [.clear, .black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: max(0, topFadeHeight))
+
+            Rectangle()
+                .fill(.black)
+                .frame(height: centerHeight)
+
+            LinearGradient(
+                colors: [.black, .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: max(0, bottomFadeHeight))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+enum LyricsTimelineDisplayItem: Identifiable {
+    case line(index: Int, line: LyricsLine)
+    case interlude(InterludeInfo)
+
+    var id: String {
+        switch self {
+        case .line(let index, let line):
+            return LyricsTimelineDisplayBuilder.lineID(index: index, line: line)
+        case .interlude(let info):
+            return "interlude-\(info.kind)-\(info.startTimeMs)-\(info.endTimeMs)"
+        }
+    }
+}
+
+struct InterludeInfo {
+    var startTimeMs: Int64
+    var endTimeMs: Int64
+    var kind: String
+    var automatic: Bool
+}
+
+enum LyricsTimelineDisplayBuilder {
+    private static let interludeMinDurationMs: Int64 = 500
+    private static let trailingInterludeDelayMs: Int64 = 3_500
+    private static let vocalPartCenterThreshold = 4
+
+    static func lineID(index: Int, line: LyricsLine) -> String {
+        "line-\(index)-\(line.id)"
+    }
+
+    static func vocalPartTargetID(lineIndex: Int, line: LyricsLine, partIndex: Int) -> String {
+        "\(lineID(index: lineIndex, line: line))-part-\(partIndex)"
+    }
+
+    static func orderedVocalParts(_ parts: [LyricsLine.VocalPart]) -> [LyricsLine.VocalPart] {
+        parts.filter { $0.role == "lead" } + parts.filter { $0.role != "lead" }
+    }
+
+    static func vocalPartDisplayText(_ part: LyricsLine.VocalPart) -> String {
+        part.text.trimmed.isEmpty ? part.syllables.map(\.text).joined() : part.text
+    }
+
+    static func shouldUseVocalPartSupplements(_ line: LyricsLine) -> Bool {
+        let parts = orderedVocalParts(line.vocalParts)
+        return hasVocalPartSupplements(parts) || displayableVocalPartCount(parts) > 1
+    }
+
+    static func supplementPlaceholderText(_ line: LyricsLine) -> String {
+        let text = line.text.trimmed
+        if !text.isEmpty { return text }
+        let parts = orderedVocalParts(line.vocalParts)
+            .map(supplementPlaceholderText)
+            .map(\.trimmed)
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? " " : parts.joined(separator: " ")
+    }
+
+    static func supplementPlaceholderText(_ part: LyricsLine.VocalPart) -> String {
+        let text = vocalPartDisplayText(part).trimmed
+        return text.isEmpty ? " " : text
+    }
+
+    static func items(
+        lines: [LyricsLine],
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> [LyricsTimelineDisplayItem] {
+        guard !lines.isEmpty else { return [] }
+        var result: [LyricsTimelineDisplayItem] = []
+        let count = lines.count
+        for index in lines.indices {
+            let line = lines[index]
+            if let marker = markerInterludeInfo(lines: lines, line: line, index: index, count: count),
+               contains(marker, positionMs),
+               !hasOverlap(result, marker) {
+                result.append(.interlude(marker))
+            } else if markerInterludeInfo(lines: lines, line: line, index: index, count: count) == nil {
+                result.append(.line(index: index, line: line))
+            }
+
+            if let trailing = trailingInterludeInfo(
+                lines: lines,
+                line: line,
+                index: index,
+                count: count,
+                positionMs: positionMs,
+                trackDurationMs: trackDurationMs,
+                autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
+            ), !hasOverlap(result, trailing) {
+                result.append(.interlude(trailing))
+            }
+        }
+        if result.isEmpty, let first = lines.first {
+            result.append(.line(index: 0, line: first))
+        }
+        return result
+    }
+
+    static func previewItem(
+        lines: [LyricsLine],
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> LyricsTimelineDisplayItem? {
+        guard !lines.isEmpty else { return nil }
+        let count = lines.count
+        for index in lines.indices {
+            let line = lines[index]
+            if let marker = markerInterludeInfo(lines: lines, line: line, index: index, count: count),
+               contains(marker, positionMs) {
+                return .interlude(marker)
+            }
+        }
+
+        for index in lines.indices {
+            let line = lines[index]
+            if !line.isTimed, !isInterludeMarkerText(candidateText(line)) {
+                return .line(index: index, line: line)
+            }
+        }
+
+        for index in lines.indices {
+            let line = lines[index]
+            guard line.isTimed, !isInterludeMarkerText(candidateText(line)) else { continue }
+            if positionMs >= line.startTimeMs, positionMs < line.endTimeMs {
+                return .line(index: index, line: line)
+            }
+        }
+
+        if let prelude = previewPreludeInfo(lines: lines, positionMs: positionMs) {
+            return .interlude(prelude)
+        }
+
+        if let trailing = previewTrailingInterludeInfo(
+            lines: lines,
+            positionMs: positionMs,
+            trackDurationMs: trackDurationMs,
+            autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
+        ) {
+            return .interlude(trailing)
+        }
+
+        var fallback: LyricsTimelineDisplayItem?
+        for index in lines.indices {
+            let line = lines[index]
+            guard line.isTimed, !isInterludeMarkerText(candidateText(line)) else { continue }
+            if positionMs >= line.startTimeMs {
+                fallback = .line(index: index, line: line)
+            }
+        }
+        return fallback
+    }
+
+    static func scrollTargetID(
+        lines: [LyricsLine],
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool,
+        vocalPartAnchorsEnabled: Bool
+    ) -> String? {
+        guard let item = previewItem(
+            lines: lines,
+            positionMs: positionMs,
+            trackDurationMs: trackDurationMs,
+            autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
+        ) else {
+            return nil
+        }
+
+        if case .line(let index, let line) = item,
+           vocalPartAnchorsEnabled,
+           let partTargetID = activeVocalPartTargetID(lineIndex: index, line: line, positionMs: positionMs) {
+            return partTargetID
+        }
+        return item.id
+    }
+
+    private static func activeVocalPartTargetID(lineIndex: Int, line: LyricsLine, positionMs: Int64) -> String? {
+        let parts = orderedVocalParts(line.vocalParts)
+        guard hasTimedKaraokeData(line),
+              displayableVocalPartCount(parts) >= vocalPartCenterThreshold else {
+            return nil
+        }
+
+        var firstActiveIndex = -1
+        var lastActiveIndex = -1
+        for (index, part) in parts.enumerated() {
+            let startTimeMs = part.startTimeMs > 0 ? part.startTimeMs : line.startTimeMs
+            let endTimeMs = part.endTimeMs > startTimeMs ? part.endTimeMs : max(startTimeMs, line.endTimeMs)
+            if positionMs >= startTimeMs, positionMs <= endTimeMs {
+                if firstActiveIndex < 0 {
+                    firstActiveIndex = index
+                }
+                lastActiveIndex = index
+            }
+        }
+
+        guard firstActiveIndex >= 0, lastActiveIndex >= 0 else { return nil }
+        let targetPartIndex = (firstActiveIndex + lastActiveIndex + 1) / 2
+        return vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: targetPartIndex)
+    }
+
+    private static func displayableVocalPartCount(_ parts: [LyricsLine.VocalPart]) -> Int {
+        parts.reduce(0) { count, part in
+            vocalPartDisplayText(part).trimmed.isEmpty ? count : count + 1
+        }
+    }
+
+    private static func hasVocalPartSupplements(_ parts: [LyricsLine.VocalPart]) -> Bool {
+        parts.contains { part in
+            !part.pronunciationText.trimmed.isEmpty || !part.translationText.trimmed.isEmpty
+        }
+    }
+
+    private static func hasTimedKaraokeData(_ line: LyricsLine) -> Bool {
+        hasTimedSyllables(line.syllables) || line.vocalParts.contains { hasTimedSyllables($0.syllables) }
+    }
+
+    private static func hasTimedSyllables(_ syllables: [LyricsLine.Syllable]) -> Bool {
+        syllables.contains { $0.endTimeMs > $0.startTimeMs }
+    }
+
+    private static func markerInterludeInfo(lines: [LyricsLine], line: LyricsLine, index: Int, count: Int) -> InterludeInfo? {
+        guard line.isTimed, isInterludeMarkerText(candidateText(line)) else { return nil }
+        let nextStart = nextRenderableLineStartAfter(lines: lines, index: index)
+        let end = max(line.endTimeMs, nextStart)
+        guard end - line.startTimeMs > interludeMinDurationMs else { return nil }
+        return InterludeInfo(startTimeMs: line.startTimeMs, endTimeMs: end, kind: instrumentalKind(index: index, count: count), automatic: false)
+    }
+
+    private static func trailingInterludeInfo(
+        lines: [LyricsLine],
+        line: LyricsLine,
+        index: Int,
+        count: Int,
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> InterludeInfo? {
+        guard autoInstrumentalBreakEnabled,
+              line.isTimed,
+              !isInterludeMarkerText(candidateText(line)),
+              !hasRenderableInterludeMarkerBeforeNextRenderableLine(lines: lines, index: index, count: count) else {
+            return nil
+        }
+        let lyricEnd = lastLyricEndTime(line)
+        guard lyricEnd >= 0 else { return nil }
+        let start = lyricEnd + trailingInterludeDelayMs
+        let nextStart = nextRenderableLineStartAfter(lines: lines, index: index)
+        let end = nextStart > start ? nextStart : (index >= max(0, count - 1) ? trackDurationMs : 0)
+        guard end - start > interludeMinDurationMs else { return nil }
+        let info = InterludeInfo(startTimeMs: start, endTimeMs: end, kind: nextStart > 0 ? "break" : "postlude", automatic: true)
+        return contains(info, positionMs) ? info : nil
+    }
+
+    private static func previewPreludeInfo(lines: [LyricsLine], positionMs: Int64) -> InterludeInfo? {
+        guard let firstIndex = firstRenderableLineIndex(lines: lines) else { return nil }
+        let firstLine = lines[firstIndex]
+        guard firstLine.isTimed, positionMs < firstLine.startTimeMs else { return nil }
+        let info = InterludeInfo(startTimeMs: 0, endTimeMs: firstLine.startTimeMs, kind: "prelude", automatic: false)
+        guard info.endTimeMs - info.startTimeMs > interludeMinDurationMs else { return nil }
+        return info
+    }
+
+    private static func previewTrailingInterludeInfo(
+        lines: [LyricsLine],
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> InterludeInfo? {
+        guard autoInstrumentalBreakEnabled else { return nil }
+        let count = lines.count
+        for index in lines.indices {
+            let line = lines[index]
+            guard line.isTimed, !isInterludeMarkerText(candidateText(line)) else { continue }
+            let lyricEnd = lastLyricEndTime(line)
+            guard lyricEnd >= 0 else { continue }
+            let start = lyricEnd + trailingInterludeDelayMs
+            let nextStart = nextRenderableLineStartAfter(lines: lines, index: index)
+            let end = nextStart > start ? nextStart : (index >= max(0, count - 1) ? trackDurationMs : 0)
+            guard end - start > interludeMinDurationMs else { continue }
+            let info = InterludeInfo(startTimeMs: start, endTimeMs: end, kind: nextStart > 0 ? "break" : "postlude", automatic: true)
+            if contains(info, positionMs) {
+                return info
+            }
+        }
+        return nil
+    }
+
+    private static func firstRenderableLineIndex(lines: [LyricsLine]) -> Int? {
+        for index in lines.indices {
+            let line = lines[index]
+            guard line.isTimed else { continue }
+            if !isInterludeMarkerText(candidateText(line)) {
+                return index
+            }
+        }
+        return nil
+    }
+
+    private static func nextRenderableLineStartAfter(lines: [LyricsLine], index: Int) -> Int64 {
+        for nextIndex in (index + 1)..<lines.count {
+            let candidate = lines[nextIndex]
+            guard candidate.isTimed else { continue }
+            if isInterludeMarkerText(candidateText(candidate)) { continue }
+            return candidate.startTimeMs
+        }
+        return 0
+    }
+
+    private static func hasRenderableInterludeMarkerBeforeNextRenderableLine(lines: [LyricsLine], index: Int, count: Int) -> Bool {
+        for nextIndex in (index + 1)..<lines.count {
+            let candidate = lines[nextIndex]
+            guard candidate.isTimed else { continue }
+            if !isInterludeMarkerText(candidateText(candidate)) { return false }
+            if markerInterludeInfo(lines: lines, line: candidate, index: nextIndex, count: count) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func lastLyricEndTime(_ line: LyricsLine) -> Int64 {
+        var lastEnd = maxSyllableEnd(line.syllables, fallbackLineEndMs: line.endTimeMs)
+        for part in line.vocalParts {
+            lastEnd = max(lastEnd, maxSyllableEnd(part.syllables, fallbackLineEndMs: line.endTimeMs))
+        }
+        if lastEnd >= 0 { return lastEnd }
+        return line.endTimeMs > line.startTimeMs ? line.endTimeMs : -1
+    }
+
+    private static func maxSyllableEnd(_ syllables: [LyricsLine.Syllable], fallbackLineEndMs: Int64) -> Int64 {
+        var lastEnd: Int64 = -1
+        for syllable in syllables {
+            let end = syllable.endTimeMs > syllable.startTimeMs ? syllable.endTimeMs : fallbackLineEndMs
+            if end >= syllable.startTimeMs {
+                lastEnd = max(lastEnd, end)
+            }
+        }
+        return lastEnd
+    }
+
+    private static func instrumentalKind(index: Int, count: Int) -> String {
+        if index == 0 { return "prelude" }
+        if index == max(0, count - 1) { return "postlude" }
+        return "break"
+    }
+
+    private static func candidateText(_ line: LyricsLine) -> String {
+        if !line.text.trimmed.isEmpty { return line.text }
+        return line.vocalParts.map(\.text).joined()
+    }
+
+    private static func isInterludeMarkerText(_ text: String) -> Bool {
+        let normalized = text
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&NBSP;", with: " ")
+            .trimmed
+        if normalized.isEmpty { return true }
+        return normalized.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || scalar.value == 0x00A0
+                || (scalar.value >= 0x200B && scalar.value <= 0x200D)
+                || scalar.value == 0xFEFF
+                || (scalar.value >= 0x2669 && scalar.value <= 0x266C)
+        }
+    }
+
+    private static func contains(_ info: InterludeInfo, _ positionMs: Int64) -> Bool {
+        positionMs >= info.startTimeMs && positionMs < info.endTimeMs
+    }
+
+    private static func hasOverlap(_ items: [LyricsTimelineDisplayItem], _ info: InterludeInfo) -> Bool {
+        items.contains { item in
+            guard case .interlude(let existing) = item else { return false }
+            return existing.startTimeMs < info.endTimeMs && info.startTimeMs < existing.endTimeMs
+        }
+    }
+}
+
+struct LyricsInterludeView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var info: InterludeInfo
+    var active: Bool
+    var displayDistance: Double
+    var showLabel: Bool
+    var alignment: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if alignment == "right" { Spacer(minLength: 0) }
+            interludeBars
+            if showLabel {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(active ? 0.78 : inactiveOpacity))
+            }
+            if alignment != "right" { Spacer(minLength: 0) }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .opacity(active ? 1 : max(0.46, inactiveOpacity + 0.12))
+        .accessibilityLabel(label)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            seek(to: info.startTimeMs)
+        }
+    }
+
+    private var interludeBars: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<4, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(.white.opacity((active ? 0.42 : inactiveOpacity) + Double(index) * 0.07))
+                    .frame(width: 4, height: CGFloat(8 + index * 3))
+            }
+        }
+    }
+
+    private var label: String {
+        switch info.kind {
+        case "prelude": return settings.t("interlude.prelude")
+        case "postlude": return settings.t("interlude.postlude")
+        default: return settings.t("interlude.break")
+        }
+    }
+
+    private func seek(to positionMs: Int64) {
+        model.seek(toLyricsTimeMs: positionMs)
+    }
+
+    private var inactiveOpacity: Double {
+        let alpha = 185.0 - min(2.6, max(0, displayDistance)) * 46.0
+        return max(54.0, min(190.0, alpha)) / 255.0
+    }
+}
+
+struct LyricsLineView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var lineIndex: Int
+    var line: LyricsLine
+    var originalText: String
+    var active: Bool
+    var displayDistance: Double
+    var progress: Double
+    var positionMs: Int64
+    var alignment: String
+
+    var body: some View {
+        let _ = settings.typographyRevision
+        let typography = settings.typographySettings()
+        let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line)
+        VStack(alignment: stackAlignment, spacing: 4) {
+            originalLyricsView
+                .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: 25))
+            if !useVocalPartSupplements, settings.japaneseFuriganaEnabled, !line.furiganaText.trimmed.isEmpty {
+                Text(FuriganaRepository.rubyDisplayText(line.furiganaText))
+                    .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 12))
+                    .foregroundStyle(.white.opacity(active ? 0.78 : supplementInactiveOpacity))
+                    .multilineTextAlignment(textAlignment)
+            }
+            if !useVocalPartSupplements, !line.pronunciationText.trimmed.isEmpty {
+                Text(line.pronunciationText)
+                    .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 14))
+                    .foregroundStyle(.white.opacity(active ? 0.82 : supplementInactiveOpacity))
+                    .multilineTextAlignment(textAlignment)
+            } else if !useVocalPartSupplements, model.lyricsSupplementPronunciationLoading {
+                supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsPronunciation, baseSize: 14)
+            }
+            if !useVocalPartSupplements, !line.translationText.trimmed.isEmpty {
+                Text(line.translationText)
+                    .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 14))
+                    .foregroundStyle(.white.opacity(active ? 0.86 : supplementInactiveOpacity))
+                    .multilineTextAlignment(textAlignment)
+            } else if !useVocalPartSupplements, model.lyricsSupplementTranslationLoading {
+                supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsTranslation, baseSize: 14)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: frameAlignment)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            seekToLine()
+        }
+    }
+
+    private var textAlignment: TextAlignment {
+        alignment == "center" ? .center : (alignment == "right" ? .trailing : .leading)
+    }
+
+    private var stackAlignment: HorizontalAlignment {
+        alignment == "center" ? .center : (alignment == "right" ? .trailing : .leading)
+    }
+
+    private var frameAlignment: Alignment {
+        alignment == "center" ? .center : (alignment == "right" ? .trailing : .leading)
+    }
+
+    private func seekToLine() {
+        guard line.isTimed else { return }
+        model.seek(toLyricsTimeMs: line.startTimeMs)
+    }
+
+    private var speakerColors: AppSettings.SpeakerColorSettings {
+        _ = settings.speakerColorRevision
+        return settings.speakerColorSettings()
+    }
+
+    private var typography: AppSettings.TypographySettings {
+        _ = settings.typographyRevision
+        return settings.typographySettings()
+    }
+
+    @ViewBuilder
+    private var originalLyricsView: some View {
+        if !line.vocalParts.isEmpty {
+            VStack(alignment: stackAlignment, spacing: 3) {
+                ForEach(Array(LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).enumerated()), id: \.offset) { index, part in
+                    let partActive = active && positionMs >= part.startTimeMs
+                    VStack(alignment: stackAlignment, spacing: 2) {
+                        SyllableKaraokeText(
+                            text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
+                            syllables: shouldRenderTimedKaraoke ? part.syllables : [],
+                            startTimeMs: part.startTimeMs,
+                            endTimeMs: part.endTimeMs,
+                            positionMs: positionMs,
+                            active: partActive,
+                            activeColor: LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors),
+                            alignment: textAlignment,
+                            inactiveOpacity: vocalPartInactiveOpacity(speaker: part.speaker, active: partActive),
+                            bounceEnabled: settings.karaokeBounceEffectEnabled,
+                            bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
+                        )
+                        .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
+                        if LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line) {
+                            vocalPartSupplements(part, active: partActive)
+                        }
+                    }
+                }
+            }
+        } else if shouldRenderTimedKaraoke {
+            SyllableKaraokeText(
+                text: originalText.isEmpty ? " " : originalText,
+                syllables: line.syllables,
+                startTimeMs: line.startTimeMs,
+                endTimeMs: line.endTimeMs,
+                positionMs: positionMs,
+                active: active,
+                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
+                alignment: textAlignment,
+                inactiveOpacity: inactiveOriginalOpacity,
+                bounceEnabled: settings.karaokeBounceEffectEnabled,
+                bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
+            )
+        } else if settings.syncedLyricsKaraokeAnimationEnabled {
+            SyllableKaraokeText(
+                text: originalText.isEmpty ? " " : originalText,
+                syllables: [],
+                startTimeMs: line.startTimeMs,
+                endTimeMs: line.endTimeMs,
+                positionMs: positionMs,
+                active: active,
+                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
+                alignment: textAlignment,
+                inactiveOpacity: inactiveOriginalOpacity,
+                bounceEnabled: settings.karaokeBounceEffectEnabled,
+                bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
+                syntheticTimingEnabled: true
+            )
+        } else {
+            Text(originalText.isEmpty ? " " : originalText)
+                .foregroundStyle(active ? LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors) : inactiveOriginalColor)
+                .multilineTextAlignment(textAlignment)
+        }
+    }
+
+    @ViewBuilder
+    private func vocalPartSupplements(_ part: LyricsLine.VocalPart, active: Bool) -> some View {
+        let speakerColor = LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors)
+        if settings.japaneseFuriganaEnabled, !part.furiganaText.trimmed.isEmpty {
+            Text(FuriganaRepository.rubyDisplayText(part.furiganaText))
+                .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 12 : 10.5))
+                .foregroundStyle(speakerColor.opacity(active ? 0.70 : vocalPartSupplementInactiveOpacity(active: active)))
+                .multilineTextAlignment(textAlignment)
+        }
+        if !part.pronunciationText.trimmed.isEmpty {
+            Text(part.pronunciationText)
+                .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5))
+                .foregroundStyle(speakerColor.opacity(active ? 212.0 / 255.0 : vocalPartSupplementInactiveOpacity(active: active)))
+                .multilineTextAlignment(textAlignment)
+        } else if model.lyricsSupplementPronunciationLoading {
+            supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5)
+        }
+        if !part.translationText.trimmed.isEmpty {
+            Text(part.translationText)
+                .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5))
+                .foregroundStyle(speakerColor.opacity(active ? 184.0 / 255.0 : vocalPartSupplementInactiveOpacity(active: active)))
+                .multilineTextAlignment(textAlignment)
+        } else if model.lyricsSupplementTranslationLoading {
+            supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5)
+        }
+    }
+
+    private func supplementReserveText(_ text: String, slotId: String, baseSize: CGFloat) -> some View {
+        Text(text)
+            .font(typography.font(slotId: slotId, baseSize: baseSize))
+            .foregroundStyle(.clear)
+            .multilineTextAlignment(textAlignment)
+            .accessibilityHidden(true)
+    }
+
+    private var shouldRenderTimedKaraoke: Bool {
+        !settings.karaokeDataAsLineSynced && hasTimedSyllables(line.syllables)
+            || !settings.karaokeDataAsLineSynced && line.vocalParts.contains { hasTimedSyllables($0.syllables) }
+    }
+
+    private func hasTimedSyllables(_ syllables: [LyricsLine.Syllable]) -> Bool {
+        syllables.contains { $0.endTimeMs > $0.startTimeMs }
+    }
+
+    private var inactiveOriginalOpacity: Double {
+        LyricSpeakerPalette.inactiveOpacity(speaker: line.speaker, distance: displayDistance)
+    }
+
+    private func vocalPartInactiveOpacity(speaker: String, active: Bool) -> Double {
+        LyricSpeakerPalette.inactiveOpacity(
+            speaker: speaker,
+            distance: displayDistance + (active ? 0 : 0.45)
+        )
+    }
+
+    private var supplementInactiveOpacity: Double {
+        max(0.30, inactiveOriginalOpacity * 0.78)
+    }
+
+    private func vocalPartSupplementInactiveOpacity(active: Bool) -> Double {
+        let distance = displayDistance + (active ? 0 : 0.45)
+        let alpha = 105.0 - min(2.8, max(0, distance)) * 24.0
+        return max(34.0, alpha) / 255.0
+    }
+
+    private var inactiveOriginalColor: Color {
+        Color(red: 174 / 255, green: 181 / 255, blue: 195 / 255).opacity(inactiveOriginalOpacity)
+    }
+}
+
+struct SyllableKaraokeText: View {
+    var text: String
+    var syllables: [LyricsLine.Syllable]
+    var startTimeMs: Int64
+    var endTimeMs: Int64
+    var positionMs: Int64
+    var active: Bool
+    var activeColor: Color
+    var alignment: TextAlignment
+    var inactiveOpacity: Double = 0.46
+    var bounceEnabled: Bool = false
+    var bounceTextSize: CGFloat = 22
+    var syntheticTimingEnabled: Bool = false
+
+    var body: some View {
+        Group {
+            if karaokeSegments.isEmpty {
+                Text(text.isEmpty ? " " : text)
+                    .foregroundStyle(fallbackColor)
+                    .multilineTextAlignment(alignment)
+            } else {
+                KaraokeSegmentFlowLayout(alignment: alignment) {
+                    ForEach(karaokeSegments) { segment in
+                        KaraokeSyllableSegmentView(segment: segment)
+                    }
+                }
+                .accessibilityLabel(text)
+            }
+        }
+    }
+
+    private var karaokeSegments: [KaraokeSyllableSegment] {
+        effectiveSyllables.enumerated().compactMap { index, syllable in
+            guard !syllable.text.isEmpty else { return nil }
+            let bounce = karaokeBounce(for: syllable, index: index)
+            return KaraokeSyllableSegment(
+                id: index,
+                text: syllable.text,
+                fill: fillFraction(for: syllable),
+                baseColor: active ? activeColor.opacity(0.34) : activeColor.opacity(inactiveOpacity),
+                activeColor: activeColor,
+                bounceOffsetY: bounce.offsetY,
+                bounceScale: bounce.scale,
+                isWhitespace: syllable.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+            )
+        }
+    }
+
+    private var effectiveSyllables: [LyricsLine.Syllable] {
+        let timed = syllables.filter { !$0.text.isEmpty }
+        if !timed.isEmpty {
+            return timed
+        }
+        guard syntheticTimingEnabled, endTimeMs > startTimeMs else { return [] }
+        let characters = text.map(String.init)
+        guard !characters.isEmpty else { return [] }
+        let duration = endTimeMs - startTimeMs
+        return characters.enumerated().map { index, character in
+            let start = startTimeMs + Int64((Double(duration) * Double(index) / Double(characters.count)).rounded())
+            let end = startTimeMs + Int64((Double(duration) * Double(index + 1) / Double(characters.count)).rounded())
+            return LyricsLine.Syllable(text: character, startTimeMs: start, endTimeMs: max(start, end))
+        }
+    }
+
+    private var fallbackColor: Color {
+        active ? activeColor : activeColor.opacity(inactiveOpacity)
+    }
+
+    private func fillFraction(for syllable: LyricsLine.Syllable) -> CGFloat {
+        guard active else { return 0 }
+        if positionMs >= syllable.endTimeMs {
+            return 1
+        }
+        if positionMs <= syllable.startTimeMs || syllable.endTimeMs <= syllable.startTimeMs {
+            return 0
+        }
+        return min(1, max(0, CGFloat(positionMs - syllable.startTimeMs) / CGFloat(syllable.endTimeMs - syllable.startTimeMs)))
+    }
+
+    private func karaokeBounce(for syllable: LyricsLine.Syllable, index: Int) -> KaraokeBounceMetrics {
+        guard bounceEnabled,
+              active,
+              syllable.endTimeMs > syllable.startTimeMs,
+              let activeIndex = activeSegmentIndex else {
+            return .idle
+        }
+        let distance = abs(CGFloat(index - activeIndex))
+        guard distance <= 3, let rawStrength = bounceStrength(startTimeMs: syllable.startTimeMs) else {
+            return .idle
+        }
+        let attenuation = max(0.22, 1 - distance * 0.23)
+        let strength = rawStrength * attenuation
+        guard strength >= 0.025 else {
+            return .idle
+        }
+        let offsetY = ((-bounceTextSize * 0.23 * strength) * 2).rounded() / 2
+        let scale = ((1 + 0.055 * strength) * 100).rounded() / 100
+        return KaraokeBounceMetrics(offsetY: offsetY, scale: scale)
+    }
+
+    private var activeSegmentIndex: Int? {
+        var fallbackIndex: Int?
+        var fallbackEnd = Int64.min
+        var nextIndex: Int?
+        var nextStart = Int64.max
+        for (index, syllable) in effectiveSyllables.enumerated() {
+            guard !syllable.text.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else {
+                continue
+            }
+            if positionMs >= syllable.startTimeMs, positionMs < syllable.endTimeMs {
+                return index
+            }
+            if positionMs >= syllable.endTimeMs, syllable.endTimeMs >= fallbackEnd {
+                fallbackEnd = syllable.endTimeMs
+                fallbackIndex = index
+            }
+            if positionMs < syllable.startTimeMs, syllable.startTimeMs < nextStart {
+                nextStart = syllable.startTimeMs
+                nextIndex = index
+            }
+        }
+        if let fallbackIndex, positionMs - fallbackEnd < 2_000 {
+            return nextIndex ?? fallbackIndex
+        }
+        return nextIndex ?? fallbackIndex
+    }
+
+    private func bounceStrength(startTimeMs: Int64) -> CGFloat? {
+        let prelead: CGFloat = 70
+        let rise: CGFloat = 220
+        let release: CGFloat = 640
+        let elapsed = CGFloat(positionMs - startTimeMs)
+        if elapsed < -prelead || elapsed > rise + release {
+            return nil
+        }
+        if elapsed < 0 {
+            let progress = (elapsed + prelead) / prelead
+            return easeOutCubic(progress) * 0.22
+        }
+        if elapsed <= rise {
+            return 0.22 + easeOutCubic(elapsed / rise) * 0.78
+        }
+        let progress = min(1, (elapsed - rise) / release)
+        return pow(1 - progress, 1.38)
+    }
+
+    private func easeOutCubic(_ value: CGFloat) -> CGFloat {
+        let t = min(1, max(0, value))
+        return 1 - pow(1 - t, 3)
+    }
+}
+
+private struct KaraokeBounceMetrics {
+    static let idle = KaraokeBounceMetrics(offsetY: 0, scale: 1)
+
+    var offsetY: CGFloat
+    var scale: CGFloat
+}
+
+private struct KaraokeSyllableSegment: Identifiable {
+    var id: Int
+    var text: String
+    var fill: CGFloat
+    var baseColor: Color
+    var activeColor: Color
+    var bounceOffsetY: CGFloat
+    var bounceScale: CGFloat
+    var isWhitespace: Bool
+}
+
+private struct KaraokeWhitespaceLayoutKey: LayoutValueKey {
+    static let defaultValue = false
+}
+
+private struct KaraokeSyllableSegmentView: View {
+    var segment: KaraokeSyllableSegment
+
+    var body: some View {
+        Text(segment.text)
+            .foregroundStyle(segment.baseColor)
+            .overlay(alignment: .leading) {
+                if segment.fill > 0 {
+                    Text(segment.text)
+                        .foregroundStyle(segment.activeColor)
+                        .mask(KaraokeFillMask(fill: segment.fill))
+                        .allowsHitTesting(false)
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .scaleEffect(segment.bounceScale, anchor: .center)
+            .offset(y: segment.bounceOffsetY)
+            .animation(.easeOut(duration: 0.10), value: segment.bounceOffsetY)
+            .animation(.easeOut(duration: 0.10), value: segment.bounceScale)
+            .layoutValue(key: KaraokeWhitespaceLayoutKey.self, value: segment.isWhitespace)
+    }
+}
+
+private struct KaraokeFillMask: View {
+    var fill: CGFloat
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(0, geometry.size.width)
+            let height = max(0, geometry.size.height)
+            let safeFill = min(1, max(0, fill))
+            let fillWidth = width * safeFill
+            let softWidth = min(7, max(0, width * 0.30))
+            let solidWidth = safeFill >= 0.995 ? width : max(0, fillWidth - softWidth * 0.42)
+            let softEnd = safeFill >= 0.995 ? width : min(width, fillWidth + softWidth)
+            HStack(spacing: 0) {
+                Rectangle()
+                    .fill(.white)
+                    .frame(width: solidWidth, height: height)
+                if safeFill < 0.995, softEnd > solidWidth {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .white, location: 0),
+                            .init(color: .white, location: 0.34),
+                            .init(color: .white.opacity(0), location: 1)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: softEnd - solidWidth, height: height)
+                }
+            }
+            .frame(width: width, height: height, alignment: .leading)
+        }
+    }
+}
+
+private struct KaraokeSegmentFlowLayout: Layout {
+    var alignment: TextAlignment
+    var rowSpacing: CGFloat = 0
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = max(1, proposal.width ?? CGFloat.greatestFiniteMagnitude)
+        let rows = makeRows(subviews: subviews, maxWidth: maxWidth)
+        let contentWidth = rows.map(\.width).max() ?? 0
+        let contentHeight = rows.last.map { $0.y + $0.height } ?? 0
+        return CGSize(width: proposal.width ?? contentWidth, height: contentHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = makeRows(subviews: subviews, maxWidth: max(1, bounds.width))
+        for row in rows {
+            var x = bounds.minX + horizontalOffset(rowWidth: row.width, containerWidth: bounds.width)
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(
+                    at: CGPoint(x: x, y: bounds.minY + row.y + max(0, row.height - size.height) * 0.5),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(size)
+                )
+                x += size.width
+            }
+        }
+    }
+
+    private func makeRows(subviews: Subviews, maxWidth: CGFloat) -> [KaraokeSegmentLayoutRow] {
+        var rows: [KaraokeSegmentLayoutRow] = []
+        var currentIndices: [Int] = []
+        var currentWidth: CGFloat = 0
+        var currentHeight: CGFloat = 0
+        var y: CGFloat = 0
+
+        func flushRow() {
+            guard !currentIndices.isEmpty else { return }
+            rows.append(KaraokeSegmentLayoutRow(indices: currentIndices, width: currentWidth, height: currentHeight, y: y))
+            y += currentHeight + rowSpacing
+            currentIndices = []
+            currentWidth = 0
+            currentHeight = 0
+        }
+
+        let units = makeWrapUnits(subviews: subviews)
+        for unit in units {
+            let sizes = unit.map { subviews[$0].sizeThatFits(.unspecified) }
+            let unitWidth = sizes.reduce(0) { $0 + $1.width }
+            if unitWidth <= maxWidth {
+                if !currentIndices.isEmpty, currentWidth + unitWidth > maxWidth {
+                    flushRow()
+                }
+                currentIndices.append(contentsOf: unit)
+                currentWidth += unitWidth
+                currentHeight = max(currentHeight, sizes.map(\.height).max() ?? 0)
+                continue
+            }
+            for (offset, index) in unit.enumerated() {
+                let size = sizes[offset]
+                if !currentIndices.isEmpty, currentWidth + size.width > maxWidth {
+                    flushRow()
+                }
+                currentIndices.append(index)
+                currentWidth += size.width
+                currentHeight = max(currentHeight, size.height)
+            }
+        }
+        flushRow()
+        return rows
+    }
+
+    private func makeWrapUnits(subviews: Subviews) -> [[Int]] {
+        var units: [[Int]] = []
+        var current: [Int] = []
+        for index in subviews.indices {
+            current.append(index)
+            if subviews[index][KaraokeWhitespaceLayoutKey.self] {
+                units.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty {
+            units.append(current)
+        }
+        return units
+    }
+
+    private func horizontalOffset(rowWidth: CGFloat, containerWidth: CGFloat) -> CGFloat {
+        switch alignment {
+        case .center:
+            return max(0, (containerWidth - rowWidth) * 0.5)
+        case .trailing:
+            return max(0, containerWidth - rowWidth)
+        default:
+            return 0
+        }
+    }
+}
+
+private struct KaraokeSegmentLayoutRow {
+    var indices: [Int]
+    var width: CGFloat
+    var height: CGFloat
+    var y: CGFloat
+}
+
+#if DEBUG
+private struct KaraokeDebugPreview: View {
+    private let longText = "Someone to die for you and more"
+    private let bounceSyllables = Array("ABCDEF").enumerated().map { index, character in
+        LyricsLine.Syllable(
+            text: String(character),
+            startTimeMs: Int64(index * 1_000),
+            endTimeMs: Int64((index + 1) * 1_000)
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 44) {
+            Text("Synthetic line sync at 50%")
+                .font(.pretendard(15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
+            SyllableKaraokeText(
+                text: longText,
+                syllables: [],
+                startTimeMs: 0,
+                endTimeMs: 10_000,
+                positionMs: 5_000,
+                active: true,
+                activeColor: .white,
+                alignment: .leading,
+                bounceEnabled: false,
+                bounceTextSize: 38,
+                syntheticTimingEnabled: true
+            )
+            .font(.pretendard(38, weight: .bold))
+            .frame(width: 320, alignment: .leading)
+
+            Text("Only C should bounce")
+                .font(.pretendard(15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
+            SyllableKaraokeText(
+                text: "ABCDEF",
+                syllables: bounceSyllables,
+                startTimeMs: 0,
+                endTimeMs: 6_000,
+                positionMs: 2_100,
+                active: true,
+                activeColor: Color(red: 0.48, green: 0.80, blue: 0.78),
+                alignment: .leading,
+                bounceEnabled: true,
+                bounceTextSize: 52
+            )
+            .font(.pretendard(52, weight: .bold))
+
+            Text("Lead and background keep separate timing/colors")
+                .font(.pretendard(15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
+            LyricsLineView(
+                lineIndex: 0,
+                line: multiVocalLine,
+                originalText: multiVocalLine.text,
+                active: true,
+                displayDistance: 0,
+                progress: 0.52,
+                positionMs: 2_100,
+                alignment: "left"
+            )
+            .frame(width: 330)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(36)
+        .background(Color(red: 0.04, green: 0.045, blue: 0.065))
+        .ignoresSafeArea()
+    }
+
+    private var multiVocalLine: LyricsLine {
+        let lead = LyricsLine.VocalPart(
+            id: "lead",
+            role: "lead",
+            speaker: "MALE 1",
+            kind: "vocal",
+            text: "LEAD",
+            syllables: timedSyllables("LEAD", startTimeMs: 0, stepMs: 800)
+        )
+        let background = LyricsLine.VocalPart(
+            id: "background",
+            role: "background",
+            speaker: "FEMALE 1",
+            kind: "vocal",
+            text: "DUET",
+            syllables: timedSyllables("DUET", startTimeMs: 1_200, stepMs: 600)
+        )
+        return LyricsLine(
+            startTimeMs: 0,
+            endTimeMs: 3_600,
+            text: "LEADDUET",
+            speaker: "MALE 1",
+            vocalParts: [background, lead]
+        )
+    }
+
+    private func timedSyllables(_ text: String, startTimeMs: Int64, stepMs: Int64) -> [LyricsLine.Syllable] {
+        text.enumerated().map { index, character in
+            let start = startTimeMs + Int64(index) * stepMs
+            return LyricsLine.Syllable(text: String(character), startTimeMs: start, endTimeMs: start + stepMs)
+        }
+    }
+}
+#endif
+
+enum LyricSpeakerPalette {
+    static func activeColor(speaker: String, settings: AppSettings.SpeakerColorSettings) -> Color {
+        let key = normalizeSpeakerKey(speaker)
+        switch key {
+        case "speaker-b", "b":
+            return Color(red: 139 / 255.0, green: 211 / 255.0, blue: 255 / 255.0)
+        case "speaker-c", "c":
+            return Color(red: 255 / 255.0, green: 209 / 255.0, blue: 102 / 255.0)
+        case "speaker-d", "d":
+            return Color(red: 196 / 255.0, green: 167 / 255.0, blue: 255 / 255.0)
+        case "speaker-sfx", "sfx":
+            return Color(red: 244 / 255.0, green: 166 / 255.0, blue: 200 / 255.0)
+        default:
+            if let color = numberedColor(key: key, prefix: "male", settings: settings) { return color }
+            if let color = numberedColor(key: key, prefix: "female", settings: settings) { return color }
+            if let color = numberedColor(key: key, prefix: "duet", settings: settings) { return color }
+            return Color(hex: settings.hex(AppSettings.speakerColorNormal))
+        }
+    }
+
+    static func inactiveOpacity(speaker: String, distance: Double) -> Double {
+        let baseAlpha = max(54.0, min(190.0, 185.0 - min(2.6, max(0, distance)) * 46.0))
+        let key = normalizeSpeakerKey(speaker)
+        guard isKnownSpeaker(key) else {
+            return baseAlpha / 255.0
+        }
+        let distanceFactor = baseAlpha / 185.0
+        let alpha = max(40.0, min(150.0, (255.0 * speakerInactiveAlpha(key) * distanceFactor).rounded()))
+        return alpha / 255.0
+    }
+
+    private static func isKnownSpeaker(_ key: String) -> Bool {
+        switch key {
+        case "speaker-b", "b", "speaker-c", "c", "speaker-d", "d", "speaker-sfx", "sfx":
+            return true
+        default:
+            return speakerIndex(key: key, prefix: "male") != nil
+                || speakerIndex(key: key, prefix: "female") != nil
+                || speakerIndex(key: key, prefix: "duet") != nil
+        }
+    }
+
+    private static func speakerInactiveAlpha(_ key: String) -> Double {
+        switch key {
+        case "speaker-b", "b", "speaker-sfx", "sfx":
+            return 0.46
+        case "speaker-c", "c", "speaker-d", "d":
+            return 0.48
+        default:
+            for prefix in ["male", "female", "duet"] {
+                if let index = speakerIndex(key: key, prefix: prefix) {
+                    return index == 0 ? 0.52 : 0.50
+                }
+            }
+            return 0.50
+        }
+    }
+
+    private static func numberedColor(key: String, prefix: String, settings: AppSettings.SpeakerColorSettings) -> Color? {
+        guard let index = speakerIndex(key: key, prefix: prefix), (0..<5).contains(index) else {
+            return nil
+        }
+        return Color(hex: settings.hex("\(prefix)\(index + 1)"))
+    }
+
+    private static func speakerIndex(key: String, prefix: String) -> Int? {
+        if key == prefix || key == "speaker-\(prefix)" {
+            return 0
+        }
+        let candidates = [
+            key.replacingOccurrences(of: "speaker-\(prefix)-", with: ""),
+            key.replacingOccurrences(of: "speaker-\(prefix)", with: ""),
+            key.replacingOccurrences(of: "\(prefix)-", with: ""),
+            key.replacingOccurrences(of: prefix, with: "")
+        ]
+        for candidate in candidates where candidate != key {
+            if candidate.isEmpty { return 0 }
+            if let number = Int(candidate), number > 0 { return number - 1 }
+        }
+        return nil
+    }
+
+    private static func normalizeSpeakerKey(_ speaker: String) -> String {
+        speaker
+            .trimmed
+            .lowercased()
+            .replacingOccurrences(of: #"[_\s]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+}
+
+struct LogsView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @Binding var visible: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Text(settings.t("debug.title"))
+                    .font(.pretendard(24, weight: .bold))
+                Spacer(minLength: 12)
+                Button(settings.t("button.close")) {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        visible = false
+                    }
+                }
+                .font(.pretendard(13, weight: .semibold))
+                .frame(width: 92, height: 42)
+                .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .buttonStyle(.plain)
+            }
+
+            Text(debugSourceText)
+                .font(.pretendard(13, weight: .semibold))
+                .foregroundStyle(Color(red: 142.0 / 255.0, green: 236.0 / 255.0, blue: 198.0 / 255.0))
+                .padding(.top, 18)
+
+            Text(debugStatusText)
+                .font(.pretendard(12))
+                .foregroundStyle(.white.opacity(0.81))
+                .lineSpacing(2)
+                .padding(.top, 8)
+
+            Text("\(debugTime(model.nowPositionMs)) / \(debugTime(model.durationMs))")
+                .font(.pretendard(13, weight: .semibold))
+                .monospacedDigit()
+                .padding(.top, 12)
+
+            if !model.spotifyAppRemoteConnected && !model.spotifyLivePolling {
+                Button(settings.t("debug.permission")) {
+                    model.connectSpotifyUserAndStartPolling()
+                }
+                .androidDebugButton()
+                .padding(.top, 14)
+            }
+
+            HStack(spacing: 8) {
+                Button(settings.t("debug.previous")) {
+                    model.skipToPreviousTrack()
+                }
+                .androidDebugButton()
+
+                Button(settings.t("debug.play_pause")) {
+                    model.togglePlayback()
+                }
+                .androidDebugButton()
+                .frame(maxWidth: .infinity)
+
+                Button(settings.t("debug.next")) {
+                    model.skipToNextTrack()
+                }
+                .androidDebugButton()
+            }
+            .padding(.top, 10)
+
+            Button(settings.t("debug.refresh")) {
+                if model.spotifyAppRemoteConnected || model.spotifyLivePolling {
+                    Task { await model.refreshSpotifyPlayback(loadLyricsIfNeeded: true) }
+                } else {
+                    model.reloadLyrics(bypassCache: true)
+                }
+            }
+            .androidDebugButton()
+            .padding(.top, 10)
+
+            Text(settings.t("debug.log"))
+                .font(.pretendard(14, weight: .semibold))
+                .padding(.top, 18)
+
+            ScrollView {
+                Text(debugLogText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.83))
+                    .lineSpacing(2)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(.black.opacity(118.0 / 255.0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.top, 8)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 22)
+        .padding(.top, 52)
+        .padding(.bottom, 22)
+        .background(Color(red: 15.0 / 255.0, green: 18.0 / 255.0, blue: 31.0 / 255.0).opacity(238.0 / 255.0))
+        .ignoresSafeArea()
+    }
+
+    private var debugSourceText: String {
+        if model.spotifyAppRemoteConnected {
+            return "Spotify App Remote"
+        }
+        if model.spotifyLivePolling {
+            return "Spotify Web API"
+        }
+        if model.currentTrack != nil {
+            return "Track metadata"
+        }
+        return settings.t("status.waiting_current_track")
+    }
+
+    private var debugLogText: String {
+        model.logs.isEmpty ? settings.t("debug.log_waiting") : model.logs.joined(separator: "\n")
+    }
+
+    private var debugStatusText: String {
+        let detail = model.lyricsResult.detail.trimmed
+        return detail.isEmpty ? model.status.text(settings: settings) : detail
+    }
+
+    private func debugTime(_ milliseconds: Int64) -> String {
+        let total = max(0, Int(milliseconds / 1000))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+private extension View {
+    func androidDebugButton() -> some View {
+        self
+            .font(.pretendard(13, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 42)
+            .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .buttonStyle(.plain)
+    }
+}
+
+struct InitialSetupView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @State private var welcomeMessageIndex = 0
+
+    private let welcomeMessages = [
+        "ivLyrics에 오신 것을 환영합니다",
+        "Welcome to ivLyrics",
+        "ivLyricsへようこそ",
+        "欢迎使用 ivLyrics",
+        "Bienvenue dans ivLyrics",
+        "Bienvenido a ivLyrics"
+    ]
+    private let welcomeTimer = Timer.publish(every: 1.85, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 33.0 / 255.0, green: 35.0 / 255.0, blue: 52.0 / 255.0),
+                    Color(red: 13.0 / 255.0, green: 14.0 / 255.0, blue: 20.0 / 255.0)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    Image("IvLyricsLogo")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 86, height: 86)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+                    Text("ivLyrics")
+                        .font(.pretendard(15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.67))
+                        .padding(.top, 12)
+
+                    ZStack {
+                        Text(welcomeMessages[welcomeMessageIndex])
+                            .id(welcomeMessageIndex)
+                            .font(.pretendard(30, weight: .bold))
+                            .multilineTextAlignment(.center)
+                            .minimumScaleFactor(0.72)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .bottom)),
+                                removal: .opacity.combined(with: .move(edge: .top))
+                            ))
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 78, maxHeight: 78)
+                    .padding(.top, 18)
+
+                    Text(settings.t("onboarding.subtitle_ios"))
+                        .font(.pretendard(13))
+                        .foregroundStyle(.white.opacity(0.70))
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .padding(.top, 10)
+
+                    Text(settings.tf("onboarding.step_format", model.onboardingStep + 1, 3))
+                        .font(.pretendard(11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.57))
+                        .padding(.top, 30)
+
+                    stepBody
+                        .padding(.top, 14)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            model.retreatOnboarding()
+                        } label: {
+                            Text(settings.t("button.previous"))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(model.onboardingStep == 0)
+                        .opacity(model.onboardingStep == 0 ? 0.45 : 1)
+
+                        Button {
+                            handleNext()
+                        } label: {
+                            Text(nextButtonTitle)
+                                .foregroundStyle(Color(red: 0.07, green: 0.07, blue: 0.08))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(model.onboardingStep == 2 && (!model.initialSetupComplete || model.spotifyCredentialsValidationInFlight))
+                        .opacity(model.onboardingStep == 2 && (!model.initialSetupComplete || model.spotifyCredentialsValidationInFlight) ? 0.42 : 1)
+                    }
+                    .font(.pretendard(15, weight: .semibold))
+                    .padding(.top, 18)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 24)
+                .padding(.top, 34)
+                .padding(.bottom, 34)
+            }
+        }
+        .foregroundStyle(.white)
+        .preferredColorScheme(.dark)
+        .interactiveDismissDisabled(!model.initialSetupComplete)
+        .onReceive(welcomeTimer) { _ in
+            withAnimation(.easeInOut(duration: 0.24)) {
+                welcomeMessageIndex = (welcomeMessageIndex + 1) % welcomeMessages.count
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var stepBody: some View {
+        switch model.onboardingStep {
+        case 0:
+            welcomeStep
+        case 1:
+            spotifyLiveStep
+        default:
+            spotifyApiStep
+        }
+    }
+
+    private var welcomeStep: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(settings.t("onboarding.app_language_en"))
+                        .font(.pretendard(12, weight: .semibold))
+                    Text(settings.t("onboarding.app_language_native"))
+                        .font(.pretendard(11))
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Picker("", selection: $settings.uiLang) {
+                    ForEach(AppI18n.uiLanguages) { language in
+                        Text(language.nativeName).tag(language.code)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(.white)
+                .frame(width: 172)
+                .frame(minHeight: 42)
+                .background(.white.opacity(0.17), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text(settings.t("onboarding.preview.line1"))
+                    .font(.pretendard(22, weight: .bold))
+                Text(settings.t("onboarding.preview.line2"))
+                    .font(.pretendard(19, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.52))
+                Text(settings.t("onboarding.preview.line3"))
+                    .font(.pretendard(15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.36))
+                Text(settings.t("onboarding.preview.line4"))
+                    .font(.pretendard(13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    private var spotifyLiveStep: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 38, weight: .semibold))
+                .foregroundStyle(.green)
+            Text(settings.t("spotify.live.title"))
+                .font(.pretendard(21, weight: .bold))
+            Text(settings.t("spotify.live.desc_ios"))
+                .font(.pretendard(14))
+                .foregroundStyle(.white.opacity(0.74))
+                .multilineTextAlignment(.center)
+            Button(model.spotifyLivePolling ? settings.t("spotify.live.connected") : settings.t("spotify.live.connect")) {
+                model.connectSpotifyUserAndStartPolling()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(settings.spotifyClientId.trimmed.isEmpty)
+            if settings.spotifyClientId.trimmed.isEmpty {
+                Text(settings.t("spotify.live.connect_after_client"))
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var spotifyApiStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(settings.t("spotify.api.title"))
+                .font(.pretendard(21, weight: .bold))
+            Text(settings.t("spotify.api.desc_ios"))
+                .font(.pretendard(14))
+                .foregroundStyle(.white.opacity(0.74))
+            TextField(settings.t("field.spotify_client_id"), text: $settings.spotifyClientId)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(PlayerTextFieldStyle())
+            SecureField(settings.t("field.spotify_client_secret"), text: $settings.spotifyClientSecret)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(PlayerTextFieldStyle())
+            LabeledContent(settings.t("field.redirect_uri")) {
+                Text("ivlyrics-ios://spotify-callback/")
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+            }
+            Button(model.spotifyCredentialsValidationInFlight ? settings.t("spotify.validate_checking") : settings.t("button.spotify_save")) {
+                model.validateSpotifyApiCredentials(reloadOnChange: true)
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.spotifyCredentialsValidationInFlight)
+            Text(model.initialSetupComplete ? settings.t("spotify.status_credentials_saved") : settings.t("spotify.status_credentials_required"))
+                .font(.caption)
+                .foregroundStyle(model.initialSetupComplete ? .green : .white.opacity(0.58))
+            if !model.spotifyValidationStatus.trimmed.isEmpty {
+                Text(model.spotifyValidationStatus)
+                    .font(.caption)
+                    .foregroundStyle(model.spotifyCredentialsValidationInFlight ? .white.opacity(0.72) : .white.opacity(0.58))
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var nextButtonTitle: String {
+        if model.onboardingStep >= 2 && model.spotifyCredentialsValidationInFlight {
+            return settings.t("spotify.status_checking")
+        }
+        return model.onboardingStep >= 2 ? settings.t("button.save_start") : settings.t("button.next")
+    }
+
+    private func handleNext() {
+        if model.onboardingStep >= 2 {
+            model.finishInitialSetup()
+        } else {
+            model.advanceOnboarding()
+        }
+    }
+}
+
+private struct SpotifySetupInstructionsPanel: View {
+    @EnvironmentObject private var settings: AppSettings
+    @State private var step = 0
+    @State private var copiedMessage = ""
+
+    private let stepCount = 6
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(settings.t("spotify.setup.instructions"))
+                    .font(.headline)
+                Spacer()
+                Text(settings.tf("onboarding.step_format", step + 1, stepCount))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(stepTitle)
+                .font(.subheadline.weight(.semibold))
+            Text(stepDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let item = copyItem {
+                copyRow(title: item.title, value: item.value)
+            }
+
+            if step == 0, let url = URL(string: "https://developer.spotify.com/dashboard") {
+                Link(settings.t("button.open_browser"), destination: url)
+                    .font(.caption.weight(.semibold))
+            }
+
+            if !copiedMessage.trimmed.isEmpty {
+                Text(copiedMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button(settings.t("button.previous")) {
+                    step = max(0, step - 1)
+                }
+                .disabled(step == 0)
+
+                Button(step == stepCount - 1 ? settings.t("button.restart") : settings.t("button.next")) {
+                    step = step == stepCount - 1 ? 0 : step + 1
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var stepTitle: String {
+        settings.t("spotify.step\(step).title")
+    }
+
+    private var stepDescription: String {
+        settings.t("spotify.step\(step).desc")
+    }
+
+    private var copyItem: (title: String, value: String)? {
+        switch step {
+        case 0:
+            return (settings.t("spotify.copy.dashboard_url"), "https://developer.spotify.com/dashboard")
+        case 1:
+            return (settings.t("spotify.copy.app_name"), "trackinfo")
+        case 2:
+            return (settings.t("spotify.copy.app_description"), "trackinfo")
+        case 3:
+            return (settings.t("spotify.copy.redirect_uri"), "ivlyrics-ios://spotify-callback/")
+        default:
+            return nil
+        }
+    }
+
+    private func copyRow(title: String, value: String) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button(settings.t("button.copy")) {
+                #if os(iOS)
+                UIPasteboard.general.string = value
+                #endif
+                copiedMessage = settings.tf("toast.copied_format", value)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+}
+
+struct SettingsView: View {
+    private enum SettingsTab: String, CaseIterable, Identifiable {
+        case lyrics
+        case display
+        case ai
+        case tools
+
+        var id: String { rawValue }
+        var titleKey: String { "tab.\(rawValue)" }
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @State private var settingsLogsPresented = false
+    @State private var selectedTab: SettingsTab = .lyrics
+
+    var body: some View {
+        ZStack {
+            Color(red: 12.0 / 255.0, green: 13.0 / 255.0, blue: 17.0 / 255.0)
+                .ignoresSafeArea()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    settingsHeader
+
+                    Text(settings.t(aiStatusKey))
+                        .font(.pretendard(14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .padding(.top, 22)
+
+                    settingsTabs
+                        .padding(.top, 20)
+
+                    selectedSettingsPage
+                        .padding(.top, 22)
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 18)
+                .padding(.bottom, 34)
+            }
+        }
+        .preferredColorScheme(.dark)
+        .tint(Color(red: 0.48, green: 0.80, blue: 0.78))
+        .onAppear {
+#if DEBUG
+            if let rawTab = ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_SETTINGS_TAB"],
+               let tab = SettingsTab(rawValue: rawTab) {
+                selectedTab = tab
+            }
+#endif
+        }
+        .fullScreenCover(isPresented: $settingsLogsPresented) {
+            LogsView(visible: $settingsLogsPresented)
+                .environmentObject(model)
+        }
+    }
+
+    private var settingsHeader: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(settings.t("settings.title"))
+                    .font(.pretendard(26, weight: .bold))
+                    .foregroundStyle(.white)
+                Text(settings.t("settings.subtitle"))
+                    .font(.pretendard(14))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Button {
+                dismiss()
+            } label: {
+                Text(settings.t("button.close"))
+                    .font(.pretendard(16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 88, height: 48)
+                    .background(Color(red: 0.23, green: 0.23, blue: 0.25), in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var settingsTabs: some View {
+        HStack(spacing: 10) {
+            ForEach(SettingsTab.allCases) { tab in
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        selectedTab = tab
+                    }
+                } label: {
+                    Text(settings.t(tab.titleKey))
+                        .font(.pretendard(15, weight: .bold))
+                        .foregroundStyle(selectedTab == tab ? Color(red: 0.08, green: 0.08, blue: 0.09) : .white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                        .background(
+                            selectedTab == tab
+                                ? Color(red: 0.94, green: 0.94, blue: 0.95)
+                                : Color(red: 0.17, green: 0.17, blue: 0.19),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var selectedSettingsPage: some View {
+        switch selectedTab {
+        case .lyrics:
+            lyricsSettingsPage
+        case .display:
+            displaySettingsPage
+        case .ai:
+            aiSettingsPage
+        case .tools:
+            toolsSettingsPage
+        }
+    }
+
+    private var lyricsSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            settingsSection(settings.t("section.language"), description: settings.t("section.language_desc")) {
+                settingsCard(settings.t("setting.ui_language"), description: settings.t("setting.ui_language_desc")) {
+                    Picker("", selection: uiLanguageBinding) {
+                        ForEach(AppSettings.languages) { language in
+                            Text("\(language.nativeName) · \(language.name)").tag(language.code)
+                        }
+                    }
+                    .labelsHidden()
+                    .settingsMenuSurface()
+                }
+
+                settingsCard(settings.t("setting.pronunciation_language"), description: settings.t("setting.pronunciation_language_desc")) {
+                    Picker("", selection: $settings.outputLang) {
+                        Text(settings.t("language.same_as_ui")).tag(AppSettings.outputLangSameUI)
+                        ForEach(AppSettings.languages) { language in
+                            Text("\(language.nativeName) · \(language.name)").tag(language.code)
+                        }
+                    }
+                    .labelsHidden()
+                    .settingsMenuSurface()
+                }
+
+                settingsToggleCard(
+                    settings.t("setting.metadata_translation"),
+                    description: settings.t("setting.metadata_translation_desc"),
+                    binding: metadataTranslationBinding
+                )
+                settingsToggleCard(
+                    settings.t("setting.japanese_furigana"),
+                    description: settings.t("setting.japanese_furigana_desc"),
+                    binding: japaneseFuriganaBinding
+                )
+                settingsCard(settings.t("setting.main_preview"), description: settings.t("setting.main_preview_desc")) {
+                    VStack(spacing: 4) {
+                        Toggle(settings.t("setting.preview_hidden"), isOn: previewHiddenBinding)
+                        Toggle(settings.t("setting.main_preview_original"), isOn: previewItemBinding(AppSettings.previewItemOriginal))
+                        Toggle(settings.t("setting.main_preview_pronunciation"), isOn: previewItemBinding(AppSettings.previewItemPronunciation))
+                        Toggle(settings.t("setting.main_preview_translation"), isOn: previewItemBinding(AppSettings.previewItemTranslation))
+                    }
+                }
+            }
+
+            settingsSection(settings.t("tab.lyrics")) {
+                settingsToggleCard(settings.t("setting.auto_interlude"), description: settings.t("setting.auto_interlude_desc"), binding: autoInterludeBinding)
+                settingsToggleCard(settings.t("setting.interlude_labels"), description: settings.t("setting.interlude_labels_desc"), binding: settingsSavedBinding(\.interludeLabelsEnabled))
+                settingsToggleCard(settings.t("setting.synced_karaoke_animation"), description: settings.t("setting.synced_karaoke_animation_desc"), binding: settingsSavedBinding(\.syncedLyricsKaraokeAnimationEnabled))
+                settingsToggleCard(settings.t("setting.karaoke_bounce_effect"), description: settings.t("setting.karaoke_bounce_effect_desc"), binding: settingsSavedBinding(\.karaokeBounceEffectEnabled))
+                settingsToggleCard(settings.t("setting.karaoke_data_as_line_synced"), description: settings.t("setting.karaoke_data_as_line_synced_desc"), binding: settingsSavedBinding(\.karaokeDataAsLineSynced))
+            }
+        }
+    }
+
+    private var displaySettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            settingsSection(settings.t("section.player"), description: settings.t("section.player_desc")) {
+                settingsToggleCard(settings.t("setting.keep_screen_on"), description: settings.t("setting.keep_screen_on_desc"), binding: keepScreenOnBinding)
+                settingsToggleCard(settings.t("setting.landscape_auto_hide"), description: settings.t("setting.landscape_auto_hide_desc"), binding: landscapeAutoHideBinding)
+                settingsToggleCard(settings.t("setting.landscape_center_no_lyrics"), description: settings.t("setting.landscape_center_no_lyrics_desc"), binding: landscapeCenterNoLyricsBinding)
+                settingsCard(settings.t("setting.lyrics_alignment"), description: settings.t("setting.lyrics_alignment_desc")) {
+                    Picker("", selection: lyricsAlignmentBinding) {
+                        Text(settings.t("alignment.left")).tag("left")
+                        Text(settings.t("alignment.center")).tag("center")
+                        Text(settings.t("alignment.right")).tag("right")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+            }
+
+            settingsSection(settings.t("section.pip"), description: settings.t("section.pip_desc")) {
+                settingsToggleCard(settings.t("setting.pip_show_artwork"), description: settings.t("setting.pip_show_artwork_desc"), binding: pipShowArtworkBinding)
+                settingsCard(settings.t("setting.pip_orientation"), description: settings.t("setting.pip_orientation_desc")) {
+                    Picker("", selection: Binding(get: {
+                        AppSettings.normalizePipOrientation(settings.pipOrientation)
+                    }, set: { value in
+                        settings.pipOrientation = value
+                        model.showSavedToast(settings.t("toast.pip_settings_saved"))
+                    })) {
+                        Text(settings.t("pip.orientation.landscape")).tag(AppSettings.pipOrientationLandscape)
+                        Text(settings.t("pip.orientation.portrait")).tag(AppSettings.pipOrientationPortrait)
+                        Text(settings.t("pip.orientation.square")).tag(AppSettings.pipOrientationSquare)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+                settingsCard(settings.t("setting.pip_lyrics_alignment"), description: settings.t("setting.pip_lyrics_alignment_desc")) {
+                    Picker("", selection: Binding(get: {
+                        AppSettings.normalizeLyricsAlignment(settings.pipLyricsTextAlignment)
+                    }, set: { value in
+                        settings.pipLyricsTextAlignment = value
+                        model.showSavedToast(settings.t("toast.pip_settings_saved"))
+                    })) {
+                        Text(settings.t("alignment.left")).tag("left")
+                        Text(settings.t("alignment.center")).tag("center")
+                        Text(settings.t("alignment.right")).tag("right")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+                settingsCard(settings.t("setting.pip_lyrics_size"), description: settings.t("setting.pip_lyrics_size_desc")) {
+                    HStack {
+                        Slider(value: Binding(get: {
+                            Double(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent))
+                        }, set: { value in
+                            settings.pipLyricsSizePercent = AppSettings.clampPipLyricsSizePercent(Int(value.rounded()))
+                        }), in: 50...180, step: 1, onEditingChanged: { editing in
+                            if !editing { model.showSavedToast(settings.t("toast.pip_settings_saved")) }
+                        })
+                        Text("\(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent))%")
+                            .font(.pretendard(13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+            }
+
+            settingsSection(settings.t("section.typography"), description: settings.t("section.typography_desc")) {
+                ForEach(AppSettings.typographySlots) { slot in
+                    settingsCard(slot.label) {
+                        VStack(spacing: 10) {
+                            HStack {
+                                Slider(value: typographySizeBinding(slot), in: 70...160, step: 1, onEditingChanged: { editing in
+                                    if !editing { model.showSavedToast(settings.t("toast.typography_saved")) }
+                                })
+                                Text("\(typographyStyle(slot).sizePercent)%")
+                                    .foregroundStyle(.white.opacity(0.68))
+                            }
+                            Picker(settings.t("field.weight"), selection: typographyWeightBinding(slot)) {
+                                Text(settings.t("typography.weight.regular")).tag(AppSettings.typoWeightRegular)
+                                Text(settings.t("typography.weight.semibold")).tag(AppSettings.typoWeightSemibold)
+                                Text(settings.t("typography.weight.bold")).tag(AppSettings.typoWeightBold)
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                    }
+                }
+            }
+
+            settingsSection(settings.t("section.speaker_colors"), description: settings.t("section.speaker_colors_desc")) {
+                settingsCard(settings.t("section.speaker_colors")) {
+                    VStack(spacing: 12) {
+                        ForEach(AppSettings.speakerColorSlots) { slot in
+                            SpeakerColorRow(slot: slot)
+                                .environmentObject(settings)
+                        }
+                        settingsActionButton(settings.t("button.reset"), role: .destructive) {
+                            settings.resetSpeakerColors()
+                            model.showSavedToast(settings.t("toast.speaker_colors_reset"))
+                        }
+                    }
+                }
+            }
+
+            backgroundSettingsSection
+            trackBackgroundSettingsSection
+        }
+    }
+
+    private var aiSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            settingsSection(settings.t("section.ai_lyrics"), description: settings.t("section.ai_lyrics_desc")) {
+                settingsToggleCard(settings.t("lyrics.translation"), binding: $settings.translationEnabled)
+                settingsToggleCard(settings.t("lyrics.pronunciation"), binding: $settings.pronunciationEnabled)
+                settingsCard(settings.t("section.provider")) {
+                    Picker("", selection: providerBinding) {
+                        ForEach(AppSettings.providers) { provider in
+                            Text(provider.label).tag(provider.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .settingsMenuSurface()
+                }
+                if let url = URL(string: selectedProvider.apiKeyURL), !selectedProvider.apiKeyURL.trimmed.isEmpty {
+                    Link(settings.t("button.get_key"), destination: url)
+                        .font(.pretendard(15, weight: .semibold))
+                }
+                settingsCard(settings.t("field.base_url")) {
+                    settingsTextField(settings.t("field.base_url"), text: $settings.baseUrl)
+                }
+                settingsCard(settings.t("field.model")) {
+                    settingsTextField(settings.t("field.model"), text: $settings.model)
+                }
+                settingsCard(settings.t("field.max_tokens")) {
+                    Stepper(value: maxTokensBinding, in: 256...65_536, step: 256) {
+                        Text("\(settings.maxTokens)")
+                    }
+                }
+                settingsCard(settings.t("field.temperature")) {
+                    HStack {
+                        Slider(value: temperatureBinding, in: 0...2, step: 0.05)
+                        Text(String(format: "%.2f", settings.temperature))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+                settingsCard(settings.t("field.api_key"), description: settings.t("field.api_key_desc")) {
+                    TextEditor(text: $settings.apiKeys)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 86)
+                        .padding(10)
+                        .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10))
+                }
+                if settings.providerId == "pollinations" {
+                    settingsCard(settings.t("pollinations.access_token")) {
+                        SecureField(settings.t("pollinations.access_token"), text: $settings.pollinationsAccessToken)
+                            .textFieldStyle(PlayerTextFieldStyle())
+                        Text(model.pollinationsAuthStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.62))
+                        settingsActionButton(model.pollinationsConnected ? settings.t("pollinations.reconnect") : settings.t("pollinations.connect")) {
+                            model.startPollinationsLogin()
+                        }
+                        .disabled(model.pollinationsAuthInFlight)
+                        settingsActionButton(settings.t("pollinations.open_login")) { model.openPollinationsLoginPage() }
+                            .disabled(!model.pollinationsCanOpenLoginPage)
+                        settingsActionButton(settings.t("pollinations.test")) { model.testPollinationsToken() }
+                            .disabled(!model.pollinationsCanTestToken)
+                        settingsActionButton(settings.t("pollinations.disconnect"), role: .destructive) { model.disconnectPollinationsLogin() }
+                            .disabled(!model.pollinationsConnected || model.pollinationsAuthInFlight)
+                    }
+                }
+                settingsActionButton(settings.t("button.save_regenerate")) {
+                    model.saveAiSettingsAndRegenerate()
+                }
+            }
+
+            settingsSection(settings.t("section.language_rules")) {
+                settingsCard(settings.t("field.source")) {
+                    Picker("", selection: selectedRuleSourceBinding) {
+                        Text(settings.t("language.auto_default")).tag("auto")
+                        ForEach(AppSettings.languages) { language in
+                            Text("\(language.nativeName) · \(language.name)").tag(language.code)
+                        }
+                    }
+                    .labelsHidden()
+                    .settingsMenuSurface()
+                }
+                settingsToggleCard(settings.t("lyrics.translation"), binding: selectedRuleTranslationBinding)
+                settingsToggleCard(settings.t("lyrics.pronunciation"), binding: selectedRulePronunciationBinding)
+                settingsCard(settings.t("field.track_language")) {
+                    Text(selectedRuleSourceLabel).foregroundStyle(.white.opacity(0.70))
+                }
+                settingsCard(settings.t("field.save_target")) {
+                    Text(selectedRuleTargetLabel).foregroundStyle(.white.opacity(0.70))
+                }
+                settingsActionButton(settings.t("lyrics.rule.reset"), role: .destructive) {
+                    settings.resetLanguageRule(sourceLang: effectiveRuleSourceLang)
+                    model.saveLanguageRuleAndRegenerate()
+                }
+                .disabled(effectiveRuleSourceLang == AppSettings.defaultSourceLang)
+            }
+        }
+    }
+
+    private var toolsSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            settingsSection(settings.t("section.spotify_api")) {
+                settingsCard(settings.t("section.spotify_api")) {
+                    SpotifySetupInstructionsPanel()
+                }
+                settingsCard(settings.t("field.spotify_client_id")) {
+                    settingsTextField(settings.t("field.spotify_client_id"), text: $settings.spotifyClientId)
+                }
+                settingsCard(settings.t("field.spotify_client_secret")) {
+                    SecureField(settings.t("field.spotify_client_secret"), text: $settings.spotifyClientSecret)
+                        .textFieldStyle(PlayerTextFieldStyle())
+                }
+                settingsCard(settings.t("field.redirect_uri")) {
+                    Text("ivlyrics-ios://spotify-callback/")
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                settingsCard(settings.t("field.live_source")) {
+                    Text(model.spotifyAppRemoteConnected ? settings.t("spotify.source.app_remote") : (model.spotifyLivePolling ? settings.t("spotify.source.web_api") : settings.t("spotify.source.off")))
+                        .foregroundStyle(.white.opacity(0.72))
+                    settingsActionButton(model.spotifyLivePolling ? settings.t("spotify.live.stop") : settings.t("spotify.live.connect")) {
+                        model.spotifyLivePolling ? model.stopSpotifyLivePolling() : model.connectSpotifyUserAndStartPolling()
+                    }
+                }
+                if !model.spotifyValidationStatus.trimmed.isEmpty {
+                    Text(model.spotifyValidationStatus)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                }
+                settingsActionButton(model.spotifyCredentialsValidationInFlight ? settings.t("spotify.validate_checking") : settings.t("button.spotify_save")) {
+                    model.validateSpotifyApiCredentials(reloadOnChange: true)
+                }
+                .disabled(model.spotifyCredentialsValidationInFlight)
+                settingsActionButton(settings.t("spotify.disconnect_oauth"), role: .destructive) {
+                    model.disconnectSpotifyUser()
+                }
+                .disabled(!model.spotifyUserConnected)
+            }
+
+            settingsSection(settings.t("lyrics.sync.title"), description: settings.t("lyrics.sync.help")) {
+                settingsCard(settings.t("lyrics.sync.title")) {
+                    DetailedOffsetControls(
+                        title: settings.t("lyrics.sync.title"),
+                        help: settings.t("lyrics.sync.help"),
+                        value: model.trackOffsetMs,
+                        resetTitle: settings.t("lyrics.sync.reset"),
+                        adjust: { model.adjustTrackOffsetMs($0) },
+                        reset: { model.setTrackOffsetMs(0, notify: true) }
+                    )
+                    BluetoothSyncOffsetControls()
+                    DetailedOffsetControls(
+                        title: settings.t("lyrics.video_sync.title"),
+                        help: settings.t("lyrics.video_sync.help"),
+                        value: model.videoOffsetMs,
+                        resetTitle: settings.t("lyrics.video_sync.reset"),
+                        adjust: { model.adjustVideoOffsetMs($0) },
+                        reset: { model.setVideoOffsetMs(0, notify: true) }
+                    )
+                }
+            }
+
+            settingsSection(settings.t("section.update")) {
+                settingsCard(settings.t("section.update")) {
+                    Text(model.updateStatus)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                    settingsActionButton(model.updateCheckInFlight ? settings.t("update.checking") : settings.t("update.check")) {
+                        model.checkForUpdates(manual: true)
+                    }
+                    .disabled(model.updateCheckInFlight)
+                    settingsActionButton(settings.t("button.open_release")) { model.openUpdateReleasePage() }
+                }
+            }
+
+            settingsSection(settings.t("section.tools"), description: settings.t("section.tools_desc")) {
+                settingsActionButton(settings.t("button.reload_current")) { model.reloadLyrics(bypassCache: true) }
+                settingsActionButton(settings.t("button.clear_current")) { model.clearCachesForCurrentTrack() }
+                settingsActionButton(settings.t("button.clear_all"), role: .destructive) { model.clearAllCaches() }
+                settingsActionButton(settings.t("button.ai_cache_clear")) { model.clearAiCaches() }
+                settingsActionButton(settings.t("button.debug_log")) { settingsLogsPresented = true }
+            }
+        }
+    }
+
+    private var backgroundSettingsSection: some View {
+        settingsSection(settings.t("section.background"), description: settings.t("section.background_desc")) {
+            settingsCard(settings.t("setting.background_mode"), description: settings.t("setting.background_mode_desc")) {
+                Picker("", selection: Binding(get: { settings.backgroundMode }, set: { value in
+                    settings.backgroundMode = value
+                    model.refreshBackgroundForCurrentTrack()
+                    model.showSavedToast(settings.t("toast.background_saved"))
+                })) {
+                    Text(settings.t("background.mode.gradient")).tag(AppSettings.backgroundGradient)
+                    Text(settings.t("background.mode.blur_gradient")).tag(AppSettings.backgroundBlurGradient)
+                    Text(settings.t("background.mode.video")).tag(AppSettings.backgroundVideo)
+                    Text(settings.t("background.mode.solid")).tag(AppSettings.backgroundSolid)
+                }
+                .labelsHidden()
+                .settingsMenuSurface()
+            }
+            settingsCard(settings.t("setting.brightness")) {
+                Slider(value: Binding(get: { Double(settings.backgroundBrightness) }, set: { settings.backgroundBrightness = Int($0.rounded()) }), in: 0...100, step: 1, onEditingChanged: backgroundSliderEditingChanged)
+            }
+            settingsCard(settings.t("setting.blur")) {
+                Slider(value: Binding(get: { Double(settings.backgroundBlur) }, set: { settings.backgroundBlur = Int($0.rounded()) }), in: 0...100, step: 1, onEditingChanged: backgroundSliderEditingChanged)
+            }
+            settingsCard(settings.t("setting.video_scale")) {
+                Slider(value: Binding(get: { Double(settings.backgroundVideoScale) }, set: { settings.backgroundVideoScale = AppSettings.clampBackgroundVideoScale(Int($0.rounded())) }), in: 100...180, step: 1, onEditingChanged: backgroundSliderEditingChanged)
+            }
+            settingsToggleCard(settings.t("setting.noise"), binding: backgroundNoiseBinding)
+            settingsToggleCard(settings.t("setting.reduce_motion"), binding: backgroundReduceMotionBinding)
+            settingsCard(settings.t("field.solid_color")) {
+                HexColorEditorRow(
+                    title: settings.t("field.solid_color"),
+                    hexColor: $settings.backgroundSolidColor,
+                    fallback: "#1e3a8a",
+                    onSave: { model.showSavedToast(settings.t("toast.background_saved")) }
+                )
+            }
+        }
+    }
+
+    private var trackBackgroundSettingsSection: some View {
+        settingsSection(settings.t("section.track_background")) {
+            settingsToggleCard(settings.t("lyrics.background.override"), binding: trackBackgroundOverrideBinding)
+                .disabled(model.currentTrackKey.isEmpty)
+            if model.currentTrackKey.isEmpty {
+                Text(settings.t("label.no_current_track"))
+                    .font(.pretendard(13))
+                    .foregroundStyle(.white.opacity(0.58))
+            } else if currentTrackHasBackgroundOverride {
+                settingsCard(settings.t("setting.background_mode")) {
+                    Picker("", selection: trackBackgroundModeBinding) {
+                        Text(settings.t("background.mode.gradient")).tag(AppSettings.backgroundGradient)
+                        Text(settings.t("background.mode.blur_gradient")).tag(AppSettings.backgroundBlurGradient)
+                        Text(settings.t("background.mode.video")).tag(AppSettings.backgroundVideo)
+                        Text(settings.t("background.mode.solid")).tag(AppSettings.backgroundSolid)
+                    }
+                    .labelsHidden()
+                    .settingsMenuSurface()
+                }
+                settingsCard(settings.t("setting.brightness")) {
+                    Slider(value: trackBackgroundBrightnessBinding, in: 0...100, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
+                }
+                settingsCard(settings.t("setting.blur")) {
+                    Slider(value: trackBackgroundBlurBinding, in: 0...100, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
+                }
+                settingsCard(settings.t("setting.video_scale")) {
+                    Slider(value: trackBackgroundVideoScaleBinding, in: 100...180, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
+                }
+                settingsToggleCard(settings.t("setting.noise"), binding: trackBackgroundNoiseBinding)
+                settingsToggleCard(settings.t("setting.reduce_motion"), binding: trackBackgroundReduceMotionBinding)
+                settingsCard(settings.t("field.solid_color")) {
+                    HexColorEditorRow(
+                        title: settings.t("field.solid_color"),
+                        hexColor: trackBackgroundSolidColorBinding,
+                        fallback: "#1e3a8a",
+                        onSave: { model.showSavedToast(settings.t("toast.track_background_saved")) }
+                    )
+                }
+            }
+        }
+    }
+
+    private var aiStatusKey: String {
+        if settings.translationEnabled || settings.pronunciationEnabled {
+            return "status.ai_lyrics_active"
+        }
+        return "status.ai_disabled"
+    }
+
+    private func settingsSection<Content: View>(
+        _ title: String,
+        description: String = "",
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.pretendard(23, weight: .bold))
+                .foregroundStyle(.white)
+            if !description.trimmed.isEmpty {
+                Text(description)
+                    .font(.pretendard(14))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                content()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func settingsCard<Content: View>(
+        _ title: String,
+        description: String = "",
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !title.trimmed.isEmpty {
+                Text(title)
+                    .font(.pretendard(16, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            if !description.trimmed.isEmpty {
+                Text(description)
+                    .font(.pretendard(13))
+                    .foregroundStyle(.white.opacity(0.60))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func settingsToggleCard(_ title: String, description: String = "", binding: Binding<Bool>) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(title)
+                    .font(.pretendard(16, weight: .semibold))
+                    .foregroundStyle(.white)
+                if !description.trimmed.isEmpty {
+                    Text(description)
+                        .font(.pretendard(13))
+                        .foregroundStyle(.white.opacity(0.60))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .fixedSize()
+        }
+        .padding(16)
+        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func settingsActionButton(_ title: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
+        Button(role: role, action: action) {
+            Text(title)
+                .font(.pretendard(15, weight: .semibold))
+                .foregroundStyle(role == .destructive ? Color(red: 1.0, green: 0.45, blue: 0.48) : .white)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 44)
+                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func settingsTextField(_ title: String, text: Binding<String>) -> some View {
+        TextField(title, text: text)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .textFieldStyle(PlayerTextFieldStyle())
+    }
+
+    private var effectiveRuleSourceLang: String {
+        model.effectiveSelectedRuleSourceLang
+    }
+
+    private var selectedProvider: AppSettings.Provider {
+        AppSettings.providerById(settings.providerId)
+    }
+
+    private var uiLanguageBinding: Binding<String> {
+        Binding(
+            get: { settings.uiLang },
+            set: { value in
+                settings.uiLang = value
+                model.refreshLocalizedStatusStrings()
+                model.showSavedToast(settings.t("toast.ui_language_saved"))
+            }
+        )
+    }
+
+    private var providerBinding: Binding<String> {
+        Binding(
+            get: { settings.providerId },
+            set: { value in
+                settings.setProvider(value)
+                model.showSavedToast(settings.t("toast.provider_saved"))
+            }
+        )
+    }
+
+    private var metadataTranslationBinding: Binding<Bool> {
+        boolSettingBinding(
+            \.metadataTranslationEnabled,
+            onToastKey: "toast.metadata_translation_on",
+            offToastKey: "toast.metadata_translation_off"
+        )
+    }
+
+    private var japaneseFuriganaBinding: Binding<Bool> {
+        boolSettingBinding(
+            \.japaneseFuriganaEnabled,
+            onToastKey: "toast.furigana_on",
+            offToastKey: "toast.furigana_off"
+        )
+    }
+
+    private var autoInterludeBinding: Binding<Bool> {
+        boolSettingBinding(
+            \.autoInstrumentalBreakEnabled,
+            onToastKey: "toast.auto_interlude_on",
+            offToastKey: "toast.auto_interlude_off"
+        )
+    }
+
+    private var lyricsAlignmentBinding: Binding<String> {
+        Binding(
+            get: { AppSettings.normalizeLyricsAlignment(settings.lyricsTextAlignment) },
+            set: { value in
+                settings.lyricsTextAlignment = AppSettings.normalizeLyricsAlignment(value)
+                model.showSavedToast(settings.t("toast.lyrics_alignment_saved"))
+            }
+        )
+    }
+
+    private var keepScreenOnBinding: Binding<Bool> {
+        boolSettingBinding(\.keepScreenOn, onToastKey: "toast.keep_screen_on_on", offToastKey: "toast.keep_screen_on_off")
+    }
+
+    private var landscapeAutoHideBinding: Binding<Bool> {
+        boolSettingBinding(\.landscapeAutoHideControls, onToastKey: "toast.landscape_auto_hide_on", offToastKey: "toast.landscape_auto_hide_off")
+    }
+
+    private var landscapeCenterNoLyricsBinding: Binding<Bool> {
+        boolSettingBinding(\.landscapeCenterNoLyrics, onToastKey: "toast.landscape_center_no_lyrics_on", offToastKey: "toast.landscape_center_no_lyrics_off")
+    }
+
+    private var pipShowArtworkBinding: Binding<Bool> {
+        boolSettingBinding(\.pipShowArtwork, toastKey: "toast.pip_settings_saved")
+    }
+
+    private var backgroundNoiseBinding: Binding<Bool> {
+        boolSettingBinding(\.backgroundNoiseEnabled, onToastKey: "toast.background_noise_on", offToastKey: "toast.background_noise_off")
+    }
+
+    private var backgroundReduceMotionBinding: Binding<Bool> {
+        boolSettingBinding(\.backgroundReduceMotionEnabled, onToastKey: "toast.reduce_motion_on", offToastKey: "toast.reduce_motion_off")
+    }
+
+    private func settingsSavedBinding(_ keyPath: ReferenceWritableKeyPath<AppSettings, Bool>) -> Binding<Bool> {
+        boolSettingBinding(keyPath, toastKey: "toast.settings_saved")
+    }
+
+    private func boolSettingBinding(_ keyPath: ReferenceWritableKeyPath<AppSettings, Bool>, toastKey: String) -> Binding<Bool> {
+        Binding(
+            get: { settings[keyPath: keyPath] },
+            set: { value in
+                settings[keyPath: keyPath] = value
+                model.showSavedToast(settings.t(toastKey))
+            }
+        )
+    }
+
+    private func boolSettingBinding(
+        _ keyPath: ReferenceWritableKeyPath<AppSettings, Bool>,
+        onToastKey: String,
+        offToastKey: String
+    ) -> Binding<Bool> {
+        Binding(
+            get: { settings[keyPath: keyPath] },
+            set: { value in
+                settings[keyPath: keyPath] = value
+                model.showSavedToast(settings.t(value ? onToastKey : offToastKey))
+            }
+        )
+    }
+
+    private func backgroundSliderEditingChanged(_ editing: Bool) {
+        if !editing {
+            model.showSavedToast(settings.t("toast.background_saved"))
+        }
+    }
+
+    private func trackBackgroundSliderEditingChanged(_ editing: Bool) {
+        if !editing {
+            model.showSavedToast(settings.t("toast.track_background_saved"))
+        }
+    }
+
+    private var maxTokensBinding: Binding<Int> {
+        Binding(
+            get: { settings.maxTokens },
+            set: { value in
+                settings.maxTokens = max(256, min(65_536, value))
+            }
+        )
+    }
+
+    private var temperatureBinding: Binding<Double> {
+        Binding(
+            get: { settings.temperature },
+            set: { value in
+                settings.temperature = min(2, max(0, value))
+            }
+        )
+    }
+
+    private var selectedRuleSourceBinding: Binding<String> {
+        Binding(
+            get: { model.selectedRuleSourceLang },
+            set: { model.setSelectedRuleSourceLang($0) }
+        )
+    }
+
+    private var selectedRule: AppSettings.LanguageRule {
+        _ = settings.languageRulesRevision
+        return settings.languageRule(for: effectiveRuleSourceLang)
+    }
+
+    private var selectedRuleTranslationBinding: Binding<Bool> {
+        Binding(
+            get: { selectedRule.translationEnabled },
+            set: { enabled in
+                let rule = selectedRule
+                settings.setLanguageRule(
+                    sourceLang: effectiveRuleSourceLang,
+                    translationEnabled: enabled,
+                    pronunciationEnabled: rule.pronunciationEnabled,
+                    targetLang: settings.outputLang
+                )
+                model.saveLanguageRuleAndRegenerate()
+            }
+        )
+    }
+
+    private var selectedRulePronunciationBinding: Binding<Bool> {
+        Binding(
+            get: { selectedRule.pronunciationEnabled },
+            set: { enabled in
+                let rule = selectedRule
+                settings.setLanguageRule(
+                    sourceLang: effectiveRuleSourceLang,
+                    translationEnabled: rule.translationEnabled,
+                    pronunciationEnabled: enabled,
+                    targetLang: settings.outputLang
+                )
+                model.saveLanguageRuleAndRegenerate()
+            }
+        )
+    }
+
+    private var selectedRuleSourceLabel: String {
+        if model.selectedRuleSourceLang == "auto" {
+            return "auto(\(model.effectiveDetectedLyricsSourceLang))"
+        }
+        let language = AppSettings.languageInfo(effectiveRuleSourceLang)
+        return "\(language.nativeName) · \(language.name)"
+    }
+
+    private var selectedRuleTargetLabel: String {
+        let target = settings.snapshot.resolveTargetLanguage(sourceLang: effectiveRuleSourceLang)
+        let language = AppSettings.languageInfo(target)
+        return "\(language.nativeName) · \(language.name)"
+    }
+
+    private var previewHiddenBinding: Binding<Bool> {
+        Binding(
+            get: { AppSettings.normalizePreviewItems(settings.previewItems) == AppSettings.previewItemNone },
+            set: { hidden in
+                settings.setPreviewItems(hidden ? AppSettings.previewItemNone : AppSettings.previewItemOriginal)
+                model.showSavedToast(settings.t("toast.preview_saved"))
+            }
+        )
+    }
+
+    private func previewItemBinding(_ item: Int) -> Binding<Bool> {
+        Binding(
+            get: {
+                AppSettings.previewItemEnabled(settings.previewItems, item)
+            },
+            set: { enabled in
+                var next = AppSettings.normalizePreviewItems(settings.previewItems)
+                if enabled {
+                    next |= item
+                } else {
+                    next &= ~item
+                }
+                settings.setPreviewItems(next)
+                model.showSavedToast(settings.t("toast.preview_saved"))
+            }
+        )
+    }
+
+    private func typographyStyle(_ slot: AppSettings.TypographySlot) -> AppSettings.TypographyStyle {
+        _ = settings.typographyRevision
+        return settings.typographySettings().style(slot.id)
+    }
+
+    private func typographySizeBinding(_ slot: AppSettings.TypographySlot) -> Binding<Double> {
+        Binding(
+            get: { Double(typographyStyle(slot).sizePercent) },
+            set: { value in
+                let current = typographyStyle(slot)
+                settings.setTypographyStyle(slotId: slot.id, sizePercent: Int(value.rounded()), weight: current.weight)
+            }
+        )
+    }
+
+    private func typographyWeightBinding(_ slot: AppSettings.TypographySlot) -> Binding<String> {
+        Binding(
+            get: { typographyStyle(slot).weight },
+            set: { value in
+                let current = typographyStyle(slot)
+                settings.setTypographyStyle(slotId: slot.id, sizePercent: current.sizePercent, weight: value)
+                model.showSavedToast(settings.t("toast.typography_saved"))
+            }
+        )
+    }
+
+    private var currentTrackHasBackgroundOverride: Bool {
+        _ = settings.backgroundSettingsRevision
+        return settings.trackBackgroundSettings(model.currentTrackKey) != nil
+    }
+
+    private var editableTrackBackground: AppSettings.BackgroundSettings {
+        _ = settings.backgroundSettingsRevision
+        return settings.effectiveBackgroundSettings(trackKey: model.currentTrackKey)
+    }
+
+    private var trackBackgroundOverrideBinding: Binding<Bool> {
+        Binding(
+            get: { currentTrackHasBackgroundOverride },
+            set: { enabled in
+                guard !model.currentTrackKey.isEmpty else { return }
+                if enabled {
+                    settings.setTrackBackgroundSettings(model.currentTrackKey, settings.globalBackgroundSettings)
+                    model.showSavedToast(settings.t("toast.track_background_saved"))
+                } else {
+                    settings.clearTrackBackgroundSettings(model.currentTrackKey)
+                    model.showSavedToast(settings.t("toast.track_background_cleared"))
+                }
+                model.refreshBackgroundForCurrentTrack()
+            }
+        )
+    }
+
+    private var trackBackgroundModeBinding: Binding<String> {
+        Binding(
+            get: { editableTrackBackground.mode },
+            set: { value in
+                updateTrackBackground { $0.mode = value }
+                model.refreshBackgroundForCurrentTrack()
+                model.showSavedToast(settings.t("toast.track_background_saved"))
+            }
+        )
+    }
+
+    private var trackBackgroundBrightnessBinding: Binding<Double> {
+        Binding(
+            get: { Double(editableTrackBackground.brightness) },
+            set: { value in updateTrackBackground { $0.brightness = Int(value.rounded()) } }
+        )
+    }
+
+    private var trackBackgroundBlurBinding: Binding<Double> {
+        Binding(
+            get: { Double(editableTrackBackground.blur) },
+            set: { value in updateTrackBackground { $0.blur = Int(value.rounded()) } }
+        )
+    }
+
+    private var trackBackgroundVideoScaleBinding: Binding<Double> {
+        Binding(
+            get: { Double(editableTrackBackground.videoScale) },
+            set: { value in updateTrackBackground { $0.videoScale = AppSettings.clampBackgroundVideoScale(Int(value.rounded())) } }
+        )
+    }
+
+    private var trackBackgroundNoiseBinding: Binding<Bool> {
+        Binding(
+            get: { editableTrackBackground.noise },
+            set: { value in
+                updateTrackBackground { $0.noise = value }
+                model.showSavedToast(settings.t("toast.track_background_saved"))
+            }
+        )
+    }
+
+    private var trackBackgroundReduceMotionBinding: Binding<Bool> {
+        Binding(
+            get: { editableTrackBackground.reduceMotion },
+            set: { value in
+                updateTrackBackground { $0.reduceMotion = value }
+                model.showSavedToast(settings.t("toast.track_background_saved"))
+            }
+        )
+    }
+
+    private var trackBackgroundSolidColorBinding: Binding<String> {
+        Binding(
+            get: { editableTrackBackground.solidColor },
+            set: { value in updateTrackBackground { $0.solidColor = value } }
+        )
+    }
+
+    private func updateTrackBackground(_ update: (inout AppSettings.BackgroundSettings) -> Void) {
+        guard !model.currentTrackKey.isEmpty, currentTrackHasBackgroundOverride else { return }
+        var next = editableTrackBackground
+        update(&next)
+        settings.setTrackBackgroundSettings(model.currentTrackKey, next)
+    }
+}
+
+private extension View {
+    func settingsMenuSurface() -> some View {
+        self
+            .pickerStyle(.menu)
+            .tint(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 48)
+            .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+}
+
+struct UpdateSheetView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.52)
+                    .ignoresSafeArea()
+                    .onTapGesture { dismissDialog() }
+
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(settings.t("update.dialog_title"))
+                        .font(.pretendard(20, weight: .bold))
+
+                    if let info = model.pendingUpdateInfo {
+                        ScrollView {
+                            Text(updateMessage(info))
+                                .font(.pretendard(13))
+                                .foregroundStyle(.white.opacity(0.82))
+                                .lineSpacing(4)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(height: min(updateMessageHeight(info), geometry.size.height * 0.52))
+                        .padding(.top, 18)
+                    } else {
+                        Text(model.updateStatus.trimmed.isEmpty ? settings.t("update.status_idle") : model.updateStatus)
+                            .font(.pretendard(13))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 18)
+                    }
+
+                    HStack(spacing: 8) {
+                        if let info = model.pendingUpdateInfo {
+                            Button(settings.t("update.open_release")) {
+                                dismissDialog()
+                                model.openUpdateReleasePage(info)
+                            }
+                            .androidDialogButton()
+                        }
+
+                        Button(settings.t("update.later")) {
+                            dismissDialog()
+                        }
+                        .androidDialogButton()
+                    }
+                    .padding(.top, 20)
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 20)
+                .foregroundStyle(.white)
+                .frame(maxWidth: min(430, max(300, geometry.size.width - 32)))
+                .background(
+                    Color(red: 31.0 / 255.0, green: 32.0 / 255.0, blue: 39.0 / 255.0),
+                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                )
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private func dismissDialog() {
+        withAnimation(.easeOut(duration: 0.16)) {
+            model.updateDialogPresented = false
+        }
+    }
+
+    private func updateMessage(_ info: AppUpdateInfo) -> String {
+        settings.tf(
+            "update.dialog_message_format",
+            info.currentVersionName,
+            info.currentVersionCode,
+            info.latestDisplayVersion,
+            info.latestVersionCode,
+            compactReleaseNotes(info.releaseNotes)
+        )
+    }
+
+    private func updateMessageHeight(_ info: AppUpdateInfo) -> CGFloat {
+        let estimatedLines = updateMessage(info)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .reduce(0) { count, line in
+                count + max(1, Int(ceil(Double(line.count) / 30.0)))
+            }
+        return min(390, max(96, CGFloat(estimatedLines) * 22))
+    }
+
+    private func compactReleaseNotes(_ notes: String) -> String {
+        let value = notes.trimmed
+        if value.isEmpty {
+            return settings.t("update.no_release_notes")
+        }
+        return value.count <= 700 ? value : String(value.prefix(700)).trimmed + "\n..."
+    }
+}
+
+private extension View {
+    func androidDialogButton() -> some View {
+        self
+            .font(.pretendard(12, weight: .bold))
+            .foregroundStyle(Color(red: 142.0 / 255.0, green: 206.0 / 255.0, blue: 255.0 / 255.0))
+            .frame(maxWidth: .infinity)
+            .frame(height: 42)
+            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+    }
+}
+
+struct SpeakerColorRow: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    let slot: AppSettings.SpeakerColorSlot
+
+    var body: some View {
+        HexColorEditorRow(
+            title: slotTitle,
+            hexColor: colorBinding,
+            fallback: slot.defaultColor,
+            onSave: { model.showSavedToast(settings.t("toast.speaker_colors_saved")) }
+        )
+    }
+
+    private var colorBinding: Binding<String> {
+        Binding(
+            get: { settings.speakerColorSettings().hex(slot.id) },
+            set: { settings.setSpeakerColor(slotId: slot.id, color: $0) }
+        )
+    }
+
+    private var slotTitle: String {
+        if slot.id == AppSettings.speakerColorNormal {
+            return settings.t("speaker_color.normal")
+        }
+        let baseKey: String
+        if slot.id.hasPrefix("duet") {
+            baseKey = "speaker_color.duet"
+        } else if slot.id.hasPrefix("male") {
+            baseKey = "speaker_color.male"
+        } else if slot.id.hasPrefix("female") {
+            baseKey = "speaker_color.female"
+        } else {
+            return slot.label
+        }
+        guard let number = Int(slot.id.replacingOccurrences(of: #"^\D+"#, with: "", options: .regularExpression)) else {
+            return settings.t(baseKey)
+        }
+        return "\(settings.t(baseKey)) \(number)"
+    }
+}
+
+struct HexColorEditorRow: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    let title: String
+    @Binding var hexColor: String
+    let fallback: String
+    var onSave: (() -> Void)? = nil
+    @State private var draft = ""
+    @State private var invalidDraft = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color(hex: normalizedColor))
+                .frame(width: 22, height: 22)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.35)))
+            Text(title)
+            Spacer()
+            ColorPicker("", selection: colorBinding, supportsOpacity: false)
+                .labelsHidden()
+                .frame(width: 32)
+            TextField(fallback, text: $draft)
+                .multilineTextAlignment(.trailing)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.caption.monospaced())
+                .foregroundStyle(invalidDraft ? .red : .primary)
+                .frame(maxWidth: 110)
+                .focused($focused)
+                .onChange(of: draft) { _, value in
+                    invalidDraft = !value.trimmed.isEmpty && !AppSettings.isHexColor(value)
+                }
+                .onSubmit(saveDraft)
+        }
+        .onAppear {
+            draft = normalizedColor
+        }
+        .onChange(of: focused) { _, isFocused in
+            if !isFocused {
+                saveDraft()
+            }
+        }
+        .onChange(of: hexColor) { _, _ in
+            if !focused {
+                draft = normalizedColor
+                invalidDraft = false
+            }
+        }
+    }
+
+    private var normalizedColor: String {
+        AppSettings.normalizeHexColor(hexColor, fallback: fallback)
+    }
+
+    private var colorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: normalizedColor) },
+            set: { color in
+                guard let hex = color.hexRGB else { return }
+                hexColor = hex
+                draft = hex
+                invalidDraft = false
+                onSave?()
+            }
+        )
+    }
+
+    private func saveDraft() {
+        guard AppSettings.isHexColor(draft) else {
+            invalidDraft = true
+            model.showSavedToast(settings.tf("toast.invalid_color_format", title))
+            return
+        }
+        let normalized = AppSettings.normalizeHexColor(draft, fallback: fallback)
+        hexColor = normalized
+        draft = normalized
+        invalidDraft = false
+        onSave?()
+    }
+}
+
+struct PlayerTextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .font(.callout)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .frame(height: 38)
+            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.08)))
+    }
+}
+
+extension AppSettings.TypographySettings {
+    func font(slotId: String, baseSize: CGFloat) -> Font {
+        let style = style(slotId)
+        return .pretendard(scaledSize(baseSize: baseSize, style: style), weight: style.fontWeight)
+    }
+
+    func font(slotId: String, baseSize: CGFloat, multiplier: Double) -> Font {
+        let style = style(slotId)
+        return .pretendard(scaledSize(baseSize: baseSize, style: style, multiplier: multiplier), weight: style.fontWeight)
+    }
+
+    func scaledSize(slotId: String, baseSize: CGFloat, multiplier: Double = 1) -> CGFloat {
+        scaledSize(baseSize: baseSize, style: style(slotId), multiplier: multiplier)
+    }
+
+    private func scaledSize(baseSize: CGFloat, style: AppSettings.TypographyStyle, multiplier: Double = 1) -> CGFloat {
+        let safeMultiplier = min(1.8, max(0.5, multiplier))
+        return CGFloat(max(8, Double(baseSize) * style.scale * safeMultiplier))
+    }
+}
+
+extension AppSettings.TypographyStyle {
+    var fontWeight: Font.Weight {
+        switch weight {
+        case AppSettings.typoWeightBold:
+            return .bold
+        case AppSettings.typoWeightRegular:
+            return .regular
+        default:
+            return .semibold
+        }
+    }
+}
+
+extension Color {
+    init(hex: String) {
+        let value = hex.trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        var number: UInt64 = 0
+        Scanner(string: value).scanHexInt64(&number)
+        let red = Double((number >> 16) & 0xff) / 255.0
+        let green = Double((number >> 8) & 0xff) / 255.0
+        let blue = Double(number & 0xff) / 255.0
+        self.init(red: red, green: green, blue: blue)
+    }
+
+    var hexRGB: String? {
+        #if os(iOS)
+        let uiColor = UIColor(self)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        guard uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+            return nil
+        }
+        return String(
+            format: "#%02x%02x%02x",
+            Int((red * 255).rounded()),
+            Int((green * 255).rounded()),
+            Int((blue * 255).rounded())
+        )
+        #else
+        return nil
+        #endif
+    }
 }
