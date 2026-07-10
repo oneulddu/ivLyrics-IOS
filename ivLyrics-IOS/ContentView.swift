@@ -53,6 +53,8 @@ struct ContentView: View {
                 size: geometry.size,
                 safeAreaInsets: geometry.safeAreaInsets
             )
+            .statusBarHidden(isLandscape)
+            .persistentSystemOverlays(isLandscape ? .hidden : .automatic)
             .contentShape(Rectangle())
             .onTapGesture {
                 showLandscapeControlsTemporarily(isLandscape: isLandscape)
@@ -245,7 +247,7 @@ struct ContentView: View {
         GeometryReader { proxy in
             let width = proxy.size.width
             let height = proxy.size.height
-            let artworkSize = min(max(180, width - 48), max(180, height * 0.45))
+            let artworkSize = max(180, min(width - 32, height * 0.45))
             let typography = settings.typographySettings()
 
             VStack(spacing: 0) {
@@ -1634,7 +1636,7 @@ private struct LandscapePlayerPane: View {
         let widthFraction: CGFloat = centered ? (tablet ? 0.28 : 0.30) : (tablet ? 0.28 : 0.23)
         let rawSize = min(containerSize.height * heightFraction, containerSize.width * widthFraction)
         let minimum: CGFloat = tablet ? 190 : 132
-        return min(max(minimum, rawSize), centered ? 280 : 240)
+        return max(minimum, rawSize)
     }
 }
 
