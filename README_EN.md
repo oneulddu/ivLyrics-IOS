@@ -1,10 +1,13 @@
+> [!IMPORTANT]
+> ivLyrics iOS is currently under development and has not been released yet.
+
 <img width="1122" height="1402" alt="image" src="https://github.com/user-attachments/assets/4e0850bf-092f-45d3-8645-4ed9f1b4dfba" />
 
-# ivLyrics Android
+# ivLyrics iOS
 
 [한국어](README.md) | English
 
-ivLyrics Android detects the song currently playing in Spotify and displays karaoke-style lyrics on Android using ivLyrics community sync data and LRCLIB lyrics.
+ivLyrics iOS detects the song currently playing in Spotify and displays karaoke-style lyrics on iOS using ivLyrics community sync data and LRCLIB lyrics.
 
 ## Disclaimer
 
@@ -12,7 +15,7 @@ ivLyrics Android detects the song currently playing in Spotify and displays kara
 >
 > **Unofficial Project Notice**
 >
-> This project and its contributors are not affiliated with, authorized by, endorsed by, or officially connected to Spotify, its affiliates, or its subsidiaries. **This project is an independent, non-profit, unofficial extension developed by a volunteer team to provide a desktop experience.**
+> This project and its contributors are not affiliated with, authorized by, endorsed by, or officially connected to Spotify, its affiliates, or its subsidiaries. **This project is an independent, non-profit, unofficial iOS app under development by a volunteer team to provide the ivLyrics experience on iOS.**
 >
 > **Trademark Notice**
 >
@@ -20,7 +23,7 @@ ivLyrics Android detects the song currently playing in Spotify and displays kara
 >
 > **Limitation of Liability**
 >
-> This application (extension) is provided "as is" and is used entirely at your own risk. The developers and contributors are not liable for any claims, damages, legal consequences, or other liability arising from the use of this software or related dealings. You are solely responsible for all consequences resulting from your use of this software.
+> This application is provided "as is" and is used entirely at your own risk. The developers and contributors are not liable for any claims, damages, legal consequences, or other liability arising from the use of this software or related dealings. You are solely responsible for all consequences resulting from your use of this software.
 >
 > **Copyright and Terms Compliance**
 >
@@ -34,17 +37,19 @@ ivLyrics Android detects the song currently playing in Spotify and displays kara
 - Per-song-language translation and pronunciation rules
 - Main player and full lyrics page
 - Landscape player with a split lyrics layout
-- Floating shortcut from Spotify to ivLyrics
+- Open Spotify from the current track
 - Clear lyric cache for the current track or all tracks
 
 ## Installation
 
-1. Download the latest APK from GitHub Releases.
-2. Install the APK on your Android device.
-3. If Android shows a security prompt, allow "Install unknown apps" for the app you used to download the APK.
-4. Open ivLyrics Android and complete the first-run setup.
+ivLyrics iOS is not publicly distributed yet. Only development builds are currently supported.
 
-You can download the latest APK from [Releases](https://github.com/ivLis-Studio/ivLyrics-Android/releases).
+1. Clone this repository.
+2. Open `ivLyrics-IOS.xcodeproj` in Xcode.
+3. Configure your developer account, bundle ID, and Spotify API settings for your local environment.
+4. Run the app on a simulator or iOS device.
+
+iOS builds are not available on GitHub Releases yet.
 
 ## Lyrics Page Tips
 
@@ -57,7 +62,7 @@ You can download the latest APK from [Releases](https://github.com/ivLis-Studio/
 
 ## Translation, Pronunciation, and Furigana
 
-ivLyrics Android detects the song language automatically and stores translation and pronunciation settings separately for each language.
+ivLyrics iOS detects the song language automatically and stores translation and pronunciation settings separately for each language.
 
 For example, you can enable both translation and pronunciation for Japanese songs, enable only translation for English songs, and disable both for Spanish songs. If the detected language is wrong, you can override it from the lyric settings menu.
 
@@ -70,8 +75,8 @@ Translation and pronunciation data is cached. Once generated, it stays available
 ### The track is not detected
 
 - Make sure Spotify is actually playing music.
-- Make sure notification access is enabled for ivLyrics Android.
-- If the Spotify notification is not visible, open Spotify again and restart playback.
+- Make sure Spotify account linking is complete in ivLyrics iOS.
+- Open Spotify again and restart playback.
 
 ### Lyrics or artwork do not load
 
@@ -92,8 +97,8 @@ Translation and pronunciation data is cached. Once generated, it stays available
 - Adjust sync offset from the lyric settings menu.
 - You can fine-tune timing in 10ms, 50ms, and 100ms steps.
 
-### The floating shortcut does not appear
+### Opening Spotify does not work
 
-- Make sure display-over-other-apps permission is allowed.
-- The shortcut appears only on Spotify's now playing screen.
-- It may not appear while Spotify is in the background or on another Spotify screen.
+- Make sure the Spotify app is installed on iOS.
+- Make sure Spotify is actually playing music.
+- If track information has not loaded yet, wait briefly and try again.
