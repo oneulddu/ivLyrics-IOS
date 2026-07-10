@@ -132,7 +132,11 @@ struct ContentView: View {
     private func rootContent(isLandscape: Bool, size: CGSize, safeAreaInsets: EdgeInsets) -> some View {
         ZStack {
             PlayerBackgroundView()
-            primaryContent(isLandscape: isLandscape, size: size)
+            primaryContent(
+                isLandscape: isLandscape,
+                size: size,
+                safeAreaInsets: safeAreaInsets
+            )
             overlayContent(
                 isLandscape: isLandscape,
                 size: size,
@@ -164,11 +168,11 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func primaryContent(isLandscape: Bool, size: CGSize) -> some View {
+    private func primaryContent(isLandscape: Bool, size: CGSize, safeAreaInsets: EdgeInsets) -> some View {
         if isLandscape {
             landscapeContent(size: size)
         } else {
-            portraitContent()
+            portraitContent(safeAreaInsets: safeAreaInsets)
         }
     }
 
@@ -243,11 +247,12 @@ struct ContentView: View {
         )
     }
 
-    private func portraitContent() -> some View {
+    private func portraitContent(safeAreaInsets: EdgeInsets) -> some View {
         GeometryReader { proxy in
             let width = proxy.size.width
             let height = proxy.size.height
-            let artworkSize = max(180, min(width - 32, height * 0.45))
+            let fullHeight = height + safeAreaInsets.top + safeAreaInsets.bottom
+            let artworkSize = max(180, min(width - 32, fullHeight * 0.45))
             let typography = settings.typographySettings()
             let artworkMetadataSpacing = min(30, max(18, height * 0.034))
             let metadataControlsSpacing = min(38, max(28, height * 0.045))
