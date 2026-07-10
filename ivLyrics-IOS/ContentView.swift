@@ -168,6 +168,10 @@ struct ContentView: View {
                 PictureInPictureLayoutDebugPreview(controller: model.pictureInPictureController)
                     .zIndex(100)
             }
+            if ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_MAIN_PREVIEW"] == "1" {
+                MainLyricPreviewSlideDebugPreview()
+                    .zIndex(100)
+            }
 #endif
         }
     }
@@ -2815,7 +2819,12 @@ struct MainLyricPreviewPanel: View {
         if rows.isEmpty {
             addPreviewRow(&rows, text: original.text, rubyText: original.rubyText, syllables: original.syllables, kind: original.kind, speaker: line.speaker, slotId: AppSettings.typoMainPreviewOriginal)
         }
-        return rows
+        return rows.map { row in
+            var syncedRow = row
+            syncedRow.lineStartTimeMs = line.startTimeMs
+            syncedRow.lineEndTimeMs = line.endTimeMs
+            return syncedRow
+        }
     }
 
     private func addSupplementPreviewRow(
@@ -3046,6 +3055,8 @@ private struct MainLyricPreviewRow: Identifiable {
     var speaker: String = ""
     var type: MainLyricPreviewRowType = .text
     var slotId: String = AppSettings.typoMainPreviewOriginal
+    var lineStartTimeMs: Int64 = 0
+    var lineEndTimeMs: Int64 = 0
 
     var id: String {
         "\(type.rawValue)-\(slotId)-\(primary)-\(text)-\(rubyText)-\(syllables.count)"
@@ -3074,10 +3085,70 @@ private func javaStringHash(_ value: String) -> Int32 {
     }
 }
 
+private struct MainLyricPreviewContentWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct MainLyricPreviewSlideLayout: Layout {
+    private static let startHold: CGFloat = 0.30
+    private static let moveDuration: CGFloat = 0.40
+    private static let edgeFadeWidth: CGFloat = 28
+
+    var lineProgress: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        let contentSize = subview.sizeThatFits(.unspecified)
+        let proposedWidth = proposal.width ?? contentSize.width
+        let width = proposedWidth.isFinite ? max(0, proposedWidth) : contentSize.width
+        return CGSize(width: width, height: contentSize.height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard let subview = subviews.first else { return }
+        let contentSize = subview.sizeThatFits(.unspecified)
+        let x: CGFloat
+        if contentSize.width <= bounds.width {
+            x = bounds.minX + (bounds.width - contentSize.width) * 0.5
+        } else {
+            let fadeWidth = min(Self.edgeFadeWidth, bounds.width * 0.28)
+            let startX = bounds.minX + fadeWidth
+            let endX = bounds.maxX - fadeWidth - contentSize.width
+            x = startX + (endX - startX) * slideProgress
+        }
+        subview.place(
+            at: CGPoint(x: x, y: bounds.midY - contentSize.height * 0.5),
+            anchor: .topLeading,
+            proposal: ProposedViewSize(contentSize)
+        )
+    }
+
+    private var slideProgress: CGFloat {
+        let progress = min(1, max(0, lineProgress))
+        if progress <= Self.startHold { return 0 }
+        if progress >= Self.startHold + Self.moveDuration { return 1 }
+        return (progress - Self.startHold) / Self.moveDuration
+    }
+}
+
 private struct MainLyricPreviewRowView: View {
     @EnvironmentObject private var settings: AppSettings
     var row: MainLyricPreviewRow
     var positionMs: Int64
+    @State private var contentWidth: CGFloat = 0
 
     var body: some View {
         switch row.type {
@@ -3095,17 +3166,59 @@ private struct MainLyricPreviewRowView: View {
             MainLyricPreviewLoadingSkeleton()
             .frame(maxWidth: .infinity, alignment: .center)
         case .text:
-            previewTextView
-                .font(typography.font(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5))
-                .lineLimit(2)
-                .minimumScaleFactor(0.82)
+            MainLyricPreviewSlideLayout(lineProgress: lineProgress) {
+                previewTextView
+                    .font(typography.font(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: MainLyricPreviewContentWidthKey.self,
+                                value: geometry.size.width
+                            )
+                        }
+                    }
+            }
             .frame(maxWidth: .infinity, alignment: .center)
+            .clipped()
+            .mask(slideMask)
+            .onPreferenceChange(MainLyricPreviewContentWidthKey.self) { width in
+                contentWidth = width
+            }
         }
     }
 
     private var typography: AppSettings.TypographySettings {
         _ = settings.typographyRevision
         return settings.typographySettings()
+    }
+
+    private var lineProgress: CGFloat {
+        let duration = row.lineEndTimeMs - row.lineStartTimeMs
+        guard duration > 0 else { return 0 }
+        return min(1, max(0, CGFloat(positionMs - row.lineStartTimeMs) / CGFloat(duration)))
+    }
+
+    private var slideMask: some View {
+        GeometryReader { geometry in
+            let width = max(1, geometry.size.width)
+            if contentWidth > width + 0.5 {
+                let fadeStop = min(28, width * 0.28) / width
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .white, location: fadeStop),
+                        .init(color: .white, location: max(fadeStop, 1 - fadeStop)),
+                        .init(color: .clear, location: 1)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            } else {
+                Rectangle().fill(.white)
+            }
+        }
     }
 
     @ViewBuilder
@@ -3124,7 +3237,8 @@ private struct MainLyricPreviewRowView: View {
                 kind: row.kind,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5),
-                effectRowSeed: row.effectRowSeed
+                effectRowSeed: row.effectRowSeed,
+                singleLine: true
             )
         } else {
             Text(row.text)
@@ -4378,6 +4492,7 @@ struct SyllableKaraokeText: View {
     var bounceTextSize: CGFloat = 22
     var syntheticTimingEnabled: Bool = false
     var effectRowSeed: Int = 0
+    var singleLine: Bool = false
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !requiresContinuousEffect)) { timeline in
@@ -4395,7 +4510,7 @@ struct SyllableKaraokeText: View {
                     .modifier(LyricGlyphEffectModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
                     .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
             } else {
-                KaraokeSegmentFlowLayout(alignment: alignment) {
+                KaraokeSegmentFlowLayout(alignment: alignment, wraps: !singleLine) {
                     ForEach(karaokeSegments) { segment in
                         KaraokeSyllableSegmentView(
                             segment: segment,
@@ -4844,17 +4959,21 @@ private struct KaraokeFillMask: View {
 private struct KaraokeSegmentFlowLayout: Layout {
     var alignment: TextAlignment
     var rowSpacing: CGFloat = 0
+    var wraps: Bool = true
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = max(1, proposal.width ?? CGFloat.greatestFiniteMagnitude)
+        let maxWidth = wraps
+            ? max(1, proposal.width ?? CGFloat.greatestFiniteMagnitude)
+            : CGFloat.greatestFiniteMagnitude
         let rows = makeRows(subviews: subviews, maxWidth: maxWidth)
         let contentWidth = rows.map(\.width).max() ?? 0
         let contentHeight = rows.last.map { $0.y + $0.height } ?? 0
-        return CGSize(width: proposal.width ?? contentWidth, height: contentHeight)
+        return CGSize(width: wraps ? (proposal.width ?? contentWidth) : contentWidth, height: contentHeight)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let rows = makeRows(subviews: subviews, maxWidth: max(1, bounds.width))
+        let maxWidth = wraps ? max(1, bounds.width) : CGFloat.greatestFiniteMagnitude
+        let rows = makeRows(subviews: subviews, maxWidth: maxWidth)
         for row in rows {
             var x = bounds.minX + horizontalOffset(rowWidth: row.width, containerWidth: bounds.width)
             for index in row.indices {
@@ -4948,6 +5067,73 @@ private struct KaraokeSegmentLayoutRow {
 }
 
 #if DEBUG
+private struct MainLyricPreviewSlideDebugPreview: View {
+    private let durationMs: Int64 = 10_000
+
+    var body: some View {
+        let positionMs = debugPositionMs
+        VStack(spacing: 28) {
+            Text("Main preview \(positionMs / 100) %")
+                .font(.pretendard(15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
+            VStack(spacing: 4) {
+                ForEach(rows) { row in
+                    MainLyricPreviewRowView(row: row, positionMs: positionMs)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 12)
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 0.035, green: 0.04, blue: 0.06))
+        .ignoresSafeArea()
+    }
+
+    private var debugPositionMs: Int64 {
+        let rawValue = ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_MAIN_PREVIEW_POSITION_MS"] ?? "5000"
+        return min(durationMs, max(0, Int64(rawValue) ?? 5_000))
+    }
+
+    private var rows: [MainLyricPreviewRow] {
+        let original = "This deliberately long main lyric preview stays on one line and moves with its synchronized duration"
+        return [
+            MainLyricPreviewRow(
+                text: original,
+                primary: true,
+                syllables: debugSyllables(original),
+                slotId: AppSettings.typoMainPreviewOriginal,
+                lineStartTimeMs: 0,
+                lineEndTimeMs: durationMs
+            ),
+            MainLyricPreviewRow(
+                text: "번역 가사 역시 줄바꿈 없이 같은 싱크 진행률에 맞춰 부드럽게 가로로 이동합니다",
+                primary: false,
+                slotId: AppSettings.typoMainPreviewTranslation,
+                lineStartTimeMs: 0,
+                lineEndTimeMs: durationMs
+            ),
+            MainLyricPreviewRow(
+                text: "Short centered lyric",
+                primary: false,
+                slotId: AppSettings.typoMainPreviewPronunciation,
+                lineStartTimeMs: 0,
+                lineEndTimeMs: durationMs
+            )
+        ]
+    }
+
+    private func debugSyllables(_ text: String) -> [LyricsLine.Syllable] {
+        let parts = text.split(separator: " ", omittingEmptySubsequences: false)
+        return parts.enumerated().map { index, part in
+            let value = index + 1 < parts.count ? String(part) + " " : String(part)
+            let start = durationMs * Int64(index) / Int64(parts.count)
+            let end = durationMs * Int64(index + 1) / Int64(parts.count)
+            return LyricsLine.Syllable(text: value, startTimeMs: start, endTimeMs: end)
+        }
+    }
+}
+
 private struct PictureInPictureLayoutDebugPreview: View {
     let controller: LyricsPictureInPictureController
 
