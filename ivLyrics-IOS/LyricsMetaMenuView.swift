@@ -59,8 +59,9 @@ struct LyricsMetaMenuOverlay: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.opacity(0.22)
+            Color.clear
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
                 .onTapGesture {
                     dismiss()
                 }
@@ -98,7 +99,7 @@ struct LyricsMetaMenuOverlay: View {
         .foregroundStyle(.white)
         .background(
             Color(red: 18.0 / 255.0, green: 20.0 / 255.0, blue: 30.0 / 255.0)
-                .opacity(210.0 / 255.0),
+                .opacity(236.0 / 255.0),
             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
     }
