@@ -464,6 +464,111 @@ struct SpotifyPlaybackSnapshot: Equatable, Sendable {
     var deviceName: String
 }
 
+struct SpotifyPlaybackInteractionGuard {
+    private struct PlaybackIntent {
+        var trackKey: String
+        var playing: Bool
+        var issuedAtUptime: TimeInterval
+    }
+
+    private struct SeekIntent {
+        var trackKey: String
+        var positionMs: Int64
+        var issuedAtUptime: TimeInterval
+    }
+
+    private var playbackIntent: PlaybackIntent?
+    private var seekIntent: SeekIntent?
+
+    private let playbackHoldSeconds: TimeInterval = 2.0
+    private let seekHoldSeconds: TimeInterval = 2.5
+    private let seekAcknowledgementToleranceMs: Int64 = 2_500
+
+    mutating func registerPlayback(trackKey: String, playing: Bool, uptime: TimeInterval) {
+        playbackIntent = PlaybackIntent(
+            trackKey: trackKey,
+            playing: playing,
+            issuedAtUptime: uptime
+        )
+    }
+
+    mutating func registerSeek(trackKey: String, positionMs: Int64, uptime: TimeInterval) {
+        seekIntent = SeekIntent(
+            trackKey: trackKey,
+            positionMs: max(0, positionMs),
+            issuedAtUptime: uptime
+        )
+    }
+
+    mutating func reset() {
+        playbackIntent = nil
+        seekIntent = nil
+    }
+
+    mutating func reconcile(
+        _ snapshot: SpotifyPlaybackSnapshot,
+        currentTrack: TrackSnapshot?,
+        uptime: TimeInterval
+    ) -> SpotifyPlaybackSnapshot {
+        guard let currentTrack,
+              currentTrack.stableKey == snapshot.track.stableKey else {
+            reset()
+            return snapshot
+        }
+
+        var positionMs = snapshot.progressMs
+        var playing = snapshot.playing
+        var preservedOptimisticState = false
+        let optimisticPositionMs = currentTrack.positionNow(uptime: uptime)
+
+        if let intent = playbackIntent {
+            if intent.trackKey != snapshot.track.stableKey {
+                playbackIntent = nil
+            } else if snapshot.playing == intent.playing {
+                playbackIntent = nil
+            } else if uptime - intent.issuedAtUptime <= playbackHoldSeconds {
+                playing = intent.playing
+                positionMs = optimisticPositionMs
+                preservedOptimisticState = true
+            } else {
+                playbackIntent = nil
+            }
+        }
+
+        if let intent = seekIntent {
+            if intent.trackKey != snapshot.track.stableKey {
+                seekIntent = nil
+            } else if abs(snapshot.progressMs - intent.positionMs) <= seekAcknowledgementToleranceMs
+                        || abs(snapshot.progressMs - optimisticPositionMs) <= seekAcknowledgementToleranceMs {
+                seekIntent = nil
+            } else if uptime - intent.issuedAtUptime <= seekHoldSeconds {
+                positionMs = optimisticPositionMs
+                preservedOptimisticState = true
+            } else {
+                seekIntent = nil
+            }
+        }
+
+        guard preservedOptimisticState
+                || positionMs != snapshot.progressMs
+                || playing != snapshot.playing else {
+            return snapshot
+        }
+        let reconciledTrack = snapshot.track.withPlayback(
+            positionMs: positionMs,
+            playing: playing,
+            uptime: uptime
+        )
+        return SpotifyPlaybackSnapshot(
+            track: reconciledTrack,
+            progressMs: positionMs,
+            playing: playing,
+            fetchedAt: snapshot.fetchedAt,
+            deviceName: snapshot.deviceName
+        )
+    }
+}
+
 enum AppStatus: Equatable, Sendable {
     case idle
     case loading

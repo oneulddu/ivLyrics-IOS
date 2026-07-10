@@ -10,9 +10,9 @@ import UIKit
 final class AppViewModel: ObservableObject {
     private static let spotifyPlaybackRefreshBurstDelays: [UInt64] = [
         0,
-        90_000_000,
-        260_000_000,
-        620_000_000
+        120_000_000,
+        420_000_000,
+        1_100_000_000
     ]
 
     @Published var inputTitle: String
@@ -133,6 +133,7 @@ final class AppViewModel: ObservableObject {
     private var currentFuriganaResult: LyricsResult?
     private var lastSeekCommandUptimeMs: Int64 = 0
     private var lastSeekCommandPositionMs: Int64 = -1
+    private var spotifyPlaybackInteractionGuard = SpotifyPlaybackInteractionGuard()
     private var automaticUpdateCheckStarted = false
     private let defaults = UserDefaults.standard
     private let keyLastAutoUpdateCheckMs = "last_auto_update_check_ms"
@@ -515,6 +516,7 @@ final class AppViewModel: ObservableObject {
         spotifyMetadataHydrationTrackId = ""
         spotifyLivePolling = false
         spotifyAppRemoteConnected = false
+        spotifyPlaybackInteractionGuard.reset()
         spotifyAppRemotePlaybackService.stop()
         appendLog("spotify live: polling stopped")
     }
@@ -714,6 +716,13 @@ final class AppViewModel: ObservableObject {
         guard var track = currentTrack else { return }
         guard track.playing != targetPlaying else { return }
         let position = track.positionNow()
+        if spotifyAppRemotePlaybackService.connected || spotifyLivePolling {
+            spotifyPlaybackInteractionGuard.registerPlayback(
+                trackKey: track.stableKey,
+                playing: targetPlaying,
+                uptime: ProcessInfo.processInfo.systemUptime
+            )
+        }
         track = track.withPlayback(positionMs: position, playing: targetPlaying)
         currentTrack = track
         nowPositionMs = track.positionNow()
@@ -768,6 +777,13 @@ final class AppViewModel: ObservableObject {
         currentTrack = track
         nowPositionMs = position
         guard shouldSendSeekCommand(target: position) else { return }
+        if spotifyAppRemotePlaybackService.connected || spotifyLivePolling {
+            spotifyPlaybackInteractionGuard.registerSeek(
+                trackKey: track.stableKey,
+                positionMs: position,
+                uptime: ProcessInfo.processInfo.systemUptime
+            )
+        }
         if spotifyAppRemotePlaybackService.connected {
             spotifyAppRemotePlaybackService.seek(positionMs: position)
             scheduleSpotifyPlaybackRefreshBurst(loadLyricsIfNeeded: false)
@@ -790,6 +806,13 @@ final class AppViewModel: ObservableObject {
         currentTrack = track
         nowPositionMs = target
         guard shouldSendSeekCommand(target: target) else { return }
+        if spotifyAppRemotePlaybackService.connected || spotifyLivePolling {
+            spotifyPlaybackInteractionGuard.registerSeek(
+                trackKey: track.stableKey,
+                positionMs: target,
+                uptime: ProcessInfo.processInfo.systemUptime
+            )
+        }
         if spotifyAppRemotePlaybackService.connected {
             spotifyAppRemotePlaybackService.seek(positionMs: target)
             scheduleSpotifyPlaybackRefreshBurst(loadLyricsIfNeeded: false)
@@ -1512,6 +1535,11 @@ final class AppViewModel: ObservableObject {
     }
 
     private func applySpotifyPlayback(_ playback: SpotifyPlaybackSnapshot, loadLyricsIfNeeded: Bool) {
+        let playback = spotifyPlaybackInteractionGuard.reconcile(
+            playback,
+            currentTrack: currentTrack,
+            uptime: ProcessInfo.processInfo.systemUptime
+        )
         let incoming = playback.track
         let previousKey = currentTrack?.stableKey ?? ""
         let changedTrack = previousKey != incoming.stableKey
