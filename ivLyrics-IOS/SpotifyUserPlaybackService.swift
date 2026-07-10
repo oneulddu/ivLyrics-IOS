@@ -25,8 +25,12 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     private let clientIdKey = "spotify_user_client_id"
 
     @Published private(set) var connected = false
+    @Published private(set) var authorizing = false
     @Published private(set) var lastError = ""
     private var authenticationPresentationAnchor: ASPresentationAnchor?
+    private var authenticationSession: ASWebAuthenticationSession?
+    private var authorizationTask: Task<Void, Error>?
+    private var authorizationClientId = ""
 
     override init() {
         super.init()
@@ -49,6 +53,33 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         guard !safeClientId.isEmpty else {
             throw NSError(domain: "ivLyrics.SpotifyOAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: "Spotify Client ID가 필요합니다"])
         }
+        if connected {
+            return
+        }
+        if let authorizationTask {
+            guard authorizationClientId == safeClientId else {
+                throw NSError(domain: "ivLyrics.SpotifyOAuth", code: -8, userInfo: [NSLocalizedDescriptionKey: "다른 Spotify 계정 연결이 이미 진행 중입니다"])
+            }
+            try await authorizationTask.value
+            return
+        }
+
+        authorizationClientId = safeClientId
+        authorizing = true
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.performAuthorization(clientId: safeClientId)
+        }
+        authorizationTask = task
+        defer {
+            authorizationTask = nil
+            authorizationClientId = ""
+            authorizing = false
+        }
+        try await task.value
+    }
+
+    private func performAuthorization(clientId safeClientId: String) async throws {
         prepare(clientId: safeClientId)
         let verifier = Self.randomVerifier()
         let challenge = Self.codeChallenge(verifier)
@@ -86,6 +117,8 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     }
 
     func disconnect() {
+        authorizationTask?.cancel()
+        authenticationSession?.cancel()
         clearTokens()
         defaults.removeObject(forKey: clientIdKey)
         connected = false
@@ -214,6 +247,9 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     }
 
     private func runAuthenticationSession(url: URL) async throws -> URL {
+        guard authenticationSession == nil else {
+            throw NSError(domain: "ivLyrics.SpotifyOAuth", code: -9, userInfo: [NSLocalizedDescriptionKey: "Spotify OAuth 연결이 이미 진행 중입니다"])
+        }
         #if os(iOS)
         guard let anchor = Self.activePresentationAnchor() else {
             throw NSError(domain: "ivLyrics.SpotifyOAuth", code: -12, userInfo: [NSLocalizedDescriptionKey: "Spotify OAuth를 표시할 활성 화면이 없습니다"])
@@ -222,6 +258,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         #endif
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
             let session = ASWebAuthenticationSession(url: url, callbackURLScheme: callbackScheme) { callbackURL, error in
+                self.authenticationSession = nil
                 self.authenticationPresentationAnchor = nil
                 if let error {
                     continuation.resume(throwing: error)
@@ -235,7 +272,9 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
             }
             session.presentationContextProvider = self
             session.prefersEphemeralWebBrowserSession = false
+            self.authenticationSession = session
             if !session.start() {
+                self.authenticationSession = nil
                 self.authenticationPresentationAnchor = nil
                 continuation.resume(throwing: NSError(domain: "ivLyrics.SpotifyOAuth", code: -7, userInfo: [NSLocalizedDescriptionKey: "Spotify OAuth 세션을 시작하지 못했습니다"]))
             }

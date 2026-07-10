@@ -5293,7 +5293,7 @@ struct InitialSetupView: View {
                 .foregroundStyle(.white.opacity(0.74))
                 .multilineTextAlignment(.center)
             Button(model.spotifyLivePolling ? settings.t("spotify.live.connected") : settings.t("spotify.live.connect")) {
-                model.connectSpotifyUserAndStartPolling()
+                model.spotifyLivePolling ? model.stopSpotifyLivePolling() : model.connectSpotifyUserAndStartPolling()
             }
             .buttonStyle(.borderedProminent)
             .disabled(settings.spotifyClientId.trimmed.isEmpty)

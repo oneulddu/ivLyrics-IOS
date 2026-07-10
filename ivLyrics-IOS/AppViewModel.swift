@@ -477,6 +477,8 @@ final class AppViewModel: ObservableObject {
     func appDidBecomeActive() {
         guard spotifyLivePolling,
               !spotifyAppRemotePlaybackService.connected,
+              !spotifyAppRemotePlaybackService.connecting,
+              !spotifyUserPlaybackService.authorizing,
               spotifyPollTask == nil else { return }
         let clientId = settings.spotifyClientId.trimmed
         guard !clientId.isEmpty else { return }
@@ -1570,6 +1572,10 @@ final class AppViewModel: ObservableObject {
     }
 
     private func startSpotifyWebApiLive(clientId: String) {
+        guard !spotifyUserPlaybackService.authorizing else {
+            appendLog("spotify live: OAuth authorization already in progress")
+            return
+        }
         appendLog("spotify live: falling back to Web API polling")
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1583,6 +1589,8 @@ final class AppViewModel: ObservableObject {
                 startSpotifyLivePolling()
             } catch {
                 spotifyUserConnected = spotifyUserPlaybackService.connected
+                spotifyLivePolling = false
+                spotifyAppRemoteConnected = false
                 status = .failed(error.localizedDescription)
                 appendLog("spotify live auth failed: \(error.localizedDescription)")
             }

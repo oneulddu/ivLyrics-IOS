@@ -37,6 +37,10 @@ final class SpotifyAppRemotePlaybackService: NSObject, ObservableObject, SPTAppR
         log("spotify app remote: unavailable in simulator; using Web API")
         fallback()
 #else
+        guard !connecting else {
+            log("spotify app remote: connection already in progress")
+            return
+        }
         pendingFallback = fallback
         configureIfNeeded(clientId: safeClientId)
         if connected {
@@ -67,6 +71,10 @@ final class SpotifyAppRemotePlaybackService: NSObject, ObservableObject, SPTAppR
     }
 
     func suspend() {
+        guard !connecting else {
+            log("spotify app remote: preserving authorization while app is inactive")
+            return
+        }
         pendingFallback = nil
         attemptedStoredToken = false
         connecting = false
@@ -89,6 +97,7 @@ final class SpotifyAppRemotePlaybackService: NSObject, ObservableObject, SPTAppR
             storedAccessToken = accessToken
             attemptedStoredToken = false
             appRemote.connectionParameters.accessToken = accessToken
+            connecting = true
             log("spotify app remote: authorization callback received")
             appRemote.connect()
             return true
