@@ -1600,8 +1600,8 @@ private struct LandscapePlayerPane: View {
         let _ = settings.typographyRevision
         let typography = settings.typographySettings()
         VStack(spacing: 10) {
-            Spacer(minLength: controlsVisible ? 4 : 16)
-            VStack(spacing: 8) {
+            Spacer(minLength: 4)
+            VStack(spacing: metadataSpacing) {
                 LandscapeArtworkView(size: artworkSize)
                     .scaleEffect(controlsVisible ? 1 : 1.08)
                 VStack(spacing: 4) {
@@ -1617,12 +1617,14 @@ private struct LandscapePlayerPane: View {
                 }
                 .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
             }
+            .offset(y: controlsVisible ? 0 : 42)
 
-            if controlsVisible {
-                LandscapeTransportControls()
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-            Spacer(minLength: controlsVisible ? 2 : 8)
+            LandscapeTransportControls()
+                .opacity(controlsVisible ? 1 : 0)
+                .allowsHitTesting(controlsVisible)
+                .accessibilityHidden(!controlsVisible)
+
+            Spacer(minLength: 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .foregroundStyle(.white)
@@ -1637,6 +1639,13 @@ private struct LandscapePlayerPane: View {
         let rawSize = min(containerSize.height * heightFraction, containerSize.width * widthFraction)
         let minimum: CGFloat = tablet ? 190 : 132
         return max(minimum, rawSize)
+    }
+
+    private var metadataSpacing: CGFloat {
+        if containerSize.width > 900 {
+            return controlsVisible ? 24 : 34
+        }
+        return controlsVisible ? 12 : 24
     }
 }
 
