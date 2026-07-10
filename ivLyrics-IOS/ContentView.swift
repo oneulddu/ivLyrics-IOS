@@ -256,8 +256,8 @@ struct ContentView: View {
                     Button {
                         showingSettings = true
                     } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 23, weight: .bold))
+                        AndroidMoreIcon()
+                            .frame(width: 18, height: 18)
                             .frame(width: 44, height: 44)
                     }
                     .buttonStyle(.plain)
@@ -347,34 +347,30 @@ struct ContentView: View {
             Button {
                 model.skipToPreviousTrack()
             } label: {
-                Image(systemName: "backward.end.fill")
-                    .font(.system(size: 29, weight: .medium))
-                    .frame(width: 62, height: 62)
+                Color.clear
             }
+            .buttonStyle(AndroidTransportButtonStyle(kind: .previous, size: 62))
             .accessibilityLabel(settings.t("button.prev_track"))
 
             Button {
                 model.togglePlayback()
             } label: {
-                ZStack {
-                    Circle()
-                        .fill(Color(red: 246.0 / 255.0, green: 246.0 / 255.0, blue: 250.0 / 255.0))
-                    Image(systemName: model.currentTrack?.playing == true ? "pause.fill" : "play.fill")
-                        .font(.system(size: 27, weight: .bold))
-                        .foregroundStyle(Color(red: 14.0 / 255.0, green: 15.0 / 255.0, blue: 20.0 / 255.0))
-                        .offset(x: model.currentTrack?.playing == true ? 0 : 1)
-                }
-                .frame(width: 72, height: 72)
+                Color.clear
             }
+            .buttonStyle(AndroidTransportButtonStyle(
+                kind: .playPause,
+                primary: true,
+                playing: model.currentTrack?.playing == true,
+                size: 72
+            ))
             .accessibilityLabel(settings.t("debug.play_pause"))
 
             Button {
                 model.skipToNextTrack()
             } label: {
-                Image(systemName: "forward.end.fill")
-                    .font(.system(size: 29, weight: .medium))
-                    .frame(width: 62, height: 62)
+                Color.clear
             }
+            .buttonStyle(AndroidTransportButtonStyle(kind: .next, size: 62))
             .accessibilityLabel(settings.t("button.next_track"))
         }
         .buttonStyle(.plain)
@@ -601,6 +597,184 @@ struct ContentView: View {
         #if os(iOS)
         UIApplication.shared.isIdleTimerDisabled = enabled
         #endif
+    }
+}
+
+private struct AndroidMoreIcon: View {
+    var body: some View {
+        Canvas { context, size in
+            let scale = min(size.width, size.height) / 24
+            let radius = 1.65 * scale
+            for x in [5.0, 12.0, 19.0] {
+                let center = CGPoint(x: x * scale, y: 12 * scale)
+                let dot = CGRect(
+                    x: center.x - radius,
+                    y: center.y - radius,
+                    width: radius * 2,
+                    height: radius * 2
+                )
+                context.fill(Path(ellipseIn: dot), with: .color(.white))
+            }
+        }
+    }
+}
+
+private enum AndroidTransportButtonKind {
+    case previous
+    case playPause
+    case next
+}
+
+private struct AndroidTransportButtonStyle: ButtonStyle {
+    var kind: AndroidTransportButtonKind
+    var primary = false
+    var playing = false
+    var size: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        AndroidTransportButtonFace(
+            kind: kind,
+            primary: primary,
+            playing: playing,
+            pressed: configuration.isPressed
+        )
+        .frame(width: size, height: size)
+        .contentShape(Circle())
+    }
+}
+
+private struct AndroidTransportButtonFace: View {
+    var kind: AndroidTransportButtonKind
+    var primary: Bool
+    var playing: Bool
+    var pressed: Bool
+
+    var body: some View {
+        Canvas { context, size in
+            let side = min(size.width, size.height)
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+
+            if primary {
+                let fill = pressed
+                    ? Color(red: 226.0 / 255.0, green: 226.0 / 255.0, blue: 232.0 / 255.0)
+                    : Color(red: 246.0 / 255.0, green: 246.0 / 255.0, blue: 250.0 / 255.0)
+                let radius = side * 0.48
+                context.fill(
+                    Path(ellipseIn: CGRect(
+                        x: center.x - radius,
+                        y: center.y - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )),
+                    with: .color(fill)
+                )
+            } else if pressed {
+                let radius = side * 0.42
+                context.fill(
+                    Path(ellipseIn: CGRect(
+                        x: center.x - radius,
+                        y: center.y - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )),
+                    with: .color(.white.opacity(28.0 / 255.0))
+                )
+            }
+
+            let iconColor = primary
+                ? Color(red: 14.0 / 255.0, green: 15.0 / 255.0, blue: 20.0 / 255.0)
+                : Color.white.opacity(pressed ? 1 : 232.0 / 255.0)
+
+            switch kind {
+            case .playPause:
+                if playing {
+                    drawPause(in: &context, center: center, side: side, color: iconColor)
+                } else {
+                    drawPlay(in: &context, center: center, side: side, color: iconColor)
+                }
+            case .previous:
+                drawSkip(in: &context, center: center, side: side, next: false, color: iconColor)
+            case .next:
+                drawSkip(in: &context, center: center, side: side, next: true, color: iconColor)
+            }
+        }
+    }
+
+    private func drawPlay(
+        in context: inout GraphicsContext,
+        center: CGPoint,
+        side: CGFloat,
+        color: Color
+    ) {
+        let width = side * 0.26
+        let height = side * 0.34
+        let left = center.x - width * 0.32 - side * 0.005
+        var path = Path()
+        path.move(to: CGPoint(x: left, y: center.y - height / 2))
+        path.addLine(to: CGPoint(x: left, y: center.y + height / 2))
+        path.addLine(to: CGPoint(x: left + width, y: center.y))
+        path.closeSubpath()
+        context.fill(path, with: .color(color))
+    }
+
+    private func drawPause(
+        in context: inout GraphicsContext,
+        center: CGPoint,
+        side: CGFloat,
+        color: Color
+    ) {
+        let barWidth = side * 0.088
+        let height = side * 0.34
+        let gap = side * 0.105
+        let cornerRadius = barWidth * 0.42
+        let left = center.x - gap / 2 - barWidth
+        let y = center.y - height / 2
+        for x in [left, center.x + gap / 2] {
+            let rect = CGRect(x: x, y: y, width: barWidth, height: height)
+            context.fill(
+                RoundedRectangle(cornerRadius: cornerRadius).path(in: rect),
+                with: .color(color)
+            )
+        }
+    }
+
+    private func drawSkip(
+        in context: inout GraphicsContext,
+        center: CGPoint,
+        side: CGFloat,
+        next: Bool,
+        color: Color
+    ) {
+        let triangleWidth = side * 0.30
+        let triangleHeight = side * 0.44
+        let gap = side * 0.045
+        let barWidth = max(2.5, side * 0.065)
+        let totalWidth = triangleWidth + gap + barWidth
+        let left = center.x - totalWidth / 2
+        let top = center.y - triangleHeight / 2
+        let bottom = center.y + triangleHeight / 2
+        let barX = next ? left + triangleWidth + gap : left
+        let triangleLeft = next ? left : left + barWidth + gap
+        let triangleRight = triangleLeft + triangleWidth
+
+        var triangle = Path()
+        if next {
+            triangle.move(to: CGPoint(x: triangleLeft, y: top))
+            triangle.addLine(to: CGPoint(x: triangleRight, y: center.y))
+            triangle.addLine(to: CGPoint(x: triangleLeft, y: bottom))
+        } else {
+            triangle.move(to: CGPoint(x: triangleRight, y: top))
+            triangle.addLine(to: CGPoint(x: triangleLeft, y: center.y))
+            triangle.addLine(to: CGPoint(x: triangleRight, y: bottom))
+        }
+        triangle.closeSubpath()
+        context.fill(triangle, with: .color(color))
+
+        let bar = CGRect(x: barX, y: top, width: barWidth, height: triangleHeight)
+        context.fill(
+            RoundedRectangle(cornerRadius: barWidth * 0.24).path(in: bar),
+            with: .color(color)
+        )
     }
 }
 
@@ -1657,7 +1831,7 @@ private struct LandscapePlayerPane: View {
                 }
                 .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
             }
-            .offset(y: controlsVisible ? 0 : 42)
+            .offset(y: controlsVisible ? 0 : hiddenHeroOffset)
 
             LandscapeTransportControls()
                 .opacity(controlsVisible ? 1 : 0)
@@ -1685,6 +1859,10 @@ private struct LandscapePlayerPane: View {
         }
         return controlsVisible ? 12 : 24
     }
+
+    private var hiddenHeroOffset: CGFloat {
+        containerSize.width > 900 ? 54 : 66
+    }
 }
 
 private struct LandscapeArtworkView: View {
@@ -1694,25 +1872,18 @@ private struct LandscapeArtworkView: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 20)
-                .fill(.white.opacity(0.10))
+                .fill(Color(red: 34.0 / 255.0, green: 35.0 / 255.0, blue: 40.0 / 255.0))
             if let url = model.currentTrack?.artworkURL {
                 AsyncImage(url: url) { image in
                     image.resizable().scaledToFill()
                 } placeholder: {
-                    Image(systemName: "music.note")
-                        .font(.system(size: max(34, size * 0.22), weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.50))
+                    Color.clear
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 20))
-            } else {
-                Image(systemName: "music.note")
-                    .font(.system(size: max(34, size * 0.22), weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.50))
             }
         }
         .frame(width: size, height: size)
         .clipped()
-        .shadow(color: .black.opacity(0.32), radius: 18, y: 10)
         .artworkSwipeActions(size: size)
     }
 }
@@ -1739,22 +1910,22 @@ private struct LandscapeTransportControls: View {
 
             HStack(spacing: 13) {
                 Button { model.skipToPreviousTrack() } label: {
-                    Image(systemName: "backward.end.fill")
-                        .font(.system(size: 22, weight: .semibold))
-                        .frame(width: 54, height: 54)
+                    Color.clear
                 }
+                .buttonStyle(AndroidTransportButtonStyle(kind: .previous, size: 54))
                 Button { model.togglePlayback() } label: {
-                    Image(systemName: model.currentTrack?.playing == true ? "pause.fill" : "play.fill")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(.black)
-                        .frame(width: 62, height: 62)
-                        .background(.white, in: Circle())
+                    Color.clear
                 }
+                .buttonStyle(AndroidTransportButtonStyle(
+                    kind: .playPause,
+                    primary: true,
+                    playing: model.currentTrack?.playing == true,
+                    size: 62
+                ))
                 Button { model.skipToNextTrack() } label: {
-                    Image(systemName: "forward.end.fill")
-                        .font(.system(size: 22, weight: .semibold))
-                        .frame(width: 54, height: 54)
+                    Color.clear
                 }
+                .buttonStyle(AndroidTransportButtonStyle(kind: .next, size: 54))
             }
             .buttonStyle(.plain)
         }
@@ -1920,8 +2091,8 @@ private struct LandscapeCommandBar: View {
         Button {
             showingSettings = true
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 23, weight: .bold))
+            AndroidMoreIcon()
+                .frame(width: 18, height: 18)
                 .frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
@@ -1949,20 +2120,14 @@ struct ArtworkView: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: cornerRadius)
-                .fill(.white.opacity(0.10))
+                .fill(Color(red: 34.0 / 255.0, green: 35.0 / 255.0, blue: 40.0 / 255.0))
             if let url = model.currentTrack?.artworkURL {
                 AsyncImage(url: url) { image in
                     image.resizable().scaledToFill()
                 } placeholder: {
-                    Image(systemName: "music.note")
-                        .font(.title2)
-                        .foregroundStyle(.white.opacity(0.50))
+                    Color.clear
                 }
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            } else {
-                Image(systemName: "music.note")
-                    .font(.title2)
-                    .foregroundStyle(.white.opacity(0.50))
             }
         }
         .frame(width: size, height: size)
