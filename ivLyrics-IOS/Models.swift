@@ -160,6 +160,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
     var text: String
     var syllables: [Syllable]
     var speaker: String
+    var speakerColor: String
+    var speakerFallback: String
     var kind: String
     var vocalParts: [VocalPart]
     var pronunciationText: String
@@ -172,6 +174,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
         text: String,
         syllables: [Syllable] = [],
         speaker: String = "",
+        speakerColor: String = "",
+        speakerFallback: String = "",
         kind: String = "vocal",
         vocalParts: [VocalPart] = [],
         pronunciationText: String = "",
@@ -183,6 +187,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
         self.text = text
         self.syllables = syllables
         self.speaker = speaker
+        self.speakerColor = speakerColor
+        self.speakerFallback = speakerFallback
         self.kind = kind.trimmed.isEmpty ? "vocal" : kind.trimmed
         self.vocalParts = vocalParts
         self.pronunciationText = pronunciationText
@@ -201,6 +207,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
             text: text,
             syllables: syllables,
             speaker: speaker,
+            speakerColor: speakerColor,
+            speakerFallback: speakerFallback,
             kind: kind,
             vocalParts: vocalParts,
             pronunciationText: pronunciation,
@@ -225,6 +233,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
         var id: String
         var role: String
         var speaker: String
+        var speakerColor: String
+        var speakerFallback: String
         var kind: String
         var text: String
         var syllables: [Syllable]
@@ -244,6 +254,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
             id: String,
             role: String,
             speaker: String,
+            speakerColor: String = "",
+            speakerFallback: String = "",
             kind: String,
             text: String,
             syllables: [Syllable],
@@ -254,6 +266,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
             self.id = id
             self.role = role
             self.speaker = speaker
+            self.speakerColor = speakerColor
+            self.speakerFallback = speakerFallback
             self.kind = kind.trimmed.isEmpty ? "vocal" : kind.trimmed
             self.text = text
             self.syllables = syllables
@@ -267,6 +281,8 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
                 id: id,
                 role: role,
                 speaker: speaker,
+                speakerColor: speakerColor,
+                speakerFallback: speakerFallback,
                 kind: kind,
                 text: text,
                 syllables: syllables,
@@ -275,6 +291,83 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
                 furiganaText: furigana ?? furiganaText
             )
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, role, speaker, speakerColor, speakerFallback, kind, text, syllables
+            case pronunciationText, translationText, furiganaText
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decodeIfPresent(String.self, forKey: .id) ?? ""
+            role = try container.decodeIfPresent(String.self, forKey: .role) ?? ""
+            speaker = try container.decodeIfPresent(String.self, forKey: .speaker) ?? ""
+            speakerColor = try container.decodeIfPresent(String.self, forKey: .speakerColor) ?? ""
+            speakerFallback = try container.decodeIfPresent(String.self, forKey: .speakerFallback) ?? ""
+            let decodedKind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "vocal"
+            kind = decodedKind.trimmed.isEmpty ? "vocal" : decodedKind.trimmed
+            text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+            syllables = try container.decodeIfPresent([Syllable].self, forKey: .syllables) ?? []
+            pronunciationText = try container.decodeIfPresent(String.self, forKey: .pronunciationText) ?? ""
+            translationText = try container.decodeIfPresent(String.self, forKey: .translationText) ?? ""
+            furiganaText = try container.decodeIfPresent(String.self, forKey: .furiganaText) ?? ""
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(id, forKey: .id)
+            try container.encode(role, forKey: .role)
+            try container.encode(speaker, forKey: .speaker)
+            try container.encode(speakerColor, forKey: .speakerColor)
+            try container.encode(speakerFallback, forKey: .speakerFallback)
+            try container.encode(kind, forKey: .kind)
+            try container.encode(text, forKey: .text)
+            try container.encode(syllables, forKey: .syllables)
+            try container.encode(pronunciationText, forKey: .pronunciationText)
+            try container.encode(translationText, forKey: .translationText)
+            try container.encode(furiganaText, forKey: .furiganaText)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, startTimeMs, endTimeMs, text, syllables, speaker, speakerColor, speakerFallback, kind, vocalParts
+        case pronunciationText, translationText, furiganaText
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let decodedStart = try container.decodeIfPresent(Int64.self, forKey: .startTimeMs) ?? 0
+        startTimeMs = max(0, decodedStart)
+        endTimeMs = max(startTimeMs, try container.decodeIfPresent(Int64.self, forKey: .endTimeMs) ?? startTimeMs)
+        text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        syllables = try container.decodeIfPresent([Syllable].self, forKey: .syllables) ?? []
+        speaker = try container.decodeIfPresent(String.self, forKey: .speaker) ?? ""
+        speakerColor = try container.decodeIfPresent(String.self, forKey: .speakerColor) ?? ""
+        speakerFallback = try container.decodeIfPresent(String.self, forKey: .speakerFallback) ?? ""
+        let decodedKind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "vocal"
+        kind = decodedKind.trimmed.isEmpty ? "vocal" : decodedKind.trimmed
+        vocalParts = try container.decodeIfPresent([VocalPart].self, forKey: .vocalParts) ?? []
+        pronunciationText = try container.decodeIfPresent(String.self, forKey: .pronunciationText) ?? ""
+        translationText = try container.decodeIfPresent(String.self, forKey: .translationText) ?? ""
+        furiganaText = try container.decodeIfPresent(String.self, forKey: .furiganaText) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(startTimeMs, forKey: .startTimeMs)
+        try container.encode(endTimeMs, forKey: .endTimeMs)
+        try container.encode(text, forKey: .text)
+        try container.encode(syllables, forKey: .syllables)
+        try container.encode(speaker, forKey: .speaker)
+        try container.encode(speakerColor, forKey: .speakerColor)
+        try container.encode(speakerFallback, forKey: .speakerFallback)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(vocalParts, forKey: .vocalParts)
+        try container.encode(pronunciationText, forKey: .pronunciationText)
+        try container.encode(translationText, forKey: .translationText)
+        try container.encode(furiganaText, forKey: .furiganaText)
     }
 }
 

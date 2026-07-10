@@ -122,6 +122,7 @@ final class AppSettings: ObservableObject {
     @Published var syncedLyricsKaraokeAnimationEnabled: Bool { didSet { set("synced_lyrics_karaoke_animation", syncedLyricsKaraokeAnimationEnabled) } }
     @Published var karaokeBounceEffectEnabled: Bool { didSet { set("karaoke_bounce_effect", karaokeBounceEffectEnabled) } }
     @Published var karaokeDataAsLineSynced: Bool { didSet { set("karaoke_data_as_line_synced", karaokeDataAsLineSynced) } }
+    @Published var useSyncCreatorSpeakerColors: Bool { didSet { set("use_sync_creator_speaker_colors", useSyncCreatorSpeakerColors) } }
     @Published var lyricsTextAlignment: String { didSet { set("lyrics_text_alignment", lyricsTextAlignment) } }
     @Published var keepScreenOn: Bool { didSet { set("keep_screen_on", keepScreenOn) } }
     @Published var landscapeAutoHideControls: Bool { didSet { set("landscape_auto_hide_controls", landscapeAutoHideControls) } }
@@ -175,6 +176,7 @@ final class AppSettings: ObservableObject {
         syncedLyricsKaraokeAnimationEnabled = defaults.object(forKey: "synced_lyrics_karaoke_animation") as? Bool ?? true
         karaokeBounceEffectEnabled = defaults.object(forKey: "karaoke_bounce_effect") as? Bool ?? true
         karaokeDataAsLineSynced = defaults.object(forKey: "karaoke_data_as_line_synced") as? Bool ?? false
+        useSyncCreatorSpeakerColors = defaults.object(forKey: "use_sync_creator_speaker_colors") as? Bool ?? true
         lyricsTextAlignment = Self.normalizeLyricsAlignment(defaults.string(forKey: "lyrics_text_alignment") ?? "left")
         keepScreenOn = defaults.object(forKey: "keep_screen_on") as? Bool ?? false
         landscapeAutoHideControls = defaults.object(forKey: "landscape_auto_hide_controls") as? Bool ?? true
@@ -228,6 +230,7 @@ final class AppSettings: ObservableObject {
             syncedLyricsKaraokeAnimationEnabled: syncedLyricsKaraokeAnimationEnabled,
             karaokeBounceEffectEnabled: karaokeBounceEffectEnabled,
             karaokeDataAsLineSynced: karaokeDataAsLineSynced,
+            useSyncCreatorSpeakerColors: useSyncCreatorSpeakerColors,
             lyricsTextAlignment: lyricsTextAlignment,
             keepScreenOn: keepScreenOn,
             landscapeAutoHideControls: landscapeAutoHideControls,
@@ -958,6 +961,7 @@ final class AppSettings: ObservableObject {
         var syncedLyricsKaraokeAnimationEnabled: Bool
         var karaokeBounceEffectEnabled: Bool
         var karaokeDataAsLineSynced: Bool
+        var useSyncCreatorSpeakerColors: Bool
         var lyricsTextAlignment: String
         var keepScreenOn: Bool
         var landscapeAutoHideControls: Bool

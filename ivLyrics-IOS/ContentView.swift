@@ -3058,7 +3058,7 @@ struct LyricsTimelineView: View {
             return false
         } ?? 0)
         let visualCenterIndex = animatedCenterIndex ?? Double(activeDisplayIndex)
-        LazyVStack(spacing: 32) {
+        LazyVStack(spacing: 12) {
             if model.lyricsResult.lines.isEmpty {
                 if model.status == .loading {
                     LyricsLoadingSkeleton()
@@ -3662,14 +3662,13 @@ struct LyricsInterludeView: View {
             if showLabel {
                 Text(label)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(active ? 0.78 : inactiveOpacity))
+                    .foregroundStyle(interludeColor)
             }
             if alignment != "right" { Spacer(minLength: 0) }
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .opacity(active ? 1 : max(0.46, inactiveOpacity + 0.12))
         .accessibilityLabel(label)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -3683,7 +3682,7 @@ struct LyricsInterludeView: View {
             HStack(spacing: 3.8) {
                 ForEach(0..<4, id: \.self) { index in
                     RoundedRectangle(cornerRadius: 2.25)
-                        .fill(.white.opacity(active ? 0.86 : inactiveOpacity))
+                        .fill(interludeColor)
                         .frame(
                             width: 3.2,
                             height: active
@@ -3707,9 +3706,12 @@ struct LyricsInterludeView: View {
         model.seek(toLyricsTimeMs: positionMs)
     }
 
-    private var inactiveOpacity: Double {
-        let alpha = 185.0 - min(2.6, max(0, displayDistance)) * 46.0
-        return max(54.0, min(190.0, alpha)) / 255.0
+    private var interludeColor: Color {
+        if active {
+            return Color(red: 245 / 255, green: 247 / 255, blue: 252 / 255)
+        }
+        let alpha = max(52.0, (150.0 - min(2.6, max(0, displayDistance)) * 34.0).rounded())
+        return Color(red: 212 / 255, green: 218 / 255, blue: 230 / 255).opacity(alpha / 255.0)
     }
 }
 
@@ -3735,13 +3737,13 @@ struct LyricsLineView: View {
             if !useVocalPartSupplements, settings.japaneseFuriganaEnabled, !line.furiganaText.trimmed.isEmpty {
                 Text(FuriganaRepository.rubyDisplayText(line.furiganaText))
                     .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 12))
-                    .foregroundStyle(.white.opacity(active ? 0.78 : supplementInactiveOpacity))
+                    .foregroundStyle(active ? lineActiveColor.opacity(0.70) : lineSupplementInactiveColor)
                     .multilineTextAlignment(textAlignment)
             }
             if !useVocalPartSupplements, !line.pronunciationText.trimmed.isEmpty {
                 Text(line.pronunciationText)
                     .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 14))
-                    .foregroundStyle(.white.opacity(active ? 0.82 : supplementInactiveOpacity))
+                    .foregroundStyle(active ? lineActiveColor.opacity(212.0 / 255.0) : lineSupplementInactiveColor)
                     .multilineTextAlignment(textAlignment)
             } else if !useVocalPartSupplements, model.lyricsSupplementPronunciationLoading {
                 supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsPronunciation, baseSize: 14)
@@ -3749,7 +3751,7 @@ struct LyricsLineView: View {
             if !useVocalPartSupplements, !line.translationText.trimmed.isEmpty {
                 Text(line.translationText)
                     .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 14))
-                    .foregroundStyle(.white.opacity(active ? 0.86 : supplementInactiveOpacity))
+                    .foregroundStyle(active ? lineActiveColor.opacity(184.0 / 255.0) : lineSupplementInactiveColor)
                     .multilineTextAlignment(textAlignment)
             } else if !useVocalPartSupplements, model.lyricsSupplementTranslationLoading {
                 supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsTranslation, baseSize: 14)
@@ -3805,10 +3807,10 @@ struct LyricsLineView: View {
                             endTimeMs: part.endTimeMs,
                             positionMs: positionMs,
                             active: partActive,
-                            activeColor: LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors),
+                            activeColor: vocalPartActiveColor(part),
                             alignment: textAlignment,
                             kind: part.kind,
-                            inactiveOpacity: vocalPartInactiveOpacity(speaker: part.speaker, active: partActive),
+                            inactiveColor: vocalPartInactiveColor(part, active: partActive),
                             bounceEnabled: settings.karaokeBounceEffectEnabled,
                             bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
                         )
@@ -3827,10 +3829,10 @@ struct LyricsLineView: View {
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
                 active: active,
-                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
+                activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
-                inactiveOpacity: inactiveOriginalOpacity,
+                inactiveColor: inactiveOriginalColor,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
             )
@@ -3842,34 +3844,35 @@ struct LyricsLineView: View {
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
                 active: active,
-                activeColor: LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors),
+                activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
-                inactiveOpacity: inactiveOriginalOpacity,
+                inactiveColor: inactiveOriginalColor,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
                 syntheticTimingEnabled: true
             )
         } else {
             Text(originalText.isEmpty ? " " : originalText)
-                .foregroundStyle(active ? LyricSpeakerPalette.activeColor(speaker: line.speaker, settings: speakerColors) : inactiveOriginalColor)
+                .foregroundStyle(active ? lineActiveColor : inactiveOriginalColor)
                 .multilineTextAlignment(textAlignment)
         }
     }
 
     @ViewBuilder
     private func vocalPartSupplements(_ part: LyricsLine.VocalPart, active: Bool) -> some View {
-        let speakerColor = LyricSpeakerPalette.activeColor(speaker: part.speaker, settings: speakerColors)
+        let speakerColor = vocalPartActiveColor(part)
+        let inactiveColor = vocalPartSupplementInactiveColor(part, active: active)
         if settings.japaneseFuriganaEnabled, !part.furiganaText.trimmed.isEmpty {
             Text(FuriganaRepository.rubyDisplayText(part.furiganaText))
                 .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 12 : 10.5))
-                .foregroundStyle(speakerColor.opacity(active ? 0.70 : vocalPartSupplementInactiveOpacity(active: active)))
+                .foregroundStyle(active ? speakerColor.opacity(0.70) : inactiveColor)
                 .multilineTextAlignment(textAlignment)
         }
         if !part.pronunciationText.trimmed.isEmpty {
             Text(part.pronunciationText)
                 .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5))
-                .foregroundStyle(speakerColor.opacity(active ? 212.0 / 255.0 : vocalPartSupplementInactiveOpacity(active: active)))
+                .foregroundStyle(active ? speakerColor.opacity(212.0 / 255.0) : inactiveColor)
                 .multilineTextAlignment(textAlignment)
         } else if model.lyricsSupplementPronunciationLoading {
             supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5)
@@ -3877,7 +3880,7 @@ struct LyricsLineView: View {
         if !part.translationText.trimmed.isEmpty {
             Text(part.translationText)
                 .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5))
-                .foregroundStyle(speakerColor.opacity(active ? 184.0 / 255.0 : vocalPartSupplementInactiveOpacity(active: active)))
+                .foregroundStyle(active ? speakerColor.opacity(184.0 / 255.0) : inactiveColor)
                 .multilineTextAlignment(textAlignment)
         } else if model.lyricsSupplementTranslationLoading {
             supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5)
@@ -3901,29 +3904,68 @@ struct LyricsLineView: View {
         syllables.contains { $0.endTimeMs > $0.startTimeMs }
     }
 
-    private var inactiveOriginalOpacity: Double {
-        LyricSpeakerPalette.inactiveOpacity(speaker: line.speaker, distance: displayDistance)
+    private var lineActiveColor: Color {
+        LyricSpeakerPalette.activeColor(
+            speaker: line.speaker,
+            speakerColor: line.speakerColor,
+            speakerFallback: line.speakerFallback,
+            settings: speakerColors,
+            useCreatorColors: settings.useSyncCreatorSpeakerColors
+        )
     }
 
-    private func vocalPartInactiveOpacity(speaker: String, active: Bool) -> Double {
-        LyricSpeakerPalette.inactiveOpacity(
-            speaker: speaker,
+    private func vocalPartActiveColor(_ part: LyricsLine.VocalPart) -> Color {
+        LyricSpeakerPalette.activeColor(
+            speaker: part.speaker,
+            speakerColor: part.speakerColor,
+            speakerFallback: part.speakerFallback,
+            settings: speakerColors,
+            useCreatorColors: settings.useSyncCreatorSpeakerColors
+        )
+    }
+
+    private func vocalPartInactiveColor(_ part: LyricsLine.VocalPart, active: Bool) -> Color {
+        LyricSpeakerPalette.inactiveColor(
+            speaker: part.speaker,
+            speakerColor: part.speakerColor,
+            speakerFallback: part.speakerFallback,
+            settings: speakerColors,
+            useCreatorColors: settings.useSyncCreatorSpeakerColors,
             distance: displayDistance + (active ? 0 : 0.45)
         )
     }
 
-    private var supplementInactiveOpacity: Double {
-        max(0.30, inactiveOriginalOpacity * 0.78)
+    private var lineSupplementInactiveColor: Color {
+        LyricSpeakerPalette.supplementInactiveColor(
+            speaker: line.speaker,
+            speakerColor: line.speakerColor,
+            speakerFallback: line.speakerFallback,
+            settings: speakerColors,
+            useCreatorColors: settings.useSyncCreatorSpeakerColors,
+            distance: displayDistance
+        )
     }
 
-    private func vocalPartSupplementInactiveOpacity(active: Bool) -> Double {
-        let distance = displayDistance + (active ? 0 : 0.45)
-        let alpha = 105.0 - min(2.8, max(0, distance)) * 24.0
-        return max(34.0, alpha) / 255.0
+    private func vocalPartSupplementInactiveColor(_ part: LyricsLine.VocalPart, active: Bool) -> Color {
+        LyricSpeakerPalette.supplementInactiveColor(
+            speaker: part.speaker,
+            speakerColor: part.speakerColor,
+            speakerFallback: part.speakerFallback,
+            settings: speakerColors,
+            useCreatorColors: settings.useSyncCreatorSpeakerColors,
+            distance: displayDistance + (active ? 0 : 0.45)
+        )
     }
 
     private var inactiveOriginalColor: Color {
-        Color(red: 174 / 255, green: 181 / 255, blue: 195 / 255).opacity(inactiveOriginalOpacity)
+        LyricSpeakerPalette.inactiveColor(
+            speaker: line.speaker,
+            speakerColor: line.speakerColor,
+            speakerFallback: line.speakerFallback,
+            settings: speakerColors,
+            useCreatorColors: settings.useSyncCreatorSpeakerColors,
+            distance: displayDistance
+        )
     }
 }
 
@@ -3938,6 +3980,7 @@ struct SyllableKaraokeText: View {
     var alignment: TextAlignment
     var kind: String = "vocal"
     var inactiveOpacity: Double = 0.46
+    var inactiveColor: Color? = nil
     var bounceEnabled: Bool = false
     var bounceTextSize: CGFloat = 22
     var syntheticTimingEnabled: Bool = false
@@ -3983,7 +4026,7 @@ struct SyllableKaraokeText: View {
                 id: index,
                 text: syllable.text,
                 fill: fillFraction(for: syllable),
-                baseColor: activeColor.opacity(inactiveOpacity),
+                baseColor: baseColor,
                 activeColor: activeColor,
                 bounceOffsetY: bounce.offsetY,
                 bounceScale: bounce.scale,
@@ -4009,7 +4052,11 @@ struct SyllableKaraokeText: View {
     }
 
     private var fallbackColor: Color {
-        active ? activeColor : activeColor.opacity(inactiveOpacity)
+        active ? activeColor : baseColor
+    }
+
+    private var baseColor: Color {
+        inactiveColor ?? activeColor.opacity(inactiveOpacity)
     }
 
     private var normalizedKind: String {
@@ -4464,7 +4511,7 @@ private struct KaraokeDebugPreview: View {
             )
             .font(.pretendard(52, weight: .bold))
 
-            Text("Lead and background keep separate timing/colors")
+            Text("Lead and creator-colored background keep separate timing/colors")
                 .font(.pretendard(15, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.62))
             LyricsLineView(
@@ -4497,7 +4544,9 @@ private struct KaraokeDebugPreview: View {
         let background = LyricsLine.VocalPart(
             id: "background",
             role: "background",
-            speaker: "FEMALE 1",
+            speaker: "FEMALE CUSTOM",
+            speakerColor: "#ff4fa3",
+            speakerFallback: "female-1",
             kind: "vocal",
             text: "DUET",
             syllables: timedSyllables("DUET", startTimeMs: 1_200, stepMs: 600)
@@ -4522,7 +4571,94 @@ private struct KaraokeDebugPreview: View {
 
 enum LyricSpeakerPalette {
     static func activeColor(speaker: String, settings: AppSettings.SpeakerColorSettings) -> Color {
-        let key = normalizeSpeakerKey(speaker)
+        activeColor(
+            speaker: speaker,
+            speakerColor: "",
+            speakerFallback: "",
+            settings: settings,
+            useCreatorColors: true
+        )
+    }
+
+    static func activeColor(
+        speaker: String,
+        speakerColor: String,
+        speakerFallback: String,
+        settings: AppSettings.SpeakerColorSettings,
+        useCreatorColors: Bool
+    ) -> Color {
+        resolvedSpeakerColor(
+            key: normalizeSpeakerKey(speaker),
+            speakerColor: speakerColor,
+            speakerFallback: speakerFallback,
+            settings: settings,
+            useCreatorColors: useCreatorColors
+        ) ?? Color(hex: settings.hex(AppSettings.speakerColorNormal))
+    }
+
+    static func inactiveColor(
+        speaker: String,
+        speakerColor: String,
+        speakerFallback: String,
+        settings: AppSettings.SpeakerColorSettings,
+        useCreatorColors: Bool,
+        distance: Double
+    ) -> Color {
+        let rawKey = normalizeSpeakerKey(speaker)
+        let fallbackKey = fallbackCustomSpeakerKey(rawKey, speakerFallback: speakerFallback)
+        let baseAlpha = max(54.0, min(190.0, 185.0 - min(2.6, max(0, distance)) * 46.0))
+        guard let color = resolvedSpeakerColor(
+            key: rawKey,
+            speakerColor: speakerColor,
+            speakerFallback: speakerFallback,
+            settings: settings,
+            useCreatorColors: useCreatorColors
+        ) else {
+            return Color(red: 174 / 255, green: 181 / 255, blue: 195 / 255).opacity(baseAlpha / 255.0)
+        }
+        let distanceFactor = baseAlpha / 185.0
+        let alpha = max(40.0, min(150.0, (255.0 * speakerInactiveAlpha(fallbackKey) * distanceFactor).rounded()))
+        return color.opacity(alpha / 255.0)
+    }
+
+    static func supplementInactiveColor(
+        speaker: String,
+        speakerColor: String,
+        speakerFallback: String,
+        settings: AppSettings.SpeakerColorSettings,
+        useCreatorColors: Bool,
+        distance: Double
+    ) -> Color {
+        let alpha = max(34.0, (105.0 - min(2.8, max(0, distance)) * 24.0).rounded()) / 255.0
+        guard let color = resolvedSpeakerColor(
+            key: normalizeSpeakerKey(speaker),
+            speakerColor: speakerColor,
+            speakerFallback: speakerFallback,
+            settings: settings,
+            useCreatorColors: useCreatorColors
+        ) else {
+            return Color(red: 210 / 255, green: 216 / 255, blue: 226 / 255).opacity(alpha)
+        }
+        return color.opacity(alpha)
+    }
+
+    private static func resolvedSpeakerColor(
+        key: String,
+        speakerColor: String,
+        speakerFallback: String,
+        settings: AppSettings.SpeakerColorSettings,
+        useCreatorColors: Bool
+    ) -> Color? {
+        if isCustomSpeakerKey(key), useCreatorColors, AppSettings.isHexColor(speakerColor) {
+            return Color(hex: AppSettings.normalizeHexColor(speakerColor, fallback: "#ffffff"))
+        }
+        return speakerActiveColor(
+            key: fallbackCustomSpeakerKey(key, speakerFallback: speakerFallback),
+            settings: settings
+        )
+    }
+
+    private static func speakerActiveColor(key: String, settings: AppSettings.SpeakerColorSettings) -> Color? {
         switch key {
         case "speaker-b", "b":
             return Color(red: 139 / 255.0, green: 211 / 255.0, blue: 255 / 255.0)
@@ -4536,29 +4672,33 @@ enum LyricSpeakerPalette {
             if let color = numberedColor(key: key, prefix: "male", settings: settings) { return color }
             if let color = numberedColor(key: key, prefix: "female", settings: settings) { return color }
             if let color = numberedColor(key: key, prefix: "duet", settings: settings) { return color }
-            return Color(hex: settings.hex(AppSettings.speakerColorNormal))
+            return nil
         }
     }
 
-    static func inactiveOpacity(speaker: String, distance: Double) -> Double {
-        let baseAlpha = max(54.0, min(190.0, 185.0 - min(2.6, max(0, distance)) * 46.0))
-        let key = normalizeSpeakerKey(speaker)
-        guard isKnownSpeaker(key) else {
-            return baseAlpha / 255.0
-        }
-        let distanceFactor = baseAlpha / 185.0
-        let alpha = max(40.0, min(150.0, (255.0 * speakerInactiveAlpha(key) * distanceFactor).rounded()))
-        return alpha / 255.0
-    }
-
-    private static func isKnownSpeaker(_ key: String) -> Bool {
+    private static func isCustomSpeakerKey(_ key: String) -> Bool {
         switch key {
-        case "speaker-b", "b", "speaker-c", "c", "speaker-d", "d", "speaker-sfx", "sfx":
+        case "custom", "speaker-custom", "male-custom", "speaker-male-custom",
+             "female-custom", "speaker-female-custom", "duet-custom", "speaker-duet-custom":
             return true
         default:
-            return speakerIndex(key: key, prefix: "male") != nil
-                || speakerIndex(key: key, prefix: "female") != nil
-                || speakerIndex(key: key, prefix: "duet") != nil
+            return false
+        }
+    }
+
+    private static func fallbackCustomSpeakerKey(_ key: String, speakerFallback: String) -> String {
+        switch key {
+        case "custom", "speaker-custom":
+            let fallback = normalizeSpeakerKey(speakerFallback)
+            return ["male-1", "female-1", "duet-1"].contains(fallback) ? fallback : "male-1"
+        case "male-custom", "speaker-male-custom":
+            return "male-1"
+        case "female-custom", "speaker-female-custom":
+            return "female-1"
+        case "duet-custom", "speaker-duet-custom":
+            return "duet-1"
+        default:
+            return key
         }
     }
 
@@ -5363,6 +5503,11 @@ struct SettingsView: View {
             }
 
             settingsSection(settings.t("section.speaker_colors"), description: settings.t("section.speaker_colors_desc")) {
+                settingsToggleCard(
+                    settings.t("setting.creator_speaker_colors"),
+                    description: settings.t("setting.creator_speaker_colors_desc"),
+                    binding: settingsSavedBinding(\.useSyncCreatorSpeakerColors)
+                )
                 settingsCard(settings.t("section.speaker_colors")) {
                     VStack(spacing: 12) {
                         ForEach(AppSettings.speakerColorSlots) { slot in

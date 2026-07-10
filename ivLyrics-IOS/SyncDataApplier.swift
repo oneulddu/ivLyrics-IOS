@@ -104,6 +104,8 @@ enum SyncDataApplier {
                     text: lineText,
                     syllables: timedLine.syllables,
                     speaker: IvLyricsUtilities.firstNonEmpty(line.speaker, leadPart.speaker),
+                    speakerColor: IvLyricsUtilities.firstNonEmpty(line.speakerColor, leadPart.speakerColor),
+                    speakerFallback: IvLyricsUtilities.firstNonEmpty(line.speakerFallback, leadPart.speakerFallback),
                     kind: IvLyricsUtilities.firstNonEmpty(line.kind, leadPart.kind),
                     vocalParts: vocalParts
                 ))
@@ -114,6 +116,8 @@ enum SyncDataApplier {
                     text: lineText,
                     syllables: timedLine.syllables,
                     speaker: IvLyricsUtilities.firstNonEmpty(line.speaker, part.speaker),
+                    speakerColor: IvLyricsUtilities.firstNonEmpty(line.speakerColor, part.speakerColor),
+                    speakerFallback: IvLyricsUtilities.firstNonEmpty(line.speakerFallback, part.speakerFallback),
                     kind: IvLyricsUtilities.firstNonEmpty(line.kind, part.kind)
                 ))
             } else {
@@ -123,6 +127,8 @@ enum SyncDataApplier {
                     text: lineText,
                     syllables: timedLine.syllables,
                     speaker: line.speaker,
+                    speakerColor: line.speakerColor,
+                    speakerFallback: line.speakerFallback,
                     kind: line.kind
                 ))
             }
@@ -199,7 +205,16 @@ enum SyncDataApplier {
         let trimmed = trimWhitespaceSyllables(syllables)
         guard !trimmed.isEmpty else { return nil }
         let text = trimmed.map(\.text).joined()
-        return LyricsLine.VocalPart(id: part.id, role: part.role, speaker: part.speaker, kind: part.kind, text: text, syllables: trimmed)
+        return LyricsLine.VocalPart(
+            id: part.id,
+            role: part.role,
+            speaker: part.speaker,
+            speakerColor: part.speakerColor,
+            speakerFallback: part.speakerFallback,
+            kind: part.kind,
+            text: text,
+            syllables: trimmed
+        )
     }
 
     private static func parseSyncLines(_ rawLines: [Any]) -> [SyncLine] {
@@ -211,6 +226,8 @@ enum SyncDataApplier {
                 end: intValue(rawLine["end"], fallback: -1),
                 chars: readDoubleArray(rawLine["chars"]),
                 speaker: stringValue(rawLine["speaker"]),
+                speakerColor: stringValue(rawLine["speakerColor"]),
+                speakerFallback: stringValue(rawLine["speakerFallback"]),
                 kind: IvLyricsUtilities.firstNonEmpty(stringValue(rawLine["kind"]), "vocal"),
                 parts: parallel.parts,
                 hiddenRanges: parallel.hiddenRanges
@@ -235,6 +252,8 @@ enum SyncDataApplier {
                 id: stringValue(rawPart["id"]),
                 role: stringValue(rawPart["role"]),
                 speaker: stringValue(rawPart["speaker"]),
+                speakerColor: stringValue(rawPart["speakerColor"]),
+                speakerFallback: stringValue(rawPart["speakerFallback"]),
                 kind: IvLyricsUtilities.firstNonEmpty(stringValue(rawPart["kind"]), "vocal"),
                 ranges: ranges,
                 join: readIntArray(rawPart["join"]),
@@ -311,6 +330,8 @@ enum SyncDataApplier {
                 id: id,
                 role: part.role,
                 speaker: part.speaker,
+                speakerColor: part.speakerColor,
+                speakerFallback: part.speakerFallback,
                 kind: part.kind,
                 ranges: [range],
                 join: [],
@@ -367,6 +388,8 @@ enum SyncDataApplier {
                 end: max(0, line.end - charOffset),
                 chars: line.chars,
                 speaker: line.speaker,
+                speakerColor: line.speakerColor,
+                speakerFallback: line.speakerFallback,
                 kind: line.kind,
                 parts: parts,
                 hiddenRanges: shiftRanges(line.hiddenRanges, charOffset: charOffset).ranges
@@ -407,6 +430,8 @@ enum SyncDataApplier {
                 end: line.end,
                 chars: shiftTimes(line.chars, offsetSeconds: offsetSeconds),
                 speaker: line.speaker,
+                speakerColor: line.speakerColor,
+                speakerFallback: line.speakerFallback,
                 kind: line.kind,
                 parts: line.parts.map { $0.withChars(shiftTimes($0.chars, offsetSeconds: offsetSeconds)) },
                 hiddenRanges: line.hiddenRanges
@@ -629,12 +654,24 @@ enum SyncDataApplier {
         var end: Int
         var chars: [Double]
         var speaker: String
+        var speakerColor: String
+        var speakerFallback: String
         var kind: String
         var parts: [ParallelPart]
         var hiddenRanges: [RangeValue]
 
         func withParts(_ nextParts: [ParallelPart]) -> SyncLine {
-            SyncLine(start: start, end: end, chars: chars, speaker: speaker, kind: kind, parts: nextParts, hiddenRanges: hiddenRanges)
+            SyncLine(
+                start: start,
+                end: end,
+                chars: chars,
+                speaker: speaker,
+                speakerColor: speakerColor,
+                speakerFallback: speakerFallback,
+                kind: kind,
+                parts: nextParts,
+                hiddenRanges: hiddenRanges
+            )
         }
 
         func isUsable(fullCharCount: Int) -> Bool {
@@ -647,17 +684,39 @@ enum SyncDataApplier {
         var id: String
         var role: String
         var speaker: String
+        var speakerColor: String
+        var speakerFallback: String
         var kind: String
         var ranges: [RangeValue]
         var join: [Int]
         var chars: [Double]
 
         func withRangesAndChars(_ nextRanges: [RangeValue], _ nextChars: [Double]) -> ParallelPart {
-            ParallelPart(id: id, role: role, speaker: speaker, kind: kind, ranges: nextRanges, join: join, chars: nextChars)
+            ParallelPart(
+                id: id,
+                role: role,
+                speaker: speaker,
+                speakerColor: speakerColor,
+                speakerFallback: speakerFallback,
+                kind: kind,
+                ranges: nextRanges,
+                join: join,
+                chars: nextChars
+            )
         }
 
         func withChars(_ nextChars: [Double]) -> ParallelPart {
-            ParallelPart(id: id, role: role, speaker: speaker, kind: kind, ranges: ranges, join: join, chars: nextChars)
+            ParallelPart(
+                id: id,
+                role: role,
+                speaker: speaker,
+                speakerColor: speakerColor,
+                speakerFallback: speakerFallback,
+                kind: kind,
+                ranges: ranges,
+                join: join,
+                chars: nextChars
+            )
         }
     }
 

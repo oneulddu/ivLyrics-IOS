@@ -94,6 +94,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             syncedLyricsKaraokeAnimationEnabled: settings.syncedLyricsKaraokeAnimationEnabled,
             karaokeBounceEffectEnabled: settings.karaokeBounceEffectEnabled,
             karaokeDataAsLineSynced: settings.karaokeDataAsLineSynced,
+            useSyncCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
             speakerColors: settings.speakerColors
         )
         let forceRender = nextState.renderIdentity != state.renderIdentity
@@ -335,7 +336,18 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let hasTimedSyllables = timedSyllables.contains { $0.endTimeMs > $0.startTimeMs }
         let activeColor = LyricSpeakerPalette.activeColor(
             speaker: active.line.speaker,
-            settings: state.speakerColors
+            speakerColor: active.line.speakerColor,
+            speakerFallback: active.line.speakerFallback,
+            settings: state.speakerColors,
+            useCreatorColors: state.useSyncCreatorSpeakerColors
+        )
+        let inactiveColor = LyricSpeakerPalette.inactiveColor(
+            speaker: active.line.speaker,
+            speakerColor: active.line.speakerColor,
+            speakerFallback: active.line.speakerFallback,
+            settings: state.speakerColors,
+            useCreatorColors: state.useSyncCreatorSpeakerColors,
+            distance: 0
         )
         let content = SyllableKaraokeText(
             text: text,
@@ -347,7 +359,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             activeColor: activeColor,
             alignment: state.swiftUITextAlignment,
             kind: active.line.kind,
-            inactiveOpacity: 185.0 / 255.0,
+            inactiveColor: inactiveColor,
             bounceEnabled: state.karaokeBounceEffectEnabled,
             bounceTextSize: fontSize,
             syntheticTimingEnabled: !hasTimedSyllables && state.syncedLyricsKaraokeAnimationEnabled
@@ -524,6 +536,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         var syncedLyricsKaraokeAnimationEnabled: Bool
         var karaokeBounceEffectEnabled: Bool
         var karaokeDataAsLineSynced: Bool
+        var useSyncCreatorSpeakerColors: Bool
         var speakerColors: AppSettings.SpeakerColorSettings
 
         static let empty = RenderState(
@@ -540,6 +553,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             syncedLyricsKaraokeAnimationEnabled: true,
             karaokeBounceEffectEnabled: true,
             karaokeDataAsLineSynced: false,
+            useSyncCreatorSpeakerColors: true,
             speakerColors: .defaults
         )
 
@@ -620,6 +634,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 String(syncedLyricsKaraokeAnimationEnabled),
                 String(karaokeBounceEffectEnabled),
                 String(karaokeDataAsLineSynced),
+                String(useSyncCreatorSpeakerColors),
                 String(speakerColors.hashValue)
             ].joined(separator: "|")
         }

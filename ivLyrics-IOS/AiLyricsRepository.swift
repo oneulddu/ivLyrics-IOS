@@ -1245,6 +1245,8 @@ actor AiLyricsRepository {
             text: line.text,
             syllables: line.syllables,
             speaker: line.speaker,
+            speakerColor: line.speakerColor,
+            speakerFallback: line.speakerFallback,
             kind: line.kind,
             vocalParts: parts,
             pronunciationText: pronunciationText,

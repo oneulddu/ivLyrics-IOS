@@ -1814,6 +1814,8 @@ final class AppViewModel: ObservableObject {
             text: target.text,
             syllables: target.syllables,
             speaker: target.speaker,
+            speakerColor: target.speakerColor,
+            speakerFallback: target.speakerFallback,
             kind: target.kind,
             vocalParts: parts,
             pronunciationText: target.pronunciationText,
