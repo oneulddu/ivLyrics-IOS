@@ -309,11 +309,12 @@ struct ContentView: View {
 
                 HStack(spacing: 0) {
                     Text(androidPlayerTime(model.nowPositionMs))
+                        .foregroundStyle(.white.opacity(204.0 / 255.0))
                     Spacer()
                     Text("-" + androidPlayerTime(max(0, model.durationMs - model.nowPositionMs)))
+                        .foregroundStyle(.white.opacity(174.0 / 255.0))
                 }
                 .font(.pretendard(12))
-                .foregroundStyle(.white.opacity(0.76))
 
                 androidTransportControls
                     .frame(maxWidth: .infinity, minHeight: 76, maxHeight: 76)
@@ -2646,14 +2647,14 @@ struct MainLyricPreviewPanel: View {
             if previewItems != AppSettings.previewItemNone {
                 let rows = previewRows(previewItems: previewItems)
                 if !rows.isEmpty {
-                    VStack(spacing: 5) {
+                    VStack(spacing: 4) {
                         ForEach(rows) { row in
                             MainLyricPreviewRowView(row: row, positionMs: model.adjustedPositionMs)
                         }
                     }
-                    .frame(maxWidth: .infinity, minHeight: rows.count > 1 ? 88 : 58, alignment: .center)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, minHeight: reservedContentHeight, alignment: .center)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .foregroundStyle(.white)
                     .background(.black.opacity(chromeless ? 0 : 0.22), in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(chromeless ? 0 : 0.08)))
@@ -2669,6 +2670,16 @@ struct MainLyricPreviewPanel: View {
         .onDisappear {
             resetEmptyLyricsPreviewTimer()
         }
+    }
+
+    private var reservedContentHeight: CGFloat {
+        let typography = settings.typographySettings()
+        let primarySize = typography.scaledSize(slotId: AppSettings.typoMainPreviewOriginal, baseSize: 17)
+        let pronunciationSize = typography.scaledSize(slotId: AppSettings.typoMainPreviewPronunciation, baseSize: 14.5)
+        let translationSize = typography.scaledSize(slotId: AppSettings.typoMainPreviewTranslation, baseSize: 14.5)
+        let primaryRow = primarySize * 1.22 + max(7, primarySize * 0.46 * 0.82)
+        let secondaryRow = max(pronunciationSize, translationSize) * 1.18
+        return primaryRow + 2 * (4 + secondaryRow)
     }
 
     private func previewRows(previewItems: Int) -> [MainLyricPreviewRow] {
