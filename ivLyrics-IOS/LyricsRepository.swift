@@ -182,7 +182,7 @@ actor LyricsRepository {
         let hasCachedIsrc = cachedBase?.isrc.isEmpty == false
         log(hasCachedIsrc
             ? "flow: cached ISRC -> sync-data recheck -> cached LRCLIB lyrics"
-            : "flow: Spotify Web API search -> sync-data -> LRCLIB source/search")
+            : "flow: Spotify Web API search -> sync-data -> LRCLIB source/search -> Unison fallback")
 
         let spotifyMatch: SpotifyTrackMatch?
         if let cachedBase, hasCachedIsrc {
@@ -246,6 +246,14 @@ actor LyricsRepository {
 
         guard let candidate else {
             log("result: no LRCLIB candidate selected")
+            if let unison = await loadUnisonFallback(
+                track: track,
+                isrc: isrc,
+                spotifyTrackId: spotifyTrackId,
+                log: log
+            ) {
+                return LoadedLyrics(trackKey: key, result: unison, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+            }
             let result = LyricsResult.empty(ui("repo.lyrics_not_found", settings: settings))
             return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
         }
@@ -263,6 +271,14 @@ actor LyricsRepository {
                 return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
             }
             log("result: LRCLIB result has no renderable lyrics")
+            if let unison = await loadUnisonFallback(
+                track: track,
+                isrc: isrc,
+                spotifyTrackId: spotifyTrackId,
+                log: log
+            ) {
+                return LoadedLyrics(trackKey: key, result: unison, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+            }
             let result = LyricsResult.empty(ui("repo.no_renderable_lyrics", settings: settings))
             return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
         }
@@ -309,6 +325,30 @@ actor LyricsRepository {
         putMemoryCachedLyrics(key, result: result)
         diskCache.put(key, result: result)
         return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+    }
+
+    private func loadUnisonFallback(
+        track: TrackSnapshot,
+        isrc: String,
+        spotifyTrackId: String,
+        log: (String) -> Void
+    ) async -> LyricsResult? {
+        log("provider fallback: LRCLIB -> Unison")
+        do {
+            let outcome = try await UnisonLyricsProvider.fetch(
+                track: track,
+                isrc: isrc,
+                spotifyTrackId: spotifyTrackId
+            )
+            outcome.logs.forEach(log)
+            if outcome.result != nil {
+                log("unison cache: skipped to match provider policy")
+            }
+            return outcome.result
+        } catch {
+            log("unison error: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     private func applySyncDataToCachedBase(
