@@ -3,6 +3,16 @@ import Foundation
 struct UnisonResponseEnvelope: Decodable, Sendable {
     let success: Bool
     let data: UnisonLyricsData?
+
+    private enum CodingKeys: String, CodingKey {
+        case success, data
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        success = try container.decode(Bool.self, forKey: .success)
+        data = success ? try container.decodeIfPresent(UnisonLyricsData.self, forKey: .data) : nil
+    }
 }
 
 struct UnisonLyricsData: Decodable, Sendable {

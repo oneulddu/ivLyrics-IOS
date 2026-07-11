@@ -182,7 +182,11 @@ enum UnisonParser {
                 text: text, syllables: lineSyllables, speaker: speaker, vocalParts: lineParts))
         }
         guard !lines.isEmpty else { throw LyricsProviderError.miss }
-        lines.sort { $0.startMs == $1.startMs ? $0.text < $1.text : $0.startMs < $1.startMs }
+        lines = lines.enumerated().sorted { left, right in
+            left.element.startMs == right.element.startMs
+                ? left.offset < right.offset
+                : left.element.startMs < right.element.startMs
+        }.map(\.element)
         return UnisonParsedLyrics(lines: lines, timing: .lineSynced)
     }
 
