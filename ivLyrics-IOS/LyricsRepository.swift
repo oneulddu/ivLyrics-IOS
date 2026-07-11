@@ -77,6 +77,16 @@ actor LyricsRepository {
         var artworkURL: URL?
     }
 
+    struct CachedLyricsPreview: Sendable {
+        var loaded: LoadedLyrics
+        var policyGeneration: UInt64
+        var effectiveMode: LyricsProviderMode
+        var baseProvider: LyricsProviderID
+    }
+
+    typealias CachedLyricsLoadedHandler = @MainActor @Sendable (CachedLyricsPreview) async -> Void
+    typealias SpotifyMetadataResolvedHandler = @MainActor @Sendable (ResolvedSpotifyMetadata) async -> Void
+
     struct SpotifyCredentialValidation: Sendable {
         var expiresInSeconds: Int64
         var logs: [String]
@@ -104,7 +114,8 @@ actor LyricsRepository {
     func loadLyrics(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
-        onSpotifyMetadataResolved: ((ResolvedSpotifyMetadata) async -> Void)? = nil,
+        onCachedLyricsLoaded: CachedLyricsLoadedHandler? = nil,
+        onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler? = nil,
         allowPolicyChangeRetry: Bool = true
     ) async throws -> LoadedLyrics {
         guard track.hasUsableMetadata else {
@@ -128,6 +139,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -136,6 +148,37 @@ actor LyricsRepository {
             }
         }
         let providerCacheKey = makeProviderCacheKey(track: track, policy: providerPolicy)
+        func cachePreviewIsAuthorized(
+            by latestSettings: AppSettings.Snapshot,
+            baseProvider: LyricsProviderID
+        ) -> Bool {
+            let latestPolicy = LyricsProviderPolicyEvaluator.evaluate(
+                latestSettings.lyricsProviderSettings,
+                multiProviderAuthorized: latestSettings.lyricsProviderMultiProviderAuthorized
+            )
+            return LyricsProviderAppContracts.cachePreviewStillAuthorized(
+                requestGeneration: settings.lyricsProviderPolicyGeneration,
+                currentGeneration: latestSettings.lyricsProviderPolicyGeneration,
+                requestEffectiveMode: providerPolicy.effectiveMode.rawValue,
+                currentEffectiveMode: latestPolicy.effectiveMode.rawValue,
+                baseProviderIsAllowed: latestPolicy.allows(baseProvider)
+            )
+        }
+        func cachedPreview(_ result: LyricsResult, baseProvider: LyricsProviderID) -> CachedLyricsPreview {
+            CachedLyricsPreview(
+                loaded: LoadedLyrics(
+                    trackKey: key,
+                    result: result,
+                    artworkURL: nil,
+                    logs: logs,
+                    resolvedIsrc: result.isrc,
+                    resolvedSpotifyTrackId: result.spotifyTrackId
+                ),
+                policyGeneration: settings.lyricsProviderPolicyGeneration,
+                effectiveMode: providerPolicy.effectiveMode,
+                baseProvider: baseProvider
+            )
+        }
         var publishedSpotifyMetadataKeys = Set<String>()
         func publishResolvedMetadata(isrc: String, spotifyTrackId: String, artworkURL: URL?) async {
             guard let onSpotifyMetadataResolved else { return }
@@ -161,29 +204,48 @@ actor LyricsRepository {
         if let envelope = admittedProviderCache(providerCacheKey, policy: providerPolicy) {
             switch cacheDecision(envelope, key: providerCacheKey, policy: providerPolicy) {
             case .immediateReturn:
-                if providerPolicy.effectiveMode == .multiProvider {
-                    let latestSettings = AppSettings.shared.snapshot
-                    if settings.lyricsProviderPolicyGeneration != latestSettings.lyricsProviderPolicyGeneration {
-                        if allowPolicyChangeRetry {
-                            return try await loadLyrics(
-                                track: track,
-                                settings: latestSettings,
-                                onSpotifyMetadataResolved: onSpotifyMetadataResolved,
-                                allowPolicyChangeRetry: false
-                            )
-                        }
-                        throw CancellationError()
+                let latestSettings = AppSettings.shared.snapshot
+                guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: envelope.provenance.baseProvider) else {
+                    if allowPolicyChangeRetry {
+                        return try await loadLyrics(
+                            track: track,
+                            settings: latestSettings,
+                            onCachedLyricsLoaded: onCachedLyricsLoaded,
+                            onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                            allowPolicyChangeRetry: false
+                        )
                     }
+                    throw CancellationError()
                 }
                 log("provider cache hit: mode=\(providerPolicy.effectiveMode.rawValue) / provider=\(envelope.provenance.baseProvider.rawValue)")
                 return LoadedLyrics(trackKey: key, result: envelope.result, artworkURL: nil, logs: logs,
                                     resolvedIsrc: envelope.result.isrc,
                                     resolvedSpotifyTrackId: envelope.result.spotifyTrackId)
             case .baseReapply:
+                let latestSettings = AppSettings.shared.snapshot
+                guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: envelope.provenance.baseProvider) else {
+                    if allowPolicyChangeRetry {
+                        return try await loadLyrics(
+                            track: track,
+                            settings: latestSettings,
+                            onCachedLyricsLoaded: onCachedLyricsLoaded,
+                            onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                            allowPolicyChangeRetry: false
+                        )
+                    }
+                    throw CancellationError()
+                }
                 cachedBase = envelope.result
                 cachedBaseProvider = envelope.provenance.baseProvider
                 cachedBaseProvenance = envelope.provenance
-                log("provider cache hit: base lyrics, rechecking OpenDB sync-data")
+                log("provider cache hit: base lyrics served immediately; rechecking OpenDB sync-data in background")
+                if let onCachedLyricsLoaded {
+                    await onCachedLyricsLoaded(cachedPreview(
+                        envelope.result,
+                        baseProvider: envelope.provenance.baseProvider
+                    ))
+                    logs.removeAll(keepingCapacity: true)
+                }
             case .reject:
                 break
             }
@@ -191,27 +253,102 @@ actor LyricsRepository {
         if providerPolicy.effectiveMode == .legacy, providerPolicy.allows(.lrclib),
            cachedBase == nil, let cached = getMemoryCachedLyrics(key) {
             if cached.karaoke {
+                let latestSettings = AppSettings.shared.snapshot
+                guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: .lrclib) else {
+                    if allowPolicyChangeRetry {
+                        return try await loadLyrics(
+                            track: track,
+                            settings: latestSettings,
+                            onCachedLyricsLoaded: onCachedLyricsLoaded,
+                            onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                            allowPolicyChangeRetry: false
+                        )
+                    }
+                    throw CancellationError()
+                }
                 log("cache hit: \(track.title) / \(track.artist)")
                 return LoadedLyrics(trackKey: key, result: cached, artworkURL: nil, logs: logs, resolvedIsrc: cached.isrc, resolvedSpotifyTrackId: cached.spotifyTrackId)
             }
+            let latestSettings = AppSettings.shared.snapshot
+            guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: .lrclib) else {
+                if allowPolicyChangeRetry {
+                    return try await loadLyrics(
+                        track: track,
+                        settings: latestSettings,
+                        onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                        allowPolicyChangeRetry: false
+                    )
+                }
+                throw CancellationError()
+            }
             cachedBase = cached
-            log("cache hit: base lyrics, rechecking OpenDB sync-data")
+            log("cache hit: base lyrics served immediately; rechecking OpenDB sync-data in background")
+            if let onCachedLyricsLoaded {
+                await onCachedLyricsLoaded(cachedPreview(cached, baseProvider: .lrclib))
+                logs.removeAll(keepingCapacity: true)
+            }
         }
         if providerPolicy.effectiveMode == .legacy, providerPolicy.allows(.lrclib),
            cachedBase == nil, let diskCached = diskCache.get(key) {
             if diskCached.karaoke {
+                let latestSettings = AppSettings.shared.snapshot
+                guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: .lrclib) else {
+                    if allowPolicyChangeRetry {
+                        return try await loadLyrics(
+                            track: track,
+                            settings: latestSettings,
+                            onCachedLyricsLoaded: onCachedLyricsLoaded,
+                            onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                            allowPolicyChangeRetry: false
+                        )
+                    }
+                    throw CancellationError()
+                }
                 log("disk cache hit: sync-data/LRCLIB lyrics / contributors=\(diskCached.contributors.count)")
                 return LoadedLyrics(trackKey: key, result: diskCached, artworkURL: nil, logs: logs, resolvedIsrc: diskCached.isrc, resolvedSpotifyTrackId: diskCached.spotifyTrackId)
             }
+            let latestSettings = AppSettings.shared.snapshot
+            guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: .lrclib) else {
+                if allowPolicyChangeRetry {
+                    return try await loadLyrics(
+                        track: track,
+                        settings: latestSettings,
+                        onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                        allowPolicyChangeRetry: false
+                    )
+                }
+                throw CancellationError()
+            }
+            putMemoryCachedLyrics(key, result: diskCached)
             cachedBase = diskCached
-            log("base lyrics disk cache hit: rechecking OpenDB sync-data before reuse")
+            log("base lyrics disk cache hit: served immediately; rechecking OpenDB sync-data in background")
+            if let onCachedLyricsLoaded {
+                await onCachedLyricsLoaded(cachedPreview(diskCached, baseProvider: .lrclib))
+                logs.removeAll(keepingCapacity: true)
+            }
         }
 
         log("track: \"\(track.title)\" / \"\(track.artist)\"" + (track.album.isEmpty ? "" : " / album=\"\(track.album)\"") + " / duration=\(track.durationMs)ms" + (track.isrc.isEmpty ? "" : " / player ISRC=\(track.isrc)"))
-        log("flow: Spotify Web API search -> sync-data -> LRCLIB source/search")
+        let hasCachedIsrc = cachedBase?.isrc.isEmpty == false
+        log(hasCachedIsrc
+            ? "flow: cached ISRC -> sync-data recheck -> cached base lyrics"
+            : "flow: Spotify Web API search -> sync-data -> LRCLIB source/search")
 
-        let spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
-            await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
+        let spotifyMatch: SpotifyTrackMatch?
+        if let cachedBase, hasCachedIsrc {
+            log("spotify lookup skipped: cached ISRC=\(cachedBase.isrc)" + (cachedBase.spotifyTrackId.isEmpty ? "" : " / trackId=\(cachedBase.spotifyTrackId)"))
+            await publishResolvedMetadata(
+                isrc: cachedBase.isrc,
+                spotifyTrackId: cachedBase.spotifyTrackId,
+                artworkURL: nil
+            )
+            spotifyMatch = nil
+        } else {
+            spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
+                await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
+            }
         }
         let isrc = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.isrc, track.isrc, cachedBase?.isrc)
         let spotifyTrackId = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.spotifyId, track.trackId, cachedBase?.spotifyTrackId)
@@ -225,19 +362,18 @@ actor LyricsRepository {
 
         let syncData = isrc.isEmpty ? nil : await fetchSyncData(isrc: isrc, track: track, spotifyMatch: spotifyMatch, log: log)
         if let cachedBase {
-            if providerPolicy.effectiveMode == .multiProvider {
-                let latestSettings = AppSettings.shared.snapshot
-                if settings.lyricsProviderPolicyGeneration != latestSettings.lyricsProviderPolicyGeneration {
-                    if allowPolicyChangeRetry {
-                        return try await loadLyrics(
-                            track: track,
-                            settings: latestSettings,
-                            onSpotifyMetadataResolved: onSpotifyMetadataResolved,
-                            allowPolicyChangeRetry: false
-                        )
-                    }
-                    throw CancellationError()
+            let latestSettings = AppSettings.shared.snapshot
+            guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: cachedBaseProvider) else {
+                if allowPolicyChangeRetry {
+                    return try await loadLyrics(
+                        track: track,
+                        settings: latestSettings,
+                        onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                        allowPolicyChangeRetry: false
+                    )
                 }
+                throw CancellationError()
             }
             let result = applySyncDataToCachedBase(
                 cachedBase,
@@ -275,6 +411,7 @@ actor LyricsRepository {
                 spotifyTrackId: spotifyTrackId,
                 artworkURL: spotifyMatch?.artworkURL,
                 logs: logs,
+                onCachedLyricsLoaded: onCachedLyricsLoaded,
                 onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                 allowPolicyChangeRetry: allowPolicyChangeRetry
             )
@@ -1888,7 +2025,8 @@ actor LyricsRepository {
         spotifyTrackId: String,
         artworkURL: URL?,
         logs: [String],
-        onSpotifyMetadataResolved: ((ResolvedSpotifyMetadata) async -> Void)?,
+        onCachedLyricsLoaded: CachedLyricsLoadedHandler?,
+        onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler?,
         allowPolicyChangeRetry: Bool
     ) async throws -> LoadedLyrics {
         var diagnostics = logs
@@ -1941,6 +2079,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -1949,9 +2088,22 @@ actor LyricsRepository {
             }
             let baseLines = appLines(from: selected, fallbackDurationMs: track.durationMs)
             guard !baseLines.isEmpty else { throw LyricsProviderError.miss }
+            let preserveProviderKaraoke = LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
+                providerID: selected.provider.rawValue,
+                lineSyllableDurationsMs: selected.lines.map { line in
+                    line.syllables.map { $0.endMs - $0.startMs }
+                },
+                vocalPartSyllableDurationsMs: selected.lines.map { line in
+                    line.vocalParts.map { part in
+                        part.syllables.map { $0.endMs - $0.startMs }
+                    }
+                }
+            )
             var finalLines = baseLines
             var syncApplied = false
-            if let syncData {
+            if preserveProviderKaraoke {
+                diagnostics.append("provider unison: rich timing preserved; sync-data apply skipped")
+            } else if let syncData {
                 let applied = SyncDataApplier.applyWithDiagnostics(
                     baseLyrics: baseLines,
                     syncBody: syncData.syncBody,
@@ -1971,9 +2123,10 @@ actor LyricsRepository {
             let result = LyricsResult(
                 lines: finalLines,
                 providerLabel: label,
-                detail: ui(syncApplied ? "repo.detail.sync_applied_search" :
-                    (syncData == nil ? "repo.detail.no_sync_data" : "repo.detail.sync_apply_failed"), settings: settings),
-                karaoke: syncApplied,
+                detail: ui(preserveProviderKaraoke ? "repo.detail.provider_rich_timing" :
+                    (syncApplied ? "repo.detail.sync_applied_search" :
+                        (syncData == nil ? "repo.detail.no_sync_data" : "repo.detail.sync_apply_failed")), settings: settings),
+                karaoke: preserveProviderKaraoke || syncApplied,
                 isrc: isrc,
                 spotifyTrackId: spotifyTrackId,
                 contributors: syncApplied ? (syncData?.contributors ?? []) : []
@@ -2011,6 +2164,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: finalSettings,
+                        onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -2031,6 +2185,7 @@ actor LyricsRepository {
                 return try await loadLyrics(
                     track: track,
                     settings: latestSettings,
+                    onCachedLyricsLoaded: onCachedLyricsLoaded,
                     onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                     allowPolicyChangeRetry: false
                 )
@@ -2056,9 +2211,34 @@ actor LyricsRepository {
             return LyricsLine(
                 startTimeMs: max(0, line.startMs),
                 endTimeMs: max(line.startMs, line.endMs ?? nextStart),
-                text: line.text
+                text: line.text,
+                syllables: line.syllables.map(appSyllable),
+                speaker: line.speaker?.speaker ?? "",
+                speakerColor: line.speaker?.color ?? "",
+                speakerFallback: line.speaker?.fallback ?? "",
+                kind: "vocal",
+                vocalParts: line.vocalParts.map { part in
+                    LyricsLine.VocalPart(
+                        id: part.id,
+                        role: part.role.rawValue,
+                        speaker: part.speaker?.speaker ?? "",
+                        speakerColor: part.speaker?.color ?? "",
+                        speakerFallback: part.speaker?.fallback ?? "",
+                        kind: "vocal",
+                        text: part.text,
+                        syllables: part.syllables.map(appSyllable)
+                    )
+                }
             )
         }
+    }
+
+    private func appSyllable(_ syllable: ProviderLyricSyllable) -> LyricsLine.Syllable {
+        LyricsLine.Syllable(
+            text: syllable.text,
+            startTimeMs: syllable.startMs,
+            endTimeMs: syllable.endMs
+        )
     }
 
     private func providerDisplayName(_ provider: LyricsProviderID) -> String {
@@ -2068,6 +2248,7 @@ actor LyricsRepository {
         case .deezer: return "Deezer"
         case .bugs: return "Bugs"
         case .genie: return "Genie"
+        case .unison: return "Unison"
         }
     }
 

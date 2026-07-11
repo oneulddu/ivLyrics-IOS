@@ -67,6 +67,7 @@ final class AppSettings: ObservableObject {
         Language(code: "sv", name: "Swedish", nativeName: "Svenska", phoneticDescription: "Swedish phonetic spelling"),
         Language(code: "pt", name: "Portuguese", nativeName: "Português", phoneticDescription: "Portuguese phonetic spelling"),
         Language(code: "bn", name: "Bengali", nativeName: "বাংলা", phoneticDescription: "Bengali script pronunciation"),
+        Language(code: "cs", name: "Czech", nativeName: "Čeština", phoneticDescription: "Czech phonetic spelling"),
         Language(code: "it", name: "Italian", nativeName: "Italiano", phoneticDescription: "Italian phonetic spelling"),
         Language(code: "th", name: "Thai", nativeName: "ภาษาไทย", phoneticDescription: "Thai script pronunciation"),
         Language(code: "vi", name: "Vietnamese", nativeName: "Tiếng Việt", phoneticDescription: "Vietnamese phonetic spelling"),
@@ -234,7 +235,11 @@ final class AppSettings: ObservableObject {
         spotifyClientSecret = defaults.string(forKey: "spotify_client_secret") ?? ""
         lyricsProviderModeRaw = LyricsProviderMode.normalize(defaults.string(forKey: "lyrics_provider_mode")).rawValue
         lyricsProviderEnabled = Set(defaults.stringArray(forKey: "lyrics_provider_enabled") ?? [LyricsProviderID.lrclib.rawValue])
-        lyricsProviderOrder = defaults.stringArray(forKey: "lyrics_provider_order") ?? LyricsProviderID.defaultOrder.map(\.rawValue)
+        let normalizedLyricsProviderOrder = LyricsProviderAppContracts.canonicalProviderOrder(
+            defaults.stringArray(forKey: "lyrics_provider_order") ?? LyricsProviderID.defaultOrder.map(\.rawValue)
+        )
+        lyricsProviderOrder = normalizedLyricsProviderOrder
+        defaults.set(normalizedLyricsProviderOrder, forKey: "lyrics_provider_order")
         deezerConfigured = defaults.bool(forKey: "lyrics_provider_deezer_configured")
         lyricsProviderCredentialGeneration = (defaults.object(forKey: "lyrics_provider_credential_generation") as? NSNumber)?.uint64Value ?? 0
         lyricsProviderPolicyGeneration = (defaults.object(forKey: "lyrics_provider_policy_generation") as? NSNumber)?.uint64Value ?? 0

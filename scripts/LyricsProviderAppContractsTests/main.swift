@@ -2,6 +2,7 @@ import Foundation
 
 private var failures: [String] = []
 
+@MainActor
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() { failures.append(message) }
 }
@@ -61,6 +62,27 @@ expect(!LyricsProviderAppContracts.requestStillAuthorized(
     effectiveModeIsMultiProvider: true, selectedProviderIsAllowed: false
 ), "denylisted provider result must be rejected")
 
+expect(LyricsProviderAppContracts.cachePreviewStillAuthorized(
+    requestGeneration: 8, currentGeneration: 8,
+    requestEffectiveMode: "legacy", currentEffectiveMode: "legacy",
+    baseProviderIsAllowed: true
+), "an unchanged legacy LRCLIB preview must remain valid")
+expect(!LyricsProviderAppContracts.cachePreviewStillAuthorized(
+    requestGeneration: 8, currentGeneration: 9,
+    requestEffectiveMode: "multiProvider", currentEffectiveMode: "multiProvider",
+    baseProviderIsAllowed: true
+), "a stale cache preview generation must be rejected")
+expect(!LyricsProviderAppContracts.cachePreviewStillAuthorized(
+    requestGeneration: 8, currentGeneration: 8,
+    requestEffectiveMode: "multiProvider", currentEffectiveMode: "legacy",
+    baseProviderIsAllowed: true
+), "a cache preview from a superseded effective mode must be rejected")
+expect(!LyricsProviderAppContracts.cachePreviewStillAuthorized(
+    requestGeneration: 8, currentGeneration: 8,
+    requestEffectiveMode: "multiProvider", currentEffectiveMode: "multiProvider",
+    baseProviderIsAllowed: false
+), "a cache preview from a newly denied base provider must be rejected")
+
 expect(LyricsProviderAppContracts.orderedLineIndices(
     starts: [0, 0, 0], timingIsPlain: true
 ) == [0, 1, 2], "plain lyrics must preserve provider line order")
@@ -68,7 +90,50 @@ expect(LyricsProviderAppContracts.orderedLineIndices(
     starts: [2_000, 1_000, 1_000, 3_000], timingIsPlain: false
 ) == [1, 2, 0, 3], "line-synced lyrics must use a stable time sort")
 
-for provider in ["LRCLIB", "Musixmatch", "Deezer", "Bugs", "Genie"] {
+expect(LyricsProviderAppContracts.providerOrderRawValues == [
+    "musixmatch", "deezer", "unison", "bugs", "genie", "lrclib"
+], "provider order must include Unison at its fixed position")
+expect(LyricsProviderAppContracts.canonicalProviderOrder(
+    ["musixmatch", "deezer", "bugs", "genie", "lrclib"]
+) == ["musixmatch", "deezer", "unison", "bugs", "genie", "lrclib"],
+       "existing saved orders must insert Unison at the fixed position")
+expect(LyricsProviderAppContracts.canonicalProviderOrder(
+    ["bugs", "bugs", "unknown", "lrclib"]
+) == ["musixmatch", "deezer", "unison", "bugs", "genie", "lrclib"],
+       "provider order must remove duplicates and unknown IDs")
+expect(LyricsProviderAppContracts.canonicalProviderOrder(
+    ["lrclib", "bugs", "musixmatch"]
+) == ["deezer", "unison", "genie", "lrclib", "bugs", "musixmatch"],
+       "normalization must preserve the relative order of existing providers")
+expect(LyricsProviderAppContracts.defaultEnabledProviderRawValues == ["lrclib"],
+       "fresh installs must keep only LRCLIB enabled")
+expect(LyricsProviderAppContracts.unofficialProviderRawValues.contains("unison"),
+       "Unison must be exposed as an opt-in unofficial provider")
+expect(LyricsProviderAppContracts.providerDisplayName("unison") == "Unison",
+       "Unison display name must be stable")
+
+expect(LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
+    providerID: "unison",
+    lineSyllableDurationsMs: [[500, 500]],
+    vocalPartSyllableDurationsMs: []
+), "Unison line syllable timing must be preserved as karaoke")
+expect(LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
+    providerID: "unison",
+    lineSyllableDurationsMs: [],
+    vocalPartSyllableDurationsMs: [[[1_000], [750]]]
+), "Unison lead/background vocal timing must be preserved as karaoke")
+expect(!LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
+    providerID: "unison",
+    lineSyllableDurationsMs: [[], []],
+    vocalPartSyllableDurationsMs: []
+), "Unison LRC/plain lines must not be misclassified as rich timing")
+expect(!LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
+    providerID: "bugs",
+    lineSyllableDurationsMs: [[500]],
+    vocalPartSyllableDurationsMs: []
+), "rich timing preservation must remain scoped to Unison")
+
+for provider in ["LRCLIB", "Musixmatch", "Deezer", "Unison", "Bugs", "Genie"] {
     expect(LyricsProviderAppContracts.providerBaseLabel(
         providerName: provider, lineSynced: false, syncDataApplied: false
     ) == "\(provider) plain", "plain provider label mismatch for \(provider)")

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import LyricsProviderCore
 
 #if os(iOS)
 import AVFoundation
@@ -1638,12 +1639,14 @@ final class AppViewModel: ObservableObject {
             appendLog("ios input: manual TrackSnapshot -> Android-compatible lyrics pipeline")
             let loaded = try await lyricsRepository.loadLyrics(
                 track: track,
-                settings: settings.snapshot
-            ) { [weak self] metadata in
-                await MainActor.run {
+                settings: settings.snapshot,
+                onCachedLyricsLoaded: { [weak self] preview in
+                    self?.applyCachedLyricsPreview(preview, track: track, requestID: requestID)
+                },
+                onSpotifyMetadataResolved: { [weak self] metadata in
                     self?.applyEarlySpotifyLyricsMetadata(metadata)
                 }
-            }
+            )
             guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else { return }
             appendLogs(loaded.logs)
             guard let latestTrack = currentTrack, latestTrack.stableKey == track.stableKey else { return }
@@ -1665,9 +1668,12 @@ final class AppViewModel: ObservableObject {
             }
             currentTrack = resolvedTrack
             let baseResult = localizedLyricsResult(loaded.result)
+            let cachedBaseAlreadyVisible = status == .loaded && baseLyricsResult == baseResult
             baseLyricsResult = baseResult
-            lyricsResult = baseResult
-            resetCurrentFurigana()
+            if !cachedBaseAlreadyVisible {
+                lyricsResult = baseResult
+                resetCurrentFurigana()
+            }
             trackOffsetMs = settings.trackSyncOffsetMs(loaded.trackKey)
             videoOffsetMs = settings.trackVideoSyncOffsetMs(loaded.trackKey)
             status = .loaded
@@ -1682,6 +1688,17 @@ final class AppViewModel: ObservableObject {
             await loadYouTubeIfNeeded(track: resolvedTrack, result: finalResult)
         } catch {
             guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey), let failedTrack = currentTrack else { return }
+            if !baseLyricsResult.lines.isEmpty {
+                status = .loaded
+                appendLog("lyrics background sync-data recheck failed: \(error.localizedDescription); cached lyrics kept")
+                let cachedBase = baseLyricsResult
+                requestMetadataTranslation(track: failedTrack, base: cachedBase, bypassCache: bypassCache)
+                let finalResult = await applyLyricsSupplements(track: failedTrack, base: cachedBase, bypassCache: bypassCache)
+                guard isLyricsLoadCurrent(requestID, trackKey: failedTrack.stableKey) else { return }
+                lyricsResult = finalResult
+                await loadYouTubeIfNeeded(track: failedTrack, result: finalResult)
+                return
+            }
             requestMetadataTranslation(
                 track: failedTrack,
                 base: LyricsResult.empty(error.localizedDescription),
@@ -1691,6 +1708,37 @@ final class AppViewModel: ObservableObject {
             status = .failed(error.localizedDescription)
             appendLog("lyrics pipeline failed: \(error.localizedDescription)")
         }
+    }
+
+    private func applyCachedLyricsPreview(
+        _ preview: LyricsRepository.CachedLyricsPreview,
+        track: TrackSnapshot,
+        requestID: UUID
+    ) {
+        let loaded = preview.loaded
+        let latestSettings = settings.snapshot
+        let latestPolicy = LyricsProviderPolicyEvaluator.evaluate(
+            latestSettings.lyricsProviderSettings,
+            multiProviderAuthorized: latestSettings.lyricsProviderMultiProviderAuthorized
+        )
+        guard loaded.trackKey == track.stableKey,
+              isLyricsLoadCurrent(requestID, trackKey: track.stableKey),
+              LyricsProviderAppContracts.cachePreviewStillAuthorized(
+                requestGeneration: preview.policyGeneration,
+                currentGeneration: latestSettings.lyricsProviderPolicyGeneration,
+                requestEffectiveMode: preview.effectiveMode.rawValue,
+                currentEffectiveMode: latestPolicy.effectiveMode.rawValue,
+                baseProviderIsAllowed: latestPolicy.allows(preview.baseProvider)
+              ) else {
+            return
+        }
+        appendLogs(loaded.logs)
+        let cached = localizedLyricsResult(loaded.result)
+        guard !cached.lines.isEmpty, !cached.karaoke else { return }
+        baseLyricsResult = cached
+        lyricsResult = cached
+        status = .loaded
+        appendLog("lyrics cache ready: lines=\(cached.lines.count); sync-data recheck continues in background")
     }
 
     private func hydrateSpotifyAppRemoteMetadataIfNeeded(_ playback: SpotifyPlaybackSnapshot) {
