@@ -30,9 +30,18 @@ extension Array where Element == String {
 }
 
 enum IvLyricsUtilities {
+    private static let lowercaseHexDigits = Array("0123456789abcdef".utf8)
+
     static func sha256(_ value: String) -> String {
         let digest = SHA256.hash(data: Data(value.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        var encoded = [UInt8](repeating: 0, count: SHA256.Digest.byteCount * 2)
+        var offset = 0
+        for byte in digest {
+            encoded[offset] = lowercaseHexDigits[Int(byte >> 4)]
+            encoded[offset + 1] = lowercaseHexDigits[Int(byte & 0x0f)]
+            offset += 2
+        }
+        return String(decoding: encoded, as: UTF8.self)
     }
 
     static func encodeParams(_ params: [String: String]) -> String {
