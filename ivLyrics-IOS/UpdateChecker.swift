@@ -116,10 +116,14 @@ final class UpdateChecker {
     private func findBestAppAsset(_ assets: [Asset]) -> Asset? {
         let candidates = assets.filter { asset in
             let name = asset.name.lowercased()
-            return (name.hasSuffix(".ipa") || name.hasSuffix(".xcarchive") || name.hasSuffix(".zip"))
-                && !name.contains("unsigned")
+            return name.hasSuffix(".ipa") || name.hasSuffix(".xcarchive") || name.hasSuffix(".zip")
         }
-        return candidates.first { asset in
+        let signedCandidates = candidates.filter { !$0.name.lowercased().contains("unsigned") }
+        return preferredAppAsset(in: signedCandidates) ?? preferredAppAsset(in: candidates)
+    }
+
+    private func preferredAppAsset(in candidates: [Asset]) -> Asset? {
+        candidates.first { asset in
             let name = asset.name.lowercased()
             return name.contains("-release") && name.hasSuffix(".ipa")
         }

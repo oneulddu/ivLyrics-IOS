@@ -5,12 +5,25 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update"
+        required: true
+        default: "v1.0.0"
+      prerelease:
+        description: "Mark release as prerelease"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
-  group: ios-unsigned-${{ github.ref }}
+  group: ios-unsigned-release
   cancel-in-progress: false
 
 jobs:
@@ -21,6 +34,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Select newest Xcode
         shell: bash
@@ -43,54 +58,126 @@ jobs:
           xcodebuild -version
 
       - name: Resolve release metadata
-        id: metadata
+        id: release
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             release_tag="$GITHUB_REF_NAME"
-            version_name="${release_tag#v}"
           else
-            release_tag="manual-${GITHUB_RUN_NUMBER}"
-            version_name="$(xcodebuild -project ivLyrics-IOS.xcodeproj -scheme ivLyrics-IOS -showBuildSettings | awk -F ' = ' '/ MARKETING_VERSION = / { print $2; exit }')"
+            release_tag="${{ inputs.tag }}"
           fi
-          if [[ ! "$version_name" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
-            echo "Tag must contain a numeric Apple version, for example v1.0.0." >&2
+          if [[ ! "$release_tag" =~ ^v[0-9]+([.][0-9]+){0,2}$ ]]; then
+            echo "Release tag must be a numeric Apple version, for example v1.0.0." >&2
             exit 1
           fi
+          version_name="${release_tag#v}"
+          release_target="$(git rev-parse --verify "${release_tag}^{commit}" 2>/dev/null || git rev-parse HEAD)"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_target=$release_target" >> "$GITHUB_OUTPUT"
           echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=ivLyrics-IOS-${release_tag}-unsigned" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=ivLyrics-IOS-${release_tag}-release" >> "$GITHUB_OUTPUT"
 
       - name: Build unsigned IPA
         id: package
         env:
-          VERSION_NAME: ${{ steps.metadata.outputs.version_name }}
+          VERSION_NAME: ${{ steps.release.outputs.version_name }}
           BUILD_NUMBER: ${{ github.run_number }}
-          RELEASE_TAG: ${{ steps.metadata.outputs.release_tag }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: scripts/build-unsigned-ipa.sh "$RUNNER_TEMP/release"
+
+      - name: Generate release notes and AltStore source
+        id: release_metadata
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          IPA_PATH: ${{ steps.package.outputs.ipa_path }}
+          CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+          VERSION_NAME: ${{ steps.package.outputs.version_name }}
+          BUILD_NUMBER: ${{ steps.package.outputs.build_number }}
+          RELEASE_METADATA_DIR: ${{ runner.temp }}/release-metadata
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+        run: python3 .github/scripts/generate_release_metadata.py
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.metadata.outputs.artifact_name }}
+          name: ${{ steps.release.outputs.artifact_name }}
           path: |
             ${{ steps.package.outputs.ipa_path }}
             ${{ steps.package.outputs.checksum_path }}
+            ${{ steps.release_metadata.outputs.notes_path }}
+            ${{ steps.release_metadata.outputs.version_path }}
+            ${{ steps.release_metadata.outputs.altstore_source_path }}
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish GitHub Release assets
-        if: github.ref_type == 'tag'
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          RELEASE_TARGET: ${{ steps.release.outputs.release_target }}
+          PRERELEASE: ${{ inputs.prerelease || false }}
           IPA_PATH: ${{ steps.package.outputs.ipa_path }}
           CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+          NOTES_PATH: ${{ steps.release_metadata.outputs.notes_path }}
+          VERSION_PATH: ${{ steps.release_metadata.outputs.version_path }}
+          ALTSTORE_SOURCE_PATH: ${{ steps.release_metadata.outputs.altstore_source_path }}
         shell: bash
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$IPA_PATH" "$CHECKSUM_PATH" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" "$IPA_PATH" "$CHECKSUM_PATH" \
-              --title "ivLyrics iOS $GITHUB_REF_NAME" \
-              --generate-notes
+          set -euo pipefail
+          assets=(
+            "$IPA_PATH"
+            "$CHECKSUM_PATH"
+            "$NOTES_PATH"
+            "$VERSION_PATH"
+            "$ALTSTORE_SOURCE_PATH"
+          )
+          args=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
           fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --target "$RELEASE_TARGET" \
+              --title "ivLyrics iOS $RELEASE_TAG" \
+              --notes-file "$NOTES_PATH" \
+              "${args[@]}"
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --target "$RELEASE_TARGET" \
+              --title "ivLyrics iOS $RELEASE_TAG" \
+              --notes-file "$NOTES_PATH" \
+              "${args[@]}"
+          fi
+
+      - name: Update AltStore source on main
+        env:
+          ALTSTORE_SOURCE_PATH: ${{ steps.release_metadata.outputs.altstore_source_path }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          worktree="$RUNNER_TEMP/altstore-main"
+          cleanup() {
+            git worktree remove --force "$worktree" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          git fetch origin main
+          git worktree add --detach "$worktree" origin/main
+          cp "$ALTSTORE_SOURCE_PATH" "$worktree/altstore-source.json"
+          cd "$worktree"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add altstore-source.json
+          if git diff --cached --quiet; then
+            echo "AltStore source is already current."
+            exit 0
+          fi
+          git commit \
+            -m "Update AltStore source for $RELEASE_TAG" \
+            -m "$RELEASE_TAG IPA의 실제 버전, 빌드, 크기와 SHA-256 정보를 반영했습니다."
+          git push origin HEAD:main

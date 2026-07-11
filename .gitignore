@@ -20,3 +20,7 @@ build/
 
 # Swift Package Manager
 .build/
+
+# Python release tooling
+__pycache__/
+*.pyc
