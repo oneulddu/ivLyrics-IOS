@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.3",
+          "buildVersion": "8",
+          "date": "2026-07-11",
+          "localizedDescription": "v1.0.3은 가사 탐색 대체 경로, 체코어 지원, 시스템 PiP 및 성능 개선을 제공합니다.\n\nv1.0.3 delivers a lyrics lookup fallback, Czech support, and system PiP and performance improvements.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.3/ivLyrics-IOS-v1.0.3-unsigned.ipa",
+          "size": 6257920,
+          "sha256": "4caf7b1b9cfa145298ca17ebecd119012761de49266d9b57b72c5537b1014bc6",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.2",
           "buildVersion": "7",
           "date": "2026-07-11",
