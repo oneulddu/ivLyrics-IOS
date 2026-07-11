@@ -49,6 +49,51 @@ final class UnisonTests: XCTestCase {
         XCTAssertEqual(calls.values.count, 3) // album+duration, duration, exact metadata fallback
     }
 
+    func testUnsuccessfulAndEmptyLyricsEnvelopesAreMisses() async {
+        let payloads = [
+            #"{"success":false}"#,
+            Self.envelope(format: "plain", lyrics: "   ")
+        ]
+        for payload in payloads {
+            UnisonURLProtocolStub.handler = { request in Self.json(request, payload) }
+            do {
+                _ = try await UnisonProvider(client: UnisonClient(httpClient: stubClient()))
+                    .fetch(makeRequest(durationMs: nil))
+                XCTFail("expected miss")
+            } catch {
+                XCTAssertEqual(error as? LyricsProviderError, .miss)
+            }
+        }
+    }
+
+    func testAttemptsContinueAfterMalformedAndKeepFormatClassification() async throws {
+        let successfulCalls = LockedUnisonValues<URL>()
+        let malformed = Self.envelope(format: "", lyrics: "Synthetic line")
+        let valid = Self.envelope(format: "plain", lyrics: "Synthetic line")
+        UnisonURLProtocolStub.handler = { request in
+            let index = successfulCalls.appendAndReturnIndex(request.url!)
+            return Self.json(request, index == 0 ? malformed : valid)
+        }
+        let result = try await UnisonProvider(client: UnisonClient(httpClient: stubClient()))
+            .fetch(makeRequest(durationMs: nil))
+        XCTAssertEqual(result.provider, .unison)
+        XCTAssertEqual(successfulCalls.values.count, 2)
+
+        let failedCalls = LockedUnisonValues<URL>()
+        UnisonURLProtocolStub.handler = { request in
+            let index = failedCalls.appendAndReturnIndex(request.url!)
+            return Self.json(request, index == 0 ? malformed : #"{"success":false}"#)
+        }
+        do {
+            _ = try await UnisonProvider(client: UnisonClient(httpClient: stubClient()))
+                .fetch(makeRequest(durationMs: nil))
+            XCTFail("expected providerFormat")
+        } catch {
+            XCTAssertEqual(error as? LyricsProviderError, .providerFormat)
+        }
+        XCTAssertEqual(failedCalls.values.count, 2)
+    }
+
     func testTTMLSyllablesSpeakersAndBackgroundVocals() throws {
         let ttml = #"""
         <tt xmlns:ttm="urn:ttm"><head><metadata><ttm:agent xml:id="v1"/><ttm:agent xml:id="v2"/></metadata></head>
@@ -76,6 +121,18 @@ final class UnisonTests: XCTestCase {
         XCTAssertEqual(parsed.lines[0].syllables.map(\.text), ["One", "Two"])
         XCTAssertTrue(parsed.lines[0].vocalParts.isEmpty)
         XCTAssertNotNil(parsed.lines[0].speaker)
+    }
+
+    func testTTMLPreservesDocumentOrderWhenStartTimesMatch() throws {
+        let ttml = #"""
+        <tt><body>
+          <p begin="2s" end="3s"><span begin="2s" end="3s">Later</span></p>
+          <p begin="1s" end="2s"><span begin="1s" end="2s">Zulu first</span></p>
+          <p begin="1s" end="2s"><span begin="1s" end="2s">Alpha second</span></p>
+        </body></tt>
+        """#
+        let parsed = try UnisonParser.parse(try data(format: "ttml", lyrics: ttml), durationMs: nil)
+        XCTAssertEqual(parsed.lines.map(\.text), ["Zulu first", "Alpha second", "Later"])
     }
 
     func testTTMLRecursivelyCollectsBackgroundsWithoutDuplicates() throws {
@@ -325,4 +382,10 @@ private final class LockedUnisonValues<Value>: @unchecked Sendable {
     private var storage: [Value] = []
     var values: [Value] { lock.lock(); defer { lock.unlock() }; return storage }
     func append(_ value: Value) { lock.lock(); defer { lock.unlock() }; storage.append(value) }
+    func appendAndReturnIndex(_ value: Value) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let index = storage.count
+        storage.append(value)
+        return index
+    }
 }
