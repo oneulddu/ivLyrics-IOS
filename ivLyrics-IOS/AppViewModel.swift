@@ -14,8 +14,8 @@ final class AppViewModel: ObservableObject {
         420_000_000,
         1_100_000_000
     ]
-    private static let playbackClockInterval: TimeInterval = 1.0 / 60.0
-    private static let playbackClockTolerance: TimeInterval = 0.003
+    private static let playbackClockInterval: TimeInterval = 1.0 / 30.0
+    private static let playbackClockTolerance: TimeInterval = 0.005
 
     @Published var inputTitle: String
     @Published var inputArtist: String
@@ -2205,7 +2205,11 @@ final class AppViewModel: ObservableObject {
         let playbackTimer = Timer(timeInterval: Self.playbackClockInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.nowPositionMs = self.currentTrack?.positionNow() ?? 0
+                let position = self.currentTrack?.positionNow() ?? 0
+                let positionChanged = position != self.nowPositionMs
+                if positionChanged {
+                    self.nowPositionMs = position
+                }
                 self.updatePictureInPictureState()
             }
         }

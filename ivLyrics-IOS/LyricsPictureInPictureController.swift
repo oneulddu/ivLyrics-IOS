@@ -6,6 +6,25 @@ import CoreVideo
 import SwiftUI
 import UIKit
 
+private final class PictureInPicturePlaybackInfo: @unchecked Sendable {
+    private let lock = NSLock()
+    private var durationMs: Int64 = 1
+    private var isPaused = true
+
+    func update(durationMs: Int64, isPaused: Bool) {
+        lock.lock()
+        self.durationMs = durationMs
+        self.isPaused = isPaused
+        lock.unlock()
+    }
+
+    func read() -> (durationMs: Int64, isPaused: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (durationMs, isPaused)
+    }
+}
+
 @MainActor
 final class LyricsPictureInPictureController: NSObject, ObservableObject {
     @Published private(set) var active = false
@@ -29,6 +48,10 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private var startRequested = false
     private var lastRenderUptime: TimeInterval = 0
     private var audioSessionActive = false
+    private nonisolated let playbackInfo = PictureInPicturePlaybackInfo()
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var pixelBufferPoolSize = CGSize.zero
+    private var videoFormatDescription: CMVideoFormatDescription?
 
     override init() {
         super.init()
@@ -100,10 +123,14 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         )
         let forceRender = nextState.renderIdentity != state.renderIdentity
         state = nextState
+        playbackInfo.update(
+            durationMs: max(1, track?.durationMs ?? 0),
+            isPaused: !(track?.playing ?? false)
+        )
         loadArtworkIfNeeded(track?.artworkURL)
         guard active || startRequested else { return }
         let uptime = ProcessInfo.processInfo.systemUptime
-        if forceRender || uptime - lastRenderUptime >= (1.0 / 30.0) {
+        if forceRender || uptime - lastRenderUptime >= (1.0 / 15.0) {
             renderFrame()
         }
     }
@@ -121,7 +148,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         guard !active else { return true }
         startRetryTask?.cancel()
         startRetryTask = Task { @MainActor [weak self] in
-            for delay in [100_000_000, 300_000_000, 700_000_000] as [UInt64] {
+            for delay in [100_000_000, 300_000_000, 700_000_000, 1_500_000_000, 2_500_000_000] as [UInt64] {
                 try? await Task.sleep(nanoseconds: delay)
                 guard let self, !Task.isCancelled, self.startRequested, !self.active else { return }
                 self.renderFrame()
@@ -580,21 +607,49 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
     private func makePixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
-        let attributes: [CFString: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-            kCVPixelBufferIOSurfacePropertiesKey: [:]
-        ]
+        let size = CGSize(width: CGFloat(width), height: CGFloat(height))
+        if pixelBufferPool == nil || pixelBufferPoolSize != size {
+            let poolAttributes: [CFString: Any] = [
+                kCVPixelBufferPoolMinimumBufferCountKey: 3
+            ]
+            let pixelBufferAttributes: [CFString: Any] = [
+                kCVPixelBufferWidthKey: width,
+                kCVPixelBufferHeightKey: height,
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferCGImageCompatibilityKey: true,
+                kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: [:]
+            ]
+            var pool: CVPixelBufferPool?
+            guard CVPixelBufferPoolCreate(
+                kCFAllocatorDefault,
+                poolAttributes as CFDictionary,
+                pixelBufferAttributes as CFDictionary,
+                &pool
+            ) == kCVReturnSuccess, let pool else { return nil }
+            pixelBufferPool = pool
+            pixelBufferPoolSize = size
+            videoFormatDescription = nil
+        }
+
+        guard let pixelBufferPool else { return nil }
         var pixelBuffer: CVPixelBuffer?
-        let status = CVPixelBufferCreate(
+        guard CVPixelBufferPoolCreatePixelBuffer(
             kCFAllocatorDefault,
-            width,
-            height,
-            kCVPixelFormatType_32BGRA,
-            attributes as CFDictionary,
+            pixelBufferPool,
             &pixelBuffer
-        )
-        return status == kCVReturnSuccess ? pixelBuffer : nil
+        ) == kCVReturnSuccess, let pixelBuffer else { return nil }
+
+        if videoFormatDescription == nil {
+            var formatDescription: CMVideoFormatDescription?
+            guard CMVideoFormatDescriptionCreateForImageBuffer(
+                allocator: kCFAllocatorDefault,
+                imageBuffer: pixelBuffer,
+                formatDescriptionOut: &formatDescription
+            ) == noErr, let formatDescription else { return nil }
+            videoFormatDescription = formatDescription
+        }
+        return pixelBuffer
     }
 
     private func draw(_ image: CGImage, into pixelBuffer: CVPixelBuffer) {
@@ -616,14 +671,9 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
     private func makeSampleBuffer(pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
-        var formatDescription: CMVideoFormatDescription?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(
-            allocator: kCFAllocatorDefault,
-            imageBuffer: pixelBuffer,
-            formatDescriptionOut: &formatDescription
-        ) == noErr, let formatDescription else { return nil }
+        guard let videoFormatDescription else { return nil }
         var timing = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: 30),
+            duration: CMTime(value: 1, timescale: 15),
             presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
             decodeTimeStamp: .invalid
         )
@@ -631,7 +681,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         guard CMSampleBufferCreateReadyWithImageBuffer(
             allocator: kCFAllocatorDefault,
             imageBuffer: pixelBuffer,
-            formatDescription: formatDescription,
+            formatDescription: videoFormatDescription,
             sampleTiming: &timing,
             sampleBufferOut: &sampleBuffer
         ) == noErr, let sampleBuffer else { return nil }
@@ -924,14 +974,12 @@ extension LyricsPictureInPictureController: AVPictureInPictureSampleBufferPlayba
     }
 
     nonisolated func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
-        MainActor.assumeIsolated {
-            let durationMs = max(1, state.track?.durationMs ?? 0)
-            return CMTimeRange(start: .zero, duration: CMTime(value: durationMs, timescale: 1000))
-        }
+        let info = playbackInfo.read()
+        return CMTimeRange(start: .zero, duration: CMTime(value: info.durationMs, timescale: 1000))
     }
 
     nonisolated func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
-        MainActor.assumeIsolated { !(state.track?.playing ?? false) }
+        playbackInfo.read().isPaused
     }
 
     nonisolated func pictureInPictureController(
@@ -999,19 +1047,24 @@ struct LyricsPictureInPictureHostView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
+        view.onLayout = { controller.layoutHost() }
         controller.attach(to: view)
         return view
     }
 
     func updateUIView(_ uiView: HostView, context: Context) {
+        uiView.onLayout = { controller.layoutHost() }
         controller.attach(to: uiView)
         controller.layoutHost()
     }
 
     final class HostView: UIView {
+        var onLayout: (@MainActor () -> Void)?
+
         override func layoutSubviews() {
             super.layoutSubviews()
             backgroundColor = .black
+            onLayout?()
         }
     }
 }
