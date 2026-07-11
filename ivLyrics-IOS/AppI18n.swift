@@ -26,6 +26,13 @@ enum AppI18n {
         Language(code: "tr", name: "Turkish", nativeName: "Türkçe")
     ]
 
+    private static let languageCodeByLowercase = uiLanguages.reduce(into: [String: String]()) { result, language in
+        let key = language.code.lowercased()
+        if result[key] == nil {
+            result[key] = language.code
+        }
+    }
+
     private static let androidStrings: [String: [String: String]] = loadBundledStrings()
 
     private static let iosOverrideKeys: Set<String> = [
@@ -504,11 +511,11 @@ enum AppI18n {
         case "zh-tw", "zh-hant":
             return "zh-TW"
         default:
-            if let language = uiLanguages.first(where: { $0.code.lowercased() == lower }) {
-                return language.code
+            if let code = languageCodeByLowercase[lower] {
+                return code
             }
             let base = lower.split(separator: "-").first.map(String.init) ?? lower
-            return uiLanguages.first(where: { $0.code.lowercased() == base })?.code ?? "en"
+            return languageCodeByLowercase[base] ?? "en"
         }
     }
 
