@@ -27,9 +27,20 @@ private final class PictureInPicturePlaybackInfo: @unchecked Sendable {
 
 @MainActor
 final class LyricsPictureInPictureController: NSObject, ObservableObject {
+    private struct PlaybackState: Equatable {
+        let durationMs: Int64
+        let isPaused: Bool
+    }
+
+    private enum StartReason: Equatable {
+        case explicit
+        case automaticTransition
+    }
+
     @Published private(set) var active = false
 
-    var needsStateUpdates: Bool { active || startRequested }
+    var isEngaged: Bool { active || startReason != nil }
+    var needsStateUpdates: Bool { active || startReason != nil || automaticPreparationEnabled }
 
     var onSetPlaying: ((Bool) -> Void)?
     var onSkip: ((Int64) -> Void)?
@@ -45,11 +56,16 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private var artworkURL: URL?
     private var artworkTask: Task<Void, Never>?
     private var startRetryTask: Task<Void, Never>?
-    private var startRequested = false
+    private var startReason: StartReason?
+    private var hasPreparedTrack = false
+    private var automaticPreparationEnabled = false
     private var hasPrimedFrame = false
     private var lastRenderUptime: TimeInterval = 0
+    private var lastRenderedPositionMs: Int64?
+    private var lastRenderIdentityValue: String?
     private var audioSessionActive = false
     private nonisolated let playbackInfo = PictureInPicturePlaybackInfo()
+    private var lastPublishedPlaybackState: PlaybackState?
     private var pixelBufferPool: CVPixelBufferPool?
     private var pixelBufferPoolSize = CGSize.zero
     private var videoFormatDescription: CMVideoFormatDescription?
@@ -74,11 +90,11 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         )
         let controller = AVPictureInPictureController(contentSource: source)
         controller.delegate = self
-        controller.canStartPictureInPictureAutomaticallyFromInline = false
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
         controller.requiresLinearPlayback = false
         possibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] controller, _ in
             Task { @MainActor [weak self] in
-                guard let self, self.startRequested, controller.isPictureInPicturePossible else { return }
+                guard let self, self.startReason != nil, controller.isPictureInPicturePossible else { return }
                 self.startIfPossible()
             }
         }
@@ -131,14 +147,24 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             typography: settings.typography,
             speakerColors: settings.speakerColors
         )
-        let forceRender = nextState.renderIdentity != state.renderIdentity
+        let nextRenderIdentity = nextState.renderIdentity
+        let forceRender = nextRenderIdentity != lastRenderIdentityValue
         state = nextState
-        playbackInfo.update(
+        lastRenderIdentityValue = nextRenderIdentity
+        publishPlaybackState(
             durationMs: max(1, track?.durationMs ?? 0),
             isPaused: !(track?.playing ?? false)
         )
         loadArtworkIfNeeded(track?.artworkURL)
-        guard active || startRequested else {
+        hasPreparedTrack = track != nil
+        let shouldPrepareAutomatically = hasPreparedTrack && pictureInPictureController != nil
+        automaticPreparationEnabled = shouldPrepareAutomatically
+        if shouldPrepareAutomatically {
+            _ = activateAudioSession()
+        } else if !active && startReason == nil {
+            deactivateAudioSession()
+        }
+        guard active || startReason != nil || automaticPreparationEnabled else {
             if !hasPrimedFrame {
                 renderFrame()
                 hasPrimedFrame = lastRenderUptime > 0
@@ -146,41 +172,146 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             return
         }
         let uptime = ProcessInfo.processInfo.systemUptime
-        if forceRender || uptime - lastRenderUptime >= (1.0 / 15.0) {
+        if active || startReason != nil {
+            if forceRender || state.positionMs != lastRenderedPositionMs || uptime - lastRenderUptime >= 1.0 {
+                renderFrame()
+            }
+        } else if forceRender || !hasPrimedFrame || uptime - lastRenderUptime >= 1.0 {
             renderFrame()
+            hasPrimedFrame = lastRenderUptime > 0
+        }
+    }
+
+    func prepareForAutomaticTransition() {
+        guard hasPreparedTrack else {
+            onLog?("lyrics pip: automatic transition skipped (no prepared track)")
+            return
+        }
+        guard let controller = pictureInPictureController else {
+            onLog?("lyrics pip: automatic transition skipped (controller unavailable)")
+            return
+        }
+        guard !active, !controller.isPictureInPictureActive else {
+            onLog?("lyrics pip: automatic transition skipped (already active)")
+            return
+        }
+        guard startReason == nil else {
+            onLog?("lyrics pip: automatic transition skipped (start in flight)")
+            return
+        }
+        _ = activateAudioSession()
+        renderFrame()
+        publishPlaybackState(
+            durationMs: max(1, state.track?.durationMs ?? 0),
+            isPaused: !(state.track?.playing ?? false),
+            force: true
+        )
+        let playbackState = playbackInfo.read()
+        onLog?(
+            "lyrics pip: lifecycle transition possible=\(controller.isPictureInPicturePossible) " +
+            "paused=\(playbackState.isPaused) durationMs=\(playbackState.durationMs)"
+        )
+
+        // Give AVKit's automatic inline-to-PiP transition the first opportunity.
+        // A single short fallback preserves the previous lifecycle request without
+        // depending on retries after the process has already been suspended.
+        startRetryTask?.cancel()
+        startRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard let self,
+                  !Task.isCancelled,
+                  !self.active,
+                  controller.isPictureInPictureActive == false,
+                  UIApplication.shared.applicationState != .active else { return }
+            _ = self.requestStart(reason: .automaticTransition, schedulesRetries: false)
         }
     }
 
     @discardableResult
     func start() -> Bool {
+        requestStart(reason: .explicit)
+    }
+
+    @discardableResult
+    private func requestStart(reason: StartReason, schedulesRetries: Bool = true) -> Bool {
         guard AVPictureInPictureController.isPictureInPictureSupported(), pictureInPictureController != nil else {
             onLog?("lyrics pip: system Picture in Picture is not supported")
             return false
         }
-        guard activateAudioSession() else { return false }
-        startRequested = true
+        guard !active, pictureInPictureController?.isPictureInPictureActive != true else { return true }
+        if startReason != nil {
+            // A foreground button press upgrades an in-flight lifecycle request so
+            // its eventual failure keeps the existing user-facing error behavior.
+            if reason == .explicit {
+                startReason = .explicit
+            }
+            return true
+        }
+        guard activateAudioSession() else {
+            if reason == .automaticTransition {
+                onLog?("lyrics pip: automatic transition failed (audio session unavailable)")
+            }
+            return false
+        }
+        startReason = reason
         renderFrame()
+        publishPlaybackState(
+            durationMs: max(1, state.track?.durationMs ?? 0),
+            isPaused: !(state.track?.playing ?? false),
+            force: true
+        )
+        if reason == .automaticTransition {
+            let playbackState = playbackInfo.read()
+            onLog?(
+                "lyrics pip: automatic fallback requested possible=\(pictureInPictureController?.isPictureInPicturePossible == true) " +
+                "paused=\(playbackState.isPaused) durationMs=\(playbackState.durationMs)"
+            )
+        }
         startIfPossible()
         guard !active else { return true }
-        startRetryTask?.cancel()
-        startRetryTask = Task { @MainActor [weak self] in
-            for delay in [100_000_000, 300_000_000, 700_000_000, 1_500_000_000, 2_500_000_000] as [UInt64] {
-                try? await Task.sleep(nanoseconds: delay)
-                guard let self, !Task.isCancelled, self.startRequested, !self.active else { return }
-                self.renderFrame()
-                self.startIfPossible()
-            }
-            guard let self, self.startRequested, !self.active else { return }
-            self.startRequested = false
-            self.deactivateAudioSession()
-            self.onLog?("lyrics pip: Picture in Picture is not currently available")
-            self.onStartFailure?()
+        if schedulesRetries {
+            scheduleStartRetries()
+        } else if pictureInPictureController?.isPictureInPicturePossible != true {
+            startReason = nil
+            onLog?("lyrics pip: automatic fallback unavailable")
         }
         return true
     }
 
+    private func publishPlaybackState(durationMs: Int64, isPaused: Bool, force: Bool = false) {
+        let playbackState = PlaybackState(durationMs: max(1, durationMs), isPaused: isPaused)
+        playbackInfo.update(durationMs: playbackState.durationMs, isPaused: playbackState.isPaused)
+        guard force || playbackState != lastPublishedPlaybackState else { return }
+        lastPublishedPlaybackState = playbackState
+        pictureInPictureController?.invalidatePlaybackState()
+    }
+
+    private func scheduleStartRetries() {
+        startRetryTask?.cancel()
+        startRetryTask = Task { @MainActor [weak self] in
+            for delay in [100_000_000, 300_000_000, 700_000_000, 1_500_000_000, 2_500_000_000] as [UInt64] {
+                try? await Task.sleep(nanoseconds: delay)
+                guard let self, !Task.isCancelled, self.startReason != nil, !self.active else { return }
+                self.renderFrame()
+                self.startIfPossible()
+            }
+            guard let self, let reason = self.startReason, !self.active else { return }
+            self.startReason = nil
+            if !self.automaticPreparationEnabled {
+                self.deactivateAudioSession()
+            }
+            switch reason {
+            case .automaticTransition:
+                self.onLog?("lyrics pip: automatic transition failed because Picture in Picture is not currently available")
+            case .explicit:
+                self.onLog?("lyrics pip: Picture in Picture is not currently available")
+                self.onStartFailure?()
+            }
+        }
+    }
+
     func stop() {
-        startRequested = false
+        startReason = nil
         startRetryTask?.cancel()
         if pictureInPictureController?.isPictureInPictureActive == true {
             pictureInPictureController?.stopPictureInPicture()
@@ -190,7 +321,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
     private func startIfPossible() {
-        guard startRequested,
+        guard startReason != nil,
               let controller = pictureInPictureController,
               controller.isPictureInPicturePossible,
               !controller.isPictureInPictureActive else { return }
@@ -235,7 +366,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                       (200..<300).contains(http.statusCode),
                       let image = UIImage(data: data) else { return }
                 self?.artwork = image
-                if self?.active == true || self?.startRequested == true {
+                if self?.active == true || self?.startReason != nil {
                     self?.renderFrame()
                 }
             } catch {
@@ -261,15 +392,20 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         }
         displayLayer.enqueue(sampleBuffer)
         lastRenderUptime = ProcessInfo.processInfo.systemUptime
+        lastRenderedPositionMs = state.positionMs
     }
 
 #if DEBUG
     func debugFrameImage(orientation: String, showArtwork: Bool) -> UIImage {
         let previousState = state
         let previousArtwork = artwork
+        let previousRenderedPositionMs = lastRenderedPositionMs
+        let previousRenderIdentityValue = lastRenderIdentityValue
         defer {
             state = previousState
             artwork = previousArtwork
+            lastRenderedPositionMs = previousRenderedPositionMs
+            lastRenderIdentityValue = previousRenderIdentityValue
         }
 
         let firstPart = LyricsLine.VocalPart(
@@ -310,6 +446,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         state.orientation = orientation
         state.alignment = "center"
         state.lyricsSizePercent = 150
+        lastRenderedPositionMs = nil
+        lastRenderIdentityValue = nil
         artwork = nil
 
         let size = state.renderSize
@@ -681,8 +819,10 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
               ) else { return }
-        context.translateBy(x: 0, y: CGFloat(CVPixelBufferGetHeight(pixelBuffer)))
-        context.scaleBy(x: 1, y: -1)
+        // `image` is already a rasterized CGImage. Drawing it into the BGRA bitmap
+        // context writes its rows in the order consumed by CVPixelBuffer. Applying
+        // UIKit's flipped drawing transform here reverses those rows a second time
+        // and makes the sample-buffer video appear upside-down on device.
         context.draw(image, in: CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer)))
     }
 
@@ -1021,18 +1161,26 @@ extension LyricsPictureInPictureController: AVPictureInPictureSampleBufferPlayba
 extension LyricsPictureInPictureController: AVPictureInPictureControllerDelegate {
     nonisolated func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Task { @MainActor [weak self] in
-            self?.active = true
-            self?.startRequested = false
-            self?.startRetryTask?.cancel()
-            self?.onLog?("lyrics pip: started")
+            guard let self else { return }
+            let reason = self.startReason
+            self.active = true
+            self.startReason = nil
+            self.startRetryTask?.cancel()
+            if reason == .automaticTransition {
+                self.onLog?("lyrics pip: automatic transition started")
+            } else {
+                self.onLog?("lyrics pip: started")
+            }
         }
     }
 
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Task { @MainActor [weak self] in
             self?.active = false
-            self?.startRequested = false
-            self?.deactivateAudioSession()
+            self?.startReason = nil
+            if self?.automaticPreparationEnabled != true {
+                self?.deactivateAudioSession()
+            }
             self?.onLog?("lyrics pip: stopped")
         }
     }
@@ -1042,11 +1190,22 @@ extension LyricsPictureInPictureController: AVPictureInPictureControllerDelegate
         failedToStartPictureInPictureWithError error: Error
     ) {
         Task { @MainActor [weak self] in
-            self?.active = false
-            self?.startRequested = false
-            self?.deactivateAudioSession()
-            self?.onLog?("lyrics pip failed: \(error.localizedDescription)")
-            self?.onStartFailure?()
+            guard let self else { return }
+            let reason = self.startReason
+            self.active = false
+            self.startReason = nil
+            self.startRetryTask?.cancel()
+            if !self.automaticPreparationEnabled {
+                self.deactivateAudioSession()
+            }
+            if reason == .automaticTransition {
+                self.onLog?("lyrics pip: automatic transition failed: \(error.localizedDescription)")
+            } else {
+                self.onLog?("lyrics pip failed: \(error.localizedDescription)")
+            }
+            if reason == .explicit {
+                self.onStartFailure?()
+            }
         }
     }
 
