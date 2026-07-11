@@ -52,6 +52,7 @@ final class UnisonTests: XCTestCase {
     func testUnsuccessfulAndEmptyLyricsEnvelopesAreMisses() async {
         let payloads = [
             #"{"success":false}"#,
+            #"{"success":false,"data":{"message":"not found"}}"#,
             Self.envelope(format: "plain", lyrics: "   ")
         ]
         for payload in payloads {
