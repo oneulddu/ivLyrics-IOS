@@ -101,6 +101,7 @@ actor LyricsRepository {
     func loadLyrics(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
+        onCachedLyricsLoaded: ((LoadedLyrics) async -> Void)? = nil,
         onSpotifyMetadataResolved: ((ResolvedSpotifyMetadata) async -> Void)? = nil
     ) async throws -> LoadedLyrics {
         guard track.hasUsableMetadata else {
@@ -139,22 +140,63 @@ actor LyricsRepository {
                 return LoadedLyrics(trackKey: key, result: cached, artworkURL: nil, logs: logs, resolvedIsrc: cached.isrc, resolvedSpotifyTrackId: cached.spotifyTrackId)
             }
             cachedBase = cached
-            log("cache hit: base lyrics, rechecking OpenDB sync-data")
+            log("cache hit: base lyrics served immediately; rechecking OpenDB sync-data in background")
+            if let onCachedLyricsLoaded {
+                await onCachedLyricsLoaded(
+                    LoadedLyrics(
+                        trackKey: key,
+                        result: cached,
+                        artworkURL: nil,
+                        logs: logs,
+                        resolvedIsrc: cached.isrc,
+                        resolvedSpotifyTrackId: cached.spotifyTrackId
+                    )
+                )
+                logs.removeAll(keepingCapacity: true)
+            }
         }
         if cachedBase == nil, let diskCached = diskCache.get(key) {
+            putMemoryCachedLyrics(key, result: diskCached)
             if diskCached.karaoke {
                 log("disk cache hit: sync-data/LRCLIB lyrics / contributors=\(diskCached.contributors.count)")
                 return LoadedLyrics(trackKey: key, result: diskCached, artworkURL: nil, logs: logs, resolvedIsrc: diskCached.isrc, resolvedSpotifyTrackId: diskCached.spotifyTrackId)
             }
             cachedBase = diskCached
-            log("base lyrics disk cache hit: rechecking OpenDB sync-data before reuse")
+            log("base lyrics disk cache hit: served immediately; rechecking OpenDB sync-data in background")
+            if let onCachedLyricsLoaded {
+                await onCachedLyricsLoaded(
+                    LoadedLyrics(
+                        trackKey: key,
+                        result: diskCached,
+                        artworkURL: nil,
+                        logs: logs,
+                        resolvedIsrc: diskCached.isrc,
+                        resolvedSpotifyTrackId: diskCached.spotifyTrackId
+                    )
+                )
+                logs.removeAll(keepingCapacity: true)
+            }
         }
 
         log("track: \"\(track.title)\" / \"\(track.artist)\"" + (track.album.isEmpty ? "" : " / album=\"\(track.album)\"") + " / duration=\(track.durationMs)ms" + (track.isrc.isEmpty ? "" : " / player ISRC=\(track.isrc)"))
-        log("flow: Spotify Web API search -> sync-data -> LRCLIB source/search")
+        let hasCachedIsrc = cachedBase?.isrc.isEmpty == false
+        log(hasCachedIsrc
+            ? "flow: cached ISRC -> sync-data recheck -> cached LRCLIB lyrics"
+            : "flow: Spotify Web API search -> sync-data -> LRCLIB source/search")
 
-        let spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
-            await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
+        let spotifyMatch: SpotifyTrackMatch?
+        if let cachedBase, hasCachedIsrc {
+            log("spotify lookup skipped: cached ISRC=\(cachedBase.isrc)" + (cachedBase.spotifyTrackId.isEmpty ? "" : " / trackId=\(cachedBase.spotifyTrackId)"))
+            await publishResolvedMetadata(
+                isrc: cachedBase.isrc,
+                spotifyTrackId: cachedBase.spotifyTrackId,
+                artworkURL: nil
+            )
+            spotifyMatch = nil
+        } else {
+            spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
+                await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
+            }
         }
         let isrc = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.isrc, track.isrc, cachedBase?.isrc)
         let spotifyTrackId = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.spotifyId, track.trackId, cachedBase?.spotifyTrackId)
