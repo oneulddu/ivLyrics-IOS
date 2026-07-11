@@ -1,6 +1,7 @@
 import AVFoundation
 import AVKit
 import Combine
+import CoreImage
 import CoreMedia
 import CoreVideo
 import SwiftUI
@@ -46,6 +47,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     var onSkip: ((Int64) -> Void)?
     var onLog: ((String) -> Void)?
     var onStartFailure: (() -> Void)?
+    var onEngagementEnded: (() -> Void)?
 
     private let displayLayer = AVSampleBufferDisplayLayer()
     private var pictureInPictureController: AVPictureInPictureController?
@@ -53,8 +55,10 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private weak var hostView: UIView?
     private var state = RenderState.empty
     private var artwork: UIImage?
+    private var blurredArtwork: UIImage?
     private var artworkURL: URL?
     private var artworkTask: Task<Void, Never>?
+    private var blurredArtworkTask: Task<Void, Never>?
     private var startRetryTask: Task<Void, Never>?
     private var startReason: StartReason?
     private var hasPreparedTrack = false
@@ -103,6 +107,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
 
     deinit {
         artworkTask?.cancel()
+        blurredArtworkTask?.cancel()
         startRetryTask?.cancel()
         possibleObservation?.invalidate()
     }
@@ -127,6 +132,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         positionMs: Int64,
         title: String,
         artist: String,
+        statusText: String,
         settings: AppSettings.Snapshot
     ) {
         let nextState = RenderState(
@@ -135,10 +141,13 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             positionMs: positionMs,
             title: title,
             artist: artist,
+            statusText: statusText,
             showArtwork: settings.pipShowArtwork,
             orientation: settings.pipOrientation,
+            backgroundMode: settings.pipBackgroundMode,
             alignment: settings.pipLyricsTextAlignment,
             lyricsSizePercent: settings.pipLyricsSizePercent,
+            translationSizePercent: settings.pipTranslationSizePercent,
             solidColor: settings.backgroundSolidColor,
             syncedLyricsKaraokeAnimationEnabled: settings.syncedLyricsKaraokeAnimationEnabled,
             karaokeBounceEffectEnabled: settings.karaokeBounceEffectEnabled,
@@ -156,6 +165,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             isPaused: !(track?.playing ?? false)
         )
         loadArtworkIfNeeded(track?.artworkURL)
+        updateBlurredArtworkIfNeeded()
         hasPreparedTrack = track != nil
         let shouldPrepareAutomatically = hasPreparedTrack && pictureInPictureController != nil
         automaticPreparationEnabled = shouldPrepareAutomatically
@@ -273,6 +283,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             scheduleStartRetries()
         } else if pictureInPictureController?.isPictureInPicturePossible != true {
             startReason = nil
+            onEngagementEnded?()
             onLog?("lyrics pip: automatic fallback unavailable")
         }
         return true
@@ -297,6 +308,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             }
             guard let self, let reason = self.startReason, !self.active else { return }
             self.startReason = nil
+            self.onEngagementEnded?()
             if !self.automaticPreparationEnabled {
                 self.deactivateAudioSession()
             }
@@ -356,7 +368,10 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         guard artworkURL != url else { return }
         artworkURL = url
         artwork = nil
+        blurredArtwork = nil
         artworkTask?.cancel()
+        blurredArtworkTask?.cancel()
+        blurredArtworkTask = nil
         guard let url else { return }
         artworkTask = Task { @MainActor [weak self] in
             do {
@@ -365,15 +380,59 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                       let http = response as? HTTPURLResponse,
                       (200..<300).contains(http.statusCode),
                       let image = UIImage(data: data) else { return }
-                self?.artwork = image
-                if self?.active == true || self?.startReason != nil {
-                    self?.renderFrame()
+                guard let self, self.artworkURL == url else { return }
+                self.artwork = image
+                self.updateBlurredArtworkIfNeeded()
+                if self.active || self.startReason != nil {
+                    self.renderFrame()
                 }
             } catch {
                 guard !Task.isCancelled else { return }
                 self?.onLog?("lyrics pip artwork failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func updateBlurredArtworkIfNeeded() {
+        guard AppSettings.normalizePipBackgroundMode(state.backgroundMode) == AppSettings.pipBackgroundBlur else {
+            blurredArtworkTask?.cancel()
+            blurredArtworkTask = nil
+            return
+        }
+        guard blurredArtwork == nil,
+              blurredArtworkTask == nil,
+              let artwork,
+              let artworkURL else { return }
+        blurredArtworkTask = Task { @MainActor [weak self] in
+            let blurred = await Task.detached(priority: .utility) {
+                Self.makeBlurredArtwork(from: artwork)
+            }.value
+            guard !Task.isCancelled,
+                  let self,
+                  self.artworkURL == artworkURL,
+                  AppSettings.normalizePipBackgroundMode(self.state.backgroundMode) == AppSettings.pipBackgroundBlur else { return }
+            self.blurredArtworkTask = nil
+            self.blurredArtwork = blurred
+            if self.active || self.startReason != nil {
+                self.renderFrame()
+            }
+        }
+    }
+
+    nonisolated private static func makeBlurredArtwork(from artwork: UIImage) -> UIImage? {
+        guard var input = CIImage(image: artwork) else { return nil }
+        let maxDimension = max(input.extent.width, input.extent.height)
+        guard maxDimension > 0 else { return nil }
+        let scale = min(1, 240 / maxDimension)
+        input = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let extent = input.extent
+        let blurred = input
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 28])
+            .cropped(to: extent)
+        let context = CIContext(options: [.cacheIntermediates: false])
+        guard let cgImage = context.createCGImage(blurred, from: extent) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 
     private func renderFrame() {
@@ -396,14 +455,16 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
 #if DEBUG
-    func debugFrameImage(orientation: String, showArtwork: Bool) -> UIImage {
+    func debugFrameImage(orientation: String, showArtwork: Bool, backgroundMode: String = AppSettings.pipBackgroundCover) -> UIImage {
         let previousState = state
         let previousArtwork = artwork
+        let previousBlurredArtwork = blurredArtwork
         let previousRenderedPositionMs = lastRenderedPositionMs
         let previousRenderIdentityValue = lastRenderIdentityValue
         defer {
             state = previousState
             artwork = previousArtwork
+            blurredArtwork = previousBlurredArtwork
             lastRenderedPositionMs = previousRenderedPositionMs
             lastRenderIdentityValue = previousRenderIdentityValue
         }
@@ -442,17 +503,38 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         state.positionMs = 4_800
         state.title = "Midnight Signal"
         state.artist = "ivLyrics"
+        state.statusText = ""
         state.showArtwork = showArtwork
         state.orientation = orientation
+        state.backgroundMode = AppSettings.normalizePipBackgroundMode(backgroundMode)
         state.alignment = "center"
         state.lyricsSizePercent = 150
+        state.translationSizePercent = 100
         lastRenderedPositionMs = nil
         lastRenderIdentityValue = nil
-        artwork = nil
+        artwork = Self.debugSampleArtwork()
+        blurredArtwork = artwork.flatMap { Self.makeBlurredArtwork(from: $0) }
 
         let size = state.renderSize
         return UIGraphicsImageRenderer(size: size).image { context in
             drawFrame(in: CGRect(origin: .zero, size: size), context: context.cgContext)
+        }
+    }
+
+    nonisolated private static func debugSampleArtwork() -> UIImage? {
+        let size = CGSize(width: 320, height: 320)
+        return UIGraphicsImageRenderer(size: size).image { context in
+            let colors = [
+                UIColor(red: 0.92, green: 0.45, blue: 0.28, alpha: 1).cgColor,
+                UIColor(red: 0.32, green: 0.18, blue: 0.52, alpha: 1).cgColor
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                context.cgContext.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: size.width, y: size.height), options: [])
+            }
+            UIColor.white.withAlphaComponent(0.85).setFill()
+            context.cgContext.fillEllipse(in: CGRect(x: 90, y: 90, width: 140, height: 140))
+            UIColor(red: 0.15, green: 0.65, blue: 0.9, alpha: 1).setFill()
+            context.cgContext.fillEllipse(in: CGRect(x: 130, y: 130, width: 60, height: 60))
         }
     }
 #endif
@@ -472,21 +554,83 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
     private func drawBackground(in rect: CGRect, context: CGContext) {
-        if let artwork {
-            drawAspectFill(artwork, in: rect, context: context)
-            UIColor.black.withAlphaComponent(0.72).setFill()
-            UIRectFill(rect)
-        } else {
-            let base = UIColor(hexString: state.solidColor) ?? UIColor(red: 0.06, green: 0.08, blue: 0.12, alpha: 1)
-            let colors = [
-                base.withAlphaComponent(1).cgColor,
-                UIColor(red: 0.08, green: 0.09, blue: 0.14, alpha: 1).cgColor,
-                UIColor.black.cgColor
-            ] as CFArray
-            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.58, 1]) {
-                context.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: rect.maxX, y: rect.maxY), options: [])
+        switch AppSettings.normalizePipBackgroundMode(state.backgroundMode) {
+        case AppSettings.pipBackgroundCover:
+            guard let artwork else {
+                drawBlurGradientBackground(in: rect, context: context)
+                return
             }
+            drawAspectFill(artwork, in: rect, context: context)
+            UIColor.black.withAlphaComponent(0.45).setFill()
+            UIRectFillUsingBlendMode(rect, .normal)
+        case AppSettings.pipBackgroundBlur:
+            guard let backgroundArtwork = blurredArtwork ?? artwork else {
+                drawBlurGradientBackground(in: rect, context: context)
+                return
+            }
+            drawAspectFill(backgroundArtwork, in: rect, context: context)
+            UIColor.black.withAlphaComponent(0.72).setFill()
+            UIRectFillUsingBlendMode(rect, .normal)
+        case AppSettings.pipBackgroundGradient:
+            drawBlurGradientBackground(in: rect, context: context)
+        case AppSettings.pipBackgroundSolid:
+            (UIColor(hexString: state.solidColor) ?? UIColor(red: 0.06, green: 0.08, blue: 0.12, alpha: 1)).setFill()
+            UIRectFill(rect)
+        default:
+            drawBlurGradientBackground(in: rect, context: context)
         }
+    }
+
+    private func drawBlurGradientBackground(in rect: CGRect, context: CGContext) {
+        let blobColors = [
+            UIColor(red: 0.28, green: 0.25, blue: 0.49, alpha: 1),
+            UIColor(red: 0.57, green: 0.33, blue: 0.51, alpha: 1),
+            UIColor(red: 0.24, green: 0.37, blue: 0.51, alpha: 1),
+            UIColor(red: 0.25, green: 0.45, blue: 0.40, alpha: 1),
+            UIColor(red: 0.50, green: 0.23, blue: 0.33, alpha: 1),
+            UIColor(red: 0.18, green: 0.30, blue: 0.48, alpha: 1)
+        ]
+        let radii: [CGFloat] = [0.80, 0.70, 0.55, 0.75, 0.50, 0.90]
+        let centers = [
+            CGPoint(x: 0.08, y: 0.18), CGPoint(x: 0.78, y: 0.12),
+            CGPoint(x: 0.38, y: 0.42), CGPoint(x: 0.88, y: 0.58),
+            CGPoint(x: 0.18, y: 0.82), CGPoint(x: 0.62, y: 0.92)
+        ]
+
+        UIColor(red: 0.08, green: 0.10, blue: 0.14, alpha: 1).setFill()
+        UIRectFill(rect)
+        context.saveGState()
+        context.clip(to: rect)
+        let maxDimension = max(rect.width, rect.height)
+        for index in blobColors.indices {
+            let alpha = max(0.16, 0.35 - CGFloat(index) * 0.025)
+            let color = blobColors[index]
+            let colors = [
+                color.withAlphaComponent(alpha).cgColor,
+                color.withAlphaComponent(alpha * 0.45).cgColor,
+                color.withAlphaComponent(0).cgColor
+            ] as CFArray
+            guard let gradient = CGGradient(
+                colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                colors: colors,
+                locations: [0, 0.52, 1]
+            ) else { continue }
+            let center = CGPoint(
+                x: rect.minX + rect.width * centers[index].x,
+                y: rect.minY + rect.height * centers[index].y
+            )
+            context.drawRadialGradient(
+                gradient,
+                startCenter: center,
+                startRadius: 0,
+                endCenter: center,
+                endRadius: maxDimension * radii[index],
+                options: []
+            )
+        }
+        context.restoreGState()
+        UIColor.black.withAlphaComponent(0.40).setFill()
+        UIRectFillUsingBlendMode(rect, .normal)
     }
 
     private func drawMetadata(layout: PictureInPictureFrameLayout) {
@@ -512,7 +656,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
 
     private func drawLyrics(in lyricRect: CGRect) {
         guard let active = state.activeLine else {
-            let fontSize = max(18, lyricRect.width * 0.055)
+            let hasStatusText = state.lines.isEmpty && !state.statusText.isEmpty
+            let fontSize = max(18, lyricRect.width * 0.055 * (hasStatusText ? 0.85 : 1))
             let labelRect = CGRect(
                 x: lyricRect.minX,
                 y: lyricRect.midY - fontSize * 0.8,
@@ -520,7 +665,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 height: fontSize * 1.6
             )
             drawText(
-                "ivLyrics",
+                hasStatusText ? "ivLyrics : \(state.statusText)" : "ivLyrics",
                 in: labelRect,
                 font: pretendardFont(size: fontSize, weight: .semibold),
                 color: UIColor.white.withAlphaComponent(0.76),
@@ -532,7 +677,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
 
         let scale = Double(max(70, min(280, state.lyricsSizePercent))) / 100
         let primarySize = max(15, min(34, lyricRect.width * 0.061 * scale))
-        let supplementSize = max(10, primarySize * 0.48)
+        let supplementSize = max(10, primarySize * 0.48 * CGFloat(AppSettings.clampPipTranslationSizePercent(state.translationSizePercent)) / 100)
         let nextSize = max(11, primarySize * 0.56)
         let renderedPrimarySize = state.typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: primarySize)
         let visiblePartCount = active.line.vocalParts.reduce(0) { count, part in
@@ -856,10 +1001,13 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         var positionMs: Int64
         var title: String
         var artist: String
+        var statusText: String
         var showArtwork: Bool
         var orientation: String
+        var backgroundMode: String
         var alignment: String
         var lyricsSizePercent: Int
+        var translationSizePercent: Int
         var solidColor: String
         var syncedLyricsKaraokeAnimationEnabled: Bool
         var karaokeBounceEffectEnabled: Bool
@@ -874,10 +1022,13 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             positionMs: 0,
             title: "ivLyrics",
             artist: "",
+            statusText: "",
             showArtwork: true,
             orientation: AppSettings.pipOrientationSquare,
+            backgroundMode: AppSettings.pipBackgroundCover,
             alignment: "center",
             lyricsSizePercent: 150,
+            translationSizePercent: 100,
             solidColor: "#1e3a8a",
             syncedLyricsKaraokeAnimationEnabled: true,
             karaokeBounceEffectEnabled: true,
@@ -956,10 +1107,13 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 String(line?.index ?? -1),
                 title,
                 artist,
+                statusText,
                 String(showArtwork),
                 orientation,
+                backgroundMode,
                 alignment,
                 String(lyricsSizePercent),
+                String(translationSizePercent),
                 solidColor,
                 String(syncedLyricsKaraokeAnimationEnabled),
                 String(karaokeBounceEffectEnabled),
@@ -1194,6 +1348,7 @@ extension LyricsPictureInPictureController: AVPictureInPictureControllerDelegate
             let reason = self.startReason
             self.active = false
             self.startReason = nil
+            self.onEngagementEnded?()
             self.startRetryTask?.cancel()
             if !self.automaticPreparationEnabled {
                 self.deactivateAudioSession()

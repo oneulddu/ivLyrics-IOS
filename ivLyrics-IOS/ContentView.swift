@@ -658,6 +658,7 @@ struct ContentView: View {
 
 private struct PortraitPlayerProgressSection: View {
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var metadataControlsSpacing: CGFloat
 
@@ -935,6 +936,7 @@ struct PlayerBackgroundView: View {
 
 private struct YouTubeBackdropSection: View {
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var info: YouTubeVideoInfo
     var background: AppSettings.BackgroundSettings
@@ -1997,6 +1999,7 @@ private struct LandscapeArtworkView: View {
 
 private struct LandscapeTransportControls: View {
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
 
     var body: some View {
@@ -2527,6 +2530,7 @@ private struct TmiSheetView: View {
 struct TransportPanel: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
 
     var body: some View {
@@ -2745,6 +2749,7 @@ struct MainLyricPreviewPanel: View {
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var chromeless = false
     @State private var emptyLyricsPreviewKey = ""
@@ -3521,6 +3526,7 @@ private struct LyricsMetaStrip: View {
 struct LyricsTimelineView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @State private var animatedCenterIndex: Double?
 
@@ -3616,6 +3622,7 @@ struct LyricsTimelineView: View {
 private struct LyricsTimelineScrollView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @State private var autoScrollPaused = false
     @State private var lastScrolledTargetID: String?
@@ -5268,7 +5275,10 @@ private struct PictureInPictureLayoutDebugPreview: View {
             environment["IVLYRICS_DEBUG_PIP_ORIENTATION"] ?? AppSettings.pipOrientationLandscape
         )
         let showArtwork = environment["IVLYRICS_DEBUG_PIP_ARTWORK"] != "0"
-        let image = controller.debugFrameImage(orientation: orientation, showArtwork: showArtwork)
+        let backgroundMode = AppSettings.normalizePipBackgroundMode(
+            environment["IVLYRICS_DEBUG_PIP_BACKGROUND"] ?? AppSettings.pipBackgroundCover
+        )
+        let image = controller.debugFrameImage(orientation: orientation, showArtwork: showArtwork, backgroundMode: backgroundMode)
         Image(uiImage: image)
             .resizable()
             .interpolation(.none)
@@ -5748,6 +5758,7 @@ enum LyricSpeakerPalette {
 struct LogsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @Binding var visible: Bool
 
@@ -6432,6 +6443,21 @@ struct SettingsView: View {
 
             settingsSection(settings.t("section.pip"), description: settings.t("section.pip_desc")) {
                 settingsToggleCard(settings.t("setting.pip_show_artwork"), description: settings.t("setting.pip_show_artwork_desc"), binding: pipShowArtworkBinding)
+                settingsCard(settings.t("setting.pip_background"), description: settings.t("setting.pip_background_desc")) {
+                    Picker("", selection: Binding(get: {
+                        AppSettings.normalizePipBackgroundMode(settings.pipBackgroundMode)
+                    }, set: { value in
+                        settings.pipBackgroundMode = value
+                        model.showSavedToast(settings.t("toast.pip_settings_saved"))
+                    })) {
+                        Text(settings.t("pip.background.cover")).tag(AppSettings.pipBackgroundCover)
+                        Text(settings.t("pip.background.blur")).tag(AppSettings.pipBackgroundBlur)
+                        Text(settings.t("pip.background.gradient")).tag(AppSettings.pipBackgroundGradient)
+                        Text(settings.t("background.mode.solid")).tag(AppSettings.pipBackgroundSolid)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
                 settingsCard(settings.t("setting.pip_orientation"), description: settings.t("setting.pip_orientation_desc")) {
                     Picker("", selection: Binding(get: {
                         AppSettings.normalizePipOrientation(settings.pipOrientation)
@@ -6470,6 +6496,20 @@ struct SettingsView: View {
                             if !editing { model.showSavedToast(settings.t("toast.pip_settings_saved")) }
                         })
                         Text("\(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent))%")
+                            .font(.pretendard(13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+                settingsCard(settings.t("setting.pip_translation_size"), description: settings.t("setting.pip_translation_size_desc")) {
+                    HStack {
+                        Slider(value: Binding(get: {
+                            Double(AppSettings.clampPipTranslationSizePercent(settings.pipTranslationSizePercent))
+                        }, set: { value in
+                            settings.pipTranslationSizePercent = AppSettings.clampPipTranslationSizePercent(Int(value.rounded()))
+                        }), in: 50...250, step: 1, onEditingChanged: { editing in
+                            if !editing { model.showSavedToast(settings.t("toast.pip_settings_saved")) }
+                        })
+                        Text("\(AppSettings.clampPipTranslationSizePercent(settings.pipTranslationSizePercent))%")
                             .font(.pretendard(13, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.68))
                     }

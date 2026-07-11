@@ -199,7 +199,21 @@ final class AppViewModel: ObservableObject {
             self?.appendLog(message)
         }
         spotifyAppRemotePlaybackService.onConnectionChanged = { [weak self] connected in
-            self?.spotifyAppRemoteConnected = connected
+            guard let self else { return }
+            spotifyAppRemoteConnected = connected
+            guard !connected,
+                  UIApplication.shared.applicationState != .active,
+                  pictureInPictureController.isEngaged,
+                  spotifyLivePolling else { return }
+            guard spotifyUserPlaybackService.connected else {
+                spotifyPollTask?.cancel()
+                spotifyPollTask = nil
+                appendLog("spotify live: PIP active but Web API not connected; track updates paused")
+                return
+            }
+            guard spotifyPollTask == nil else { return }
+            startSpotifyPollingTask()
+            appendLog("spotify live: App Remote dropped in background; web polling takes over")
         }
         pictureInPictureController.onSetPlaying = { [weak self] playing in
             self?.setPlayback(playing: playing)
@@ -213,6 +227,13 @@ final class AppViewModel: ObservableObject {
         pictureInPictureController.onStartFailure = { [weak self] in
             guard let self else { return }
             self.showSavedToast(self.settings.t("pip.enter_failed"))
+        }
+        pictureInPictureController.onEngagementEnded = { [weak self] in
+            guard let self,
+                  UIApplication.shared.applicationState != .active,
+                  self.spotifyLivePolling,
+                  !self.pictureInPictureController.active else { return }
+            self.suspendSpotifyLiveInBackground()
         }
         pipActiveCancellable = pictureInPictureController.$active
             .dropFirst()
@@ -565,8 +586,14 @@ final class AppViewModel: ObservableObject {
     func appDidEnterBackground() {
         guard spotifyLivePolling else { return }
         if pictureInPictureController.isEngaged {
-            suspendSpotifyAppRemoteInBackground()
-            guard spotifyUserPlaybackService.connected else {
+            spotifyPlaybackRefreshBurstTask?.cancel()
+            spotifyPlaybackRefreshBurstTask = nil
+            if spotifyAppRemotePlaybackService.connected {
+                appendLog("spotify live: keeping App Remote connection for PIP")
+            } else {
+                suspendSpotifyAppRemoteInBackground()
+            }
+            guard spotifyAppRemotePlaybackService.connected || spotifyUserPlaybackService.connected else {
                 appendLog("spotify live: PIP active but Web API not connected; track updates paused")
                 return
             }
@@ -584,7 +611,7 @@ final class AppViewModel: ObservableObject {
               spotifyLivePolling else { return }
         if active {
             guard spotifyPollTask == nil else { return }
-            guard spotifyUserPlaybackService.connected else {
+            guard spotifyAppRemotePlaybackService.connected || spotifyUserPlaybackService.connected else {
                 appendLog("spotify live: PIP active but Web API not connected; track updates paused")
                 return
             }
@@ -660,7 +687,14 @@ final class AppViewModel: ObservableObject {
             spotifyUserConnected = spotifyUserPlaybackService.connected
             appendLog("spotify live refresh failed: \(error.localizedDescription)")
             if !spotifyUserPlaybackService.connected {
-                spotifyLivePolling = false
+                if pictureInPictureController.isEngaged,
+                   UIApplication.shared.applicationState != .active {
+                    spotifyPollTask?.cancel()
+                    spotifyPollTask = nil
+                    appendLog("spotify live: background refresh unavailable; polling paused until foreground")
+                } else {
+                    spotifyLivePolling = false
+                }
             }
         }
     }
@@ -2313,8 +2347,15 @@ final class AppViewModel: ObservableObject {
             positionMs: adjustedPositionMs,
             title: titleText,
             artist: artistText,
+            statusText: pipLyricsStatusText,
             settings: settings.snapshot
         )
+    }
+
+    private var pipLyricsStatusText: String {
+        guard lyricsResult.lines.isEmpty else { return "" }
+        if status == .loading { return settings.t("pip.status_searching") }
+        return lyricsResult.detail.trimmed
     }
 
     private func startBluetoothRouteMonitoring() {

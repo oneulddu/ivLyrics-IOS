@@ -16,6 +16,7 @@ final class FuriganaRepository: NSObject, WKNavigationDelegate, WKScriptMessageH
     private let cacheVersion = "furigana-js-kuromoji-v2"
     private let requestTimeoutNs: UInt64 = 45_000_000_000
     private let diskCache = LyricsDiskCache(namespace: "furigana_lyrics", maxEntries: 500)
+    private var cacheGeneration = 0
     private var memoryCache: [String: LyricsResult] = [:]
     private var pendingRequests: [String: PendingRequest] = [:]
     private var queuedScripts: [String] = []
@@ -48,9 +49,7 @@ final class FuriganaRepository: NSObject, WKNavigationDelegate, WKScriptMessageH
             if let cached = memoryCache[cacheKey] {
                 return Response(result: Self.mergeFurigana(baseResult: baseResult, furiganaResult: cached), logs: ["furigana js cache hit"], hadError: false)
             }
-            let diskCached = await Task.detached { [diskCache, cacheKey] in
-                diskCache.get(cacheKey)
-            }.value
+            let diskCached = await cachedResultFromDisk(for: cacheKey)
             if let cached = diskCached {
                 memoryCache[cacheKey] = cached
                 return Response(result: Self.mergeFurigana(baseResult: baseResult, furiganaResult: cached), logs: ["furigana js disk cache hit"], hadError: false)
@@ -86,13 +85,24 @@ final class FuriganaRepository: NSObject, WKNavigationDelegate, WKScriptMessageH
     func clearTrackCache(_ trackKey: String) {
         let prefix = trackKey.trimmed + "|"
         guard !prefix.isEmpty else { return }
+        cacheGeneration += 1
         memoryCache = memoryCache.filter { !$0.key.hasPrefix(prefix) }
         diskCache.removeByKeyPrefix(prefix)
     }
 
     func clearCache() {
+        cacheGeneration += 1
         memoryCache.removeAll()
         diskCache.clear()
+    }
+
+    private func cachedResultFromDisk(for cacheKey: String) async -> LyricsResult? {
+        let generation = cacheGeneration
+        let cached = await Task.detached { [diskCache, cacheKey] in
+            diskCache.get(cacheKey)
+        }.value
+        guard generation == cacheGeneration else { return nil }
+        return cached
     }
 
     private func cancelPending(for trackKey: String) {
