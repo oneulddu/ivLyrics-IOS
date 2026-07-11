@@ -18,7 +18,18 @@
       "iconURL": "https://raw.githubusercontent.com/ivLis-Studio/ivLyrics-IOS/main/ivLyrics-IOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
       "tintColor": "#FF3B7D",
       "category": "entertainment",
-      "versions": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "buildVersion": "5",
+          "date": "2026-07-11",
+          "localizedDescription": "ivLyrics iOS 1.0.0의 첫 공개 릴리스로, 동기화 가사와 Spotify 재생 경험을 제공합니다.\n\nThe first public release of ivLyrics iOS 1.0.0, bringing synced lyrics and a Spotify playback experience.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.0/ivLyrics-IOS-v1.0.0-unsigned.ipa",
+          "size": 6163722,
+          "sha256": "65209ef33da1b596aa5c4b543f886a225fae31f90f393f9c843ead27a2166405",
+          "minOSVersion": "17.0"
+        }
+      ],
       "appPermissions": {
         "entitlements": [],
         "privacy": {}
