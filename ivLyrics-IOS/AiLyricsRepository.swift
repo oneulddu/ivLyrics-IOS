@@ -1424,6 +1424,8 @@ actor AiLyricsRepository {
             return "Use Persian script only for Persian pronunciation. \(AppSettings.languageInfo(lang).phoneticDescription)"
         case "de":
             return "Use German spelling conventions only for pronunciation guides. Write sounds naturally for German speakers using the Latin alphabet; do not translate meanings."
+        case "cs":
+            return "Use Czech spelling conventions only for pronunciation guides. Write sounds naturally for Czech speakers using the Latin alphabet and Czech diacritics; do not translate meanings."
         case "ru":
             return "Use Cyrillic script only for Russian pronunciation. \(AppSettings.languageInfo(lang).phoneticDescription)"
         case "sv":
@@ -1442,6 +1444,8 @@ actor AiLyricsRepository {
             return "Use Indonesian spelling conventions only for pronunciation guides. Write sounds naturally for Indonesian speakers using the Latin alphabet; do not translate meanings."
         case "ms":
             return "Use Malay spelling conventions only for pronunciation guides. Write sounds naturally for Malay speakers using the Latin alphabet; do not translate meanings."
+        case "tr":
+            return "Use Turkish spelling conventions only for pronunciation guides. Write sounds naturally for Turkish speakers using the Latin alphabet and Turkish diacritics; do not translate meanings."
         default:
             return "Write pronunciation in \(AppSettings.languageInfo(lang).nativeName) spelling. \(AppSettings.languageInfo(lang).phoneticDescription)"
         }
@@ -1460,6 +1464,7 @@ actor AiLyricsRepository {
         case "ar": return "Arabic script"
         case "fa": return "Persian script"
         case "de": return "German Latin spelling"
+        case "cs": return "Czech Latin spelling"
         case "ru": return "Cyrillic"
         case "sv": return "Swedish Latin spelling"
         case "pt": return "Portuguese Latin spelling"
@@ -1469,6 +1474,7 @@ actor AiLyricsRepository {
         case "vi": return "Vietnamese Quốc Ngữ"
         case "id": return "Indonesian Latin spelling"
         case "ms": return "Malay Latin spelling"
+        case "tr": return "Turkish Latin spelling"
         default: return "\(langInfo.name) pronunciation spelling"
         }
     }
@@ -1819,16 +1825,26 @@ actor AiLyricsRepository {
 
     private static func detectLatinLanguage(_ text: String) -> String {
         let lower = text.lowercased()
+        let words = Set(lower.split(whereSeparator: {
+            !$0.isLetter && !$0.isNumber && $0 != "_"
+        }).map(String.init))
+        let czechScore = ["jsem", "jste", "jsme", "není", "nejsem", "jsi", "můj", "moje", "tvůj", "tvoje", "láska", "srdce", "tobě", "chci", "mám", "když"].reduce(0) {
+            $0 + (words.contains($1) ? 1 : 0)
+        }
+        if czechScore >= 2 { return "cs" }
+        let turkishScore = ["ben", "sen", "biz", "siz", "değil", "için", "çok", "beni", "seni", "aşk", "kalp", "gece", "şimdi", "gibi"].reduce(0) {
+            $0 + (words.contains($1) ? 1 : 0)
+        }
+        if turkishScore >= 2 { return "tr" }
         if lower.unicodeScalars.contains(where: vietnameseHints.contains) { return "vi" }
+        if lower.unicodeScalars.contains(where: czechUniqueHints.contains) { return "cs" }
+        if lower.unicodeScalars.contains(where: turkishUniqueHints.contains) { return "tr" }
         if lower.contains("å") { return "sv" }
         if lower.unicodeScalars.contains(where: germanHints.contains) { return "de" }
         if lower.unicodeScalars.contains(where: spanishHints.contains) { return "es" }
         if lower.unicodeScalars.contains(where: portugueseHints.contains) { return "pt" }
         if lower.unicodeScalars.contains(where: frenchHints.contains) { return "fr" }
 
-        let words = Set(lower.split(whereSeparator: {
-            !$0.isLetter && !$0.isNumber && $0 != "_"
-        }).map(String.init))
         var best = "en"
         var bestScore = 0
         for (language, samples) in latinLanguageSamples {
@@ -1842,6 +1858,8 @@ actor AiLyricsRepository {
     }
 
     private static let vietnameseHints = Set("ăâđêôơưạảấầẩẫậắằẳẵặếềểễệịỉọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ".unicodeScalars)
+    private static let czechUniqueHints = Set("ěřů".unicodeScalars)
+    private static let turkishUniqueHints = Set("ğış".unicodeScalars)
     private static let germanHints = Set("ßü".unicodeScalars)
     private static let spanishHints = Set("ñ¿¡".unicodeScalars)
     private static let portugueseHints = Set("ãõ".unicodeScalars)

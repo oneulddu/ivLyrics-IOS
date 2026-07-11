@@ -66,6 +66,7 @@ final class AppSettings: ObservableObject {
         Language(code: "sv", name: "Swedish", nativeName: "Svenska", phoneticDescription: "Swedish phonetic spelling"),
         Language(code: "pt", name: "Portuguese", nativeName: "Português", phoneticDescription: "Portuguese phonetic spelling"),
         Language(code: "bn", name: "Bengali", nativeName: "বাংলা", phoneticDescription: "Bengali script pronunciation"),
+        Language(code: "cs", name: "Czech", nativeName: "Čeština", phoneticDescription: "Czech phonetic spelling"),
         Language(code: "it", name: "Italian", nativeName: "Italiano", phoneticDescription: "Italian phonetic spelling"),
         Language(code: "th", name: "Thai", nativeName: "ภาษาไทย", phoneticDescription: "Thai script pronunciation"),
         Language(code: "vi", name: "Vietnamese", nativeName: "Tiếng Việt", phoneticDescription: "Vietnamese phonetic spelling"),

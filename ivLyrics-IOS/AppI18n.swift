@@ -17,6 +17,7 @@ enum AppI18n {
         Language(code: "sv", name: "Swedish", nativeName: "Svenska"),
         Language(code: "pt", name: "Portuguese", nativeName: "Português"),
         Language(code: "bn", name: "Bengali", nativeName: "বাংলা"),
+        Language(code: "cs", name: "Czech", nativeName: "Čeština"),
         Language(code: "it", name: "Italian", nativeName: "Italiano"),
         Language(code: "th", name: "Thai", nativeName: "ภาษาไทย"),
         Language(code: "vi", name: "Vietnamese", nativeName: "Tiếng Việt"),
