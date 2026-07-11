@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.6",
+          "buildVersion": "5",
+          "date": "2026-07-11",
+          "localizedDescription": "v1.0.6 iOS 릴리스와 AltStore 설치용 무서명 IPA를 제공합니다.\n\nv1.0.6 provides the iOS release and an unsigned IPA for AltStore installation.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.6/ivLyrics-IOS-v1.0.6-unsigned.ipa",
+          "size": 6621696,
+          "sha256": "dbc755cd9436e142a7abe371c9b7fb6bf91ae95458b17e74279c3f2cab51384b",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.5",
           "buildVersion": "4",
           "date": "2026-07-11",
