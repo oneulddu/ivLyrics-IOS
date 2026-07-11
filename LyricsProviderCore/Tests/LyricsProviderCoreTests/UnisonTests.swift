@@ -66,6 +66,19 @@ final class UnisonTests: XCTestCase {
         }
     }
 
+    func testSuccessfulEnvelopeWithoutDataIsProviderFormat() async {
+        for payload in [#"{"success":true}"#, #"{"success":true,"data":null}"#] {
+            UnisonURLProtocolStub.handler = { request in Self.json(request, payload) }
+            do {
+                _ = try await UnisonProvider(client: UnisonClient(httpClient: stubClient()))
+                    .fetch(makeRequest(durationMs: nil))
+                XCTFail("expected providerFormat")
+            } catch {
+                XCTAssertEqual(error as? LyricsProviderError, .providerFormat)
+            }
+        }
+    }
+
     func testAttemptsContinueAfterMalformedAndKeepFormatClassification() async throws {
         let successfulCalls = LockedUnisonValues<URL>()
         let malformed = Self.envelope(format: "", lyrics: "Synthetic line")

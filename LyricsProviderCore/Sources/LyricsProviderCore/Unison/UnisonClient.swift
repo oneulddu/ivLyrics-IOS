@@ -25,7 +25,11 @@ public final class UnisonClient: @unchecked Sendable {
                     sawMalformed = true
                     continue
                 }
-                guard envelope.success, let data = envelope.data else { continue }
+                guard envelope.success else { continue }
+                guard let data = envelope.data else {
+                    sawMalformed = true
+                    continue
+                }
                 guard !data.lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     continue
                 }
