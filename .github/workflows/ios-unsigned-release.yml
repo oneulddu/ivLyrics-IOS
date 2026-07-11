@@ -134,9 +134,9 @@ jobs:
             "$VERSION_PATH"
             "$ALTSTORE_SOURCE_PATH"
           )
-          args=()
+          args=(--latest)
           if [[ "$PRERELEASE" == "true" ]]; then
-            args+=(--prerelease)
+            args=(--prerelease --latest=false)
           fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
