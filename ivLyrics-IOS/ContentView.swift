@@ -4634,19 +4634,21 @@ struct SyllableKaraokeText: View {
 
     @ViewBuilder
     private func karaokeBody(nowMs: Double) -> some View {
+        let segments = karaokeSegments
+        let displayKind = normalizedKind
         Group {
-            if karaokeSegments.isEmpty {
+            if segments.isEmpty {
                 Text(text.isEmpty ? " " : text)
                     .foregroundStyle(fallbackColor)
                     .multilineTextAlignment(alignment)
-                    .modifier(LyricGlyphEffectModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
-                    .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
+                    .modifier(LyricGlyphEffectModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
+                    .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
             } else {
                 KaraokeSegmentFlowLayout(alignment: alignment, wraps: !singleLine) {
-                    ForEach(karaokeSegments) { segment in
+                    ForEach(segments) { segment in
                         KaraokeSyllableSegmentView(
                             segment: segment,
-                            kind: normalizedKind,
+                            kind: displayKind,
                             active: active,
                             nowMs: nowMs,
                             textSize: bounceTextSize,
@@ -4654,7 +4656,7 @@ struct SyllableKaraokeText: View {
                         )
                     }
                 }
-                .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
+                .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
                 .accessibilityLabel(text)
             }
         }
@@ -4663,13 +4665,17 @@ struct SyllableKaraokeText: View {
     private var karaokeSegments: [KaraokeSyllableSegment] {
         let annotations = rubyAnnotations
         let displaySyllables = effectiveSyllables
+        let bounceActiveIndex = bounceEnabled && active && !displaySyllables.isEmpty
+            ? activeSegmentIndex(in: displaySyllables)
+            : nil
         var timedSegments: [KaraokeSyllableSegment] = []
+        timedSegments.reserveCapacity(displaySyllables.count)
         var sourceOffset = 0
         for (index, syllable) in displaySyllables.enumerated() {
             let sourceLength = syllable.text.count
             defer { sourceOffset += sourceLength }
             guard !syllable.text.isEmpty else { continue }
-            let bounce = karaokeBounce(for: syllable, index: index)
+            let bounce = karaokeBounce(for: syllable, index: index, activeIndex: bounceActiveIndex)
             timedSegments.append(KaraokeSyllableSegment(
                 id: index,
                 text: syllable.text,
@@ -4799,11 +4805,15 @@ struct SyllableKaraokeText: View {
         return min(1, max(0, CGFloat(positionMs - syllable.startTimeMs) / CGFloat(syllable.endTimeMs - syllable.startTimeMs)))
     }
 
-    private func karaokeBounce(for syllable: LyricsLine.Syllable, index: Int) -> KaraokeBounceMetrics {
+    private func karaokeBounce(
+        for syllable: LyricsLine.Syllable,
+        index: Int,
+        activeIndex: Int?
+    ) -> KaraokeBounceMetrics {
         guard bounceEnabled,
               active,
               syllable.endTimeMs > syllable.startTimeMs,
-              let activeIndex = activeSegmentIndex else {
+              let activeIndex else {
             return .idle
         }
         let distance = abs(CGFloat(index - activeIndex))
@@ -4820,12 +4830,12 @@ struct SyllableKaraokeText: View {
         return KaraokeBounceMetrics(offsetY: offsetY, scale: scale)
     }
 
-    private var activeSegmentIndex: Int? {
+    private func activeSegmentIndex(in syllables: [LyricsLine.Syllable]) -> Int? {
         var fallbackIndex: Int?
         var fallbackEnd = Int64.min
         var nextIndex: Int?
         var nextStart = Int64.max
-        for (index, syllable) in effectiveSyllables.enumerated() {
+        for (index, syllable) in syllables.enumerated() {
             guard !syllable.text.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else {
                 continue
             }
