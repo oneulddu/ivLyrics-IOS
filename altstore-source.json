@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.1",
+          "buildVersion": "6",
+          "date": "2026-07-11",
+          "localizedDescription": "v1.0.1은 기본 보컬 색상을 조정하고 AltStore용 서명되지 않은 IPA를 제공합니다.\n\nv1.0.1 updates the default vocal colors and provides an unsigned IPA for AltStore.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.1/ivLyrics-IOS-v1.0.1-unsigned.ipa",
+          "size": 6163768,
+          "sha256": "788a38b8a71f6c32ad54a10e64bd4cd04a03d15e4c3c6c0dc6e932ef73bcd6ef",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.0",
           "buildVersion": "5",
           "date": "2026-07-11",
