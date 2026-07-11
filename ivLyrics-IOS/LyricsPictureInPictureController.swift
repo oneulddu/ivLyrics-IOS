@@ -46,6 +46,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private var artworkTask: Task<Void, Never>?
     private var startRetryTask: Task<Void, Never>?
     private var startRequested = false
+    private var hasPrimedFrame = false
     private var lastRenderUptime: TimeInterval = 0
     private var audioSessionActive = false
     private nonisolated let playbackInfo = PictureInPicturePlaybackInfo()
@@ -58,6 +59,15 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = UIColor.black.cgColor
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback,
+                mode: .moviePlayback,
+                options: [.mixWithOthers]
+            )
+        } catch {
+            onLog?("lyrics pip audio session category failed: \(error.localizedDescription)")
+        }
         let source = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: displayLayer,
             playbackDelegate: self
@@ -128,7 +138,13 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             isPaused: !(track?.playing ?? false)
         )
         loadArtworkIfNeeded(track?.artworkURL)
-        guard active || startRequested else { return }
+        guard active || startRequested else {
+            if !hasPrimedFrame {
+                renderFrame()
+                hasPrimedFrame = lastRenderUptime > 0
+            }
+            return
+        }
         let uptime = ProcessInfo.processInfo.systemUptime
         if forceRender || uptime - lastRenderUptime >= (1.0 / 15.0) {
             renderFrame()
