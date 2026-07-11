@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.2",
+          "buildVersion": "7",
+          "date": "2026-07-11",
+          "localizedDescription": "캐시된 가사를 즉시 재사용하여 가사 표시 속도를 개선한 업데이트입니다.\n\nThis update improves lyric display speed by immediately reusing cached lyrics.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.2/ivLyrics-IOS-v1.0.2-unsigned.ipa",
+          "size": 6180099,
+          "sha256": "7e9c5045869c35805f7d94e794490034ac9afc813b2f34e0cbe123357cb7130c",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.1",
           "buildVersion": "6",
           "date": "2026-07-11",
