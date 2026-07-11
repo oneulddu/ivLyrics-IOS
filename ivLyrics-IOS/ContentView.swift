@@ -6606,7 +6606,7 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
             }
 
-            ForEach(["musixmatch", "bugs", "genie", "deezer"], id: \.self) { provider in
+            ForEach(LyricsProviderAppContracts.unofficialProviderRawValues, id: \.self) { provider in
                 settingsToggleCard(
                     settings.tf("lyrics_provider.enable_format", lyricsProviderName(provider)),
                     description: settings.t("lyrics_provider.unofficial_provider_desc"),
@@ -6686,9 +6686,7 @@ struct SettingsView: View {
     }
 
     private var normalizedLyricsProviderOrder: [String] {
-        var seen = Set<String>()
-        let valid = ["musixmatch", "deezer", "bugs", "genie", "lrclib"]
-        return (settings.lyricsProviderOrder + valid).filter { valid.contains($0) && seen.insert($0).inserted }
+        LyricsProviderAppContracts.canonicalProviderOrder(settings.lyricsProviderOrder)
     }
 
     private func lyricsProviderEnabledBinding(_ provider: String) -> Binding<Bool> {
@@ -6697,6 +6695,7 @@ struct SettingsView: View {
         }, set: { enabled in
             if enabled { settings.lyricsProviderEnabled.insert(provider) }
             else { settings.lyricsProviderEnabled.remove(provider) }
+            settings.lyricsProviderOrder = normalizedLyricsProviderOrder
             model.showSavedToast(settings.t("toast.settings_saved"))
         })
     }
@@ -6710,13 +6709,7 @@ struct SettingsView: View {
     }
 
     private func lyricsProviderName(_ rawValue: String) -> String {
-        switch rawValue {
-        case "musixmatch": return "Musixmatch"
-        case "deezer": return "Deezer"
-        case "bugs": return "Bugs"
-        case "genie": return "Genie"
-        default: return "LRCLIB"
-        }
+        LyricsProviderAppContracts.providerDisplayName(rawValue)
     }
 
     private var displaySettingsPage: some View {

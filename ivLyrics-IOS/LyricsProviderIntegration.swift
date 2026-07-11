@@ -22,6 +22,7 @@ actor LyricsProviderCredentialManager {
             LrclibProviderAdapter(),
             MusixmatchProvider(credentialStore: store),
             DeezerProvider(client: deezerClient, authSession: deezerSession),
+            UnisonProvider(),
             BugsProvider(),
             GenieProvider(),
         ])

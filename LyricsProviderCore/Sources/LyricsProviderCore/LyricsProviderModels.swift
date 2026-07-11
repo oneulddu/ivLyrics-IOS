@@ -1,9 +1,9 @@
 import Foundation
 
 public enum LyricsProviderID: String, Codable, CaseIterable, Hashable, Sendable {
-    case lrclib, musixmatch, deezer, bugs, genie
+    case lrclib, musixmatch, deezer, unison, bugs, genie
 
-    public static let defaultOrder: [Self] = [.musixmatch, .deezer, .bugs, .genie, .lrclib]
+    public static let defaultOrder: [Self] = [.musixmatch, .deezer, .unison, .bugs, .genie, .lrclib]
 }
 
 public enum LyricsTiming: String, Codable, Hashable, Sendable {
@@ -127,15 +127,85 @@ public struct LyricsCandidate: Codable, Hashable, Sendable {
     }
 }
 
+public struct ProviderLyricSyllable: Codable, Hashable, Sendable {
+    public let text: String
+    public let startMs: Int64
+    public let endMs: Int64
+
+    public init(text: String, startMs: Int64, endMs: Int64) {
+        self.text = text
+        self.startMs = startMs
+        self.endMs = endMs
+    }
+}
+
+public struct ProviderSpeakerPresentation: Codable, Hashable, Sendable {
+    public let speaker: String
+    public let color: String?
+    public let fallback: String?
+
+    public init(speaker: String, color: String? = nil, fallback: String? = nil) {
+        self.speaker = speaker
+        self.color = color
+        self.fallback = fallback
+    }
+}
+
+public enum ProviderVocalRole: String, Codable, Hashable, Sendable {
+    case lead
+    case background
+}
+
+public struct ProviderVocalPart: Codable, Hashable, Sendable {
+    public let id: String
+    public let role: ProviderVocalRole
+    public let speaker: ProviderSpeakerPresentation?
+    public let text: String
+    public let syllables: [ProviderLyricSyllable]
+
+    public init(id: String, role: ProviderVocalRole,
+                speaker: ProviderSpeakerPresentation? = nil, text: String,
+                syllables: [ProviderLyricSyllable]) {
+        self.id = id
+        self.role = role
+        self.speaker = speaker
+        self.text = text
+        self.syllables = syllables
+    }
+}
+
 public struct ProviderLyricLine: Codable, Hashable, Sendable {
     public let startMs: Int64
     public let endMs: Int64?
     public let text: String
+    public let syllables: [ProviderLyricSyllable]
+    public let speaker: ProviderSpeakerPresentation?
+    public let vocalParts: [ProviderVocalPart]
 
-    public init(startMs: Int64, endMs: Int64? = nil, text: String) {
+    public init(startMs: Int64, endMs: Int64? = nil, text: String,
+                syllables: [ProviderLyricSyllable] = [],
+                speaker: ProviderSpeakerPresentation? = nil,
+                vocalParts: [ProviderVocalPart] = []) {
         self.startMs = startMs
         self.endMs = endMs
         self.text = text
+        self.syllables = syllables
+        self.speaker = speaker
+        self.vocalParts = vocalParts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case startMs, endMs, text, syllables, speaker, vocalParts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        startMs = try container.decode(Int64.self, forKey: .startMs)
+        endMs = try container.decodeIfPresent(Int64.self, forKey: .endMs)
+        text = try container.decode(String.self, forKey: .text)
+        syllables = try container.decodeIfPresent([ProviderLyricSyllable].self, forKey: .syllables) ?? []
+        speaker = try container.decodeIfPresent(ProviderSpeakerPresentation.self, forKey: .speaker)
+        vocalParts = try container.decodeIfPresent([ProviderVocalPart].self, forKey: .vocalParts) ?? []
     }
 }
 

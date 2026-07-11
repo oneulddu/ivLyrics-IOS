@@ -17,6 +17,7 @@ enum AppI18n {
         Language(code: "sv", name: "Swedish", nativeName: "Svenska"),
         Language(code: "pt", name: "Portuguese", nativeName: "Português"),
         Language(code: "bn", name: "Bengali", nativeName: "বাংলা"),
+        Language(code: "cs", name: "Czech", nativeName: "Čeština"),
         Language(code: "it", name: "Italian", nativeName: "Italiano"),
         Language(code: "th", name: "Thai", nativeName: "ภาษาไทย"),
         Language(code: "vi", name: "Vietnamese", nativeName: "Tiếng Việt"),
@@ -28,6 +29,8 @@ enum AppI18n {
     private static let androidStrings: [String: [String: String]] = loadBundledStrings()
 
     private static let iosOverrideKeys: Set<String> = [
+        "lyrics_provider.legal_notice",
+        "repo.detail.provider_rich_timing",
         "spotify.step3.desc",
         "spotify.step4.desc"
     ]
@@ -96,8 +99,9 @@ enum AppI18n {
             "lyrics_provider.deezer_removed": "ARL과 파생 세션이 삭제되었습니다.",
             "lyrics_provider.credential_failed": "인증 정보를 변경하지 못했습니다.",
             "lyrics_provider.legal_title": "법적·운영 안내",
-            "lyrics_provider.legal_notice": "Musixmatch, Deezer, Bugs, Genie 연결은 비공식 방식입니다. 서비스 약관, 가사 권리, App Store 검토 결과에 따라 공급자별 또는 전체 기능이 원격으로 중단될 수 있습니다.",
+            "lyrics_provider.legal_notice": "Musixmatch, Deezer, Unison, Bugs, Genie 연결은 비공식 방식입니다. 서비스 약관, 가사 권리, App Store 검토 결과에 따라 공급자별 또는 전체 기능이 원격으로 중단될 수 있습니다.",
             "lyrics_provider.remote_disabled": "원격 중단이 적용되어 기존 LRCLIB 방식만 사용합니다.",
+            "repo.detail.provider_rich_timing": "Unison의 음절·보컬 타이밍을 그대로 사용합니다.",
             "section.spotify_api_desc": "Client ID는 Spotify App Remote 연결에 사용합니다. Client Secret은 ISRC와 메타데이터 보강을 사용할 때만 선택적으로 입력하며 앱 내부에 저장됩니다.",
             "setting.ui_language": "앱 표시 언어",
             "setting.metadata_translation": "곡 제목/아티스트 번역",
@@ -344,8 +348,9 @@ enum AppI18n {
             "lyrics_provider.deezer_removed": "The ARL and derived session were removed.",
             "lyrics_provider.credential_failed": "The credential could not be changed.",
             "lyrics_provider.legal_title": "Legal and operational notice",
-            "lyrics_provider.legal_notice": "Musixmatch, Deezer, Bugs, and Genie use unofficial integrations. Individual providers or the entire feature may be remotely disabled following terms, lyrics-rights, or App Store review.",
+            "lyrics_provider.legal_notice": "Musixmatch, Deezer, Unison, Bugs, and Genie use unofficial integrations. Individual providers or the entire feature may be remotely disabled following terms, lyrics-rights, or App Store review.",
             "lyrics_provider.remote_disabled": "A remote stop is active; only the existing LRCLIB flow is used.",
+            "repo.detail.provider_rich_timing": "Using Unison's original syllable and vocal timing.",
             "section.spotify_api_desc": "The Client ID connects Spotify App Remote. The optional Client Secret enables ISRC and metadata enrichment and is stored only on this device.",
             "setting.ui_language": "App Language",
             "setting.metadata_translation": "Translate title/artist",
