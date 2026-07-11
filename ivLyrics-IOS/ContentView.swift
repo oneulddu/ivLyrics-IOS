@@ -6421,6 +6421,8 @@ struct SettingsView: View {
     @EnvironmentObject private var model: AppViewModel
     @State private var settingsLogsPresented = false
     @State private var selectedTab: SettingsTab = .lyrics
+    @State private var deezerARLInput = ""
+    @State private var deezerCredentialStatus = ""
 
     var body: some View {
         ZStack {
@@ -6456,6 +6458,7 @@ struct SettingsView: View {
                 selectedTab = tab
             }
 #endif
+            Task { await settings.refreshDeezerConfiguration() }
         }
         .fullScreenCover(isPresented: $settingsLogsPresented) {
             LogsView(visible: $settingsLogsPresented)
@@ -6530,6 +6533,8 @@ struct SettingsView: View {
 
     private var lyricsSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
+            lyricsProviderSettingsSection
+
             settingsSection(settings.t("section.language"), description: settings.t("section.language_desc")) {
                 settingsCard(settings.t("setting.ui_language"), description: settings.t("setting.ui_language_desc")) {
                     Picker("", selection: uiLanguageBinding) {
@@ -6579,6 +6584,138 @@ struct SettingsView: View {
                 settingsToggleCard(settings.t("setting.karaoke_bounce_effect"), description: settings.t("setting.karaoke_bounce_effect_desc"), binding: settingsSavedBinding(\.karaokeBounceEffectEnabled))
                 settingsToggleCard(settings.t("setting.karaoke_data_as_line_synced"), description: settings.t("setting.karaoke_data_as_line_synced_desc"), binding: settingsSavedBinding(\.karaokeDataAsLineSynced))
             }
+        }
+    }
+
+    private var lyricsProviderSettingsSection: some View {
+        settingsSection(
+            settings.t("section.lyrics_providers"),
+            description: settings.t("section.lyrics_providers_desc")
+        ) {
+            settingsCard(settings.t("setting.lyrics_provider_mode"), description: settings.t("setting.lyrics_provider_mode_desc")) {
+                Picker("", selection: Binding(get: {
+                    settings.lyricsProviderModeRaw
+                }, set: { value in
+                    settings.lyricsProviderModeRaw = value
+                    model.showSavedToast(settings.t("toast.settings_saved"))
+                })) {
+                    Text(settings.t("lyrics_provider.mode.legacy")).tag("legacy")
+                    Text(settings.t("lyrics_provider.mode.multi")).tag("multiProvider")
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            ForEach(["musixmatch", "bugs", "genie", "deezer"], id: \.self) { provider in
+                settingsToggleCard(
+                    settings.tf("lyrics_provider.enable_format", lyricsProviderName(provider)),
+                    description: settings.t("lyrics_provider.unofficial_provider_desc"),
+                    binding: lyricsProviderEnabledBinding(provider)
+                )
+                .disabled(provider == "deezer" && !settings.deezerConfigured)
+            }
+
+            settingsCard(settings.t("lyrics_provider.order"), description: settings.t("lyrics_provider.order_desc")) {
+                VStack(spacing: 8) {
+                    ForEach(Array(normalizedLyricsProviderOrder.enumerated()), id: \.element) { index, provider in
+                        HStack {
+                            Text(lyricsProviderName(provider))
+                                .foregroundStyle(.white.opacity(0.82))
+                            Spacer()
+                            Button("↑") { moveLyricsProvider(at: index, offset: -1) }
+                                .disabled(index == 0)
+                            Button("↓") { moveLyricsProvider(at: index, offset: 1) }
+                                .disabled(index == normalizedLyricsProviderOrder.count - 1)
+                        }
+                    }
+                }
+            }
+
+            settingsCard(settings.t("lyrics_provider.deezer_arl"), description: settings.t("lyrics_provider.deezer_arl_desc")) {
+                SecureField(settings.deezerConfigured ? "••••••••••••" : settings.t("lyrics_provider.deezer_arl_placeholder"), text: $deezerARLInput)
+                    .textFieldStyle(PlayerTextFieldStyle())
+                    .textContentType(.password)
+                Text(settings.deezerConfigured
+                     ? settings.t("lyrics_provider.deezer_configured")
+                     : settings.t("lyrics_provider.deezer_not_configured"))
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.62))
+                if !deezerCredentialStatus.isEmpty {
+                    Text(deezerCredentialStatus)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                }
+                settingsActionButton(settings.t("lyrics_provider.deezer_save")) {
+                    let value = deezerARLInput
+                    Task { @MainActor in
+                        do {
+                            try await settings.saveDeezerARL(value)
+                            deezerARLInput = ""
+                            deezerCredentialStatus = settings.t("lyrics_provider.deezer_saved")
+                        } catch {
+                            deezerCredentialStatus = settings.t("lyrics_provider.credential_failed")
+                        }
+                    }
+                }
+                .disabled(deezerARLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                settingsActionButton(settings.t("lyrics_provider.deezer_remove"), role: .destructive) {
+                    Task { @MainActor in
+                        do {
+                            try await settings.removeDeezerARL()
+                            deezerARLInput = ""
+                            deezerCredentialStatus = settings.t("lyrics_provider.deezer_removed")
+                        } catch {
+                            deezerCredentialStatus = settings.t("lyrics_provider.credential_failed")
+                        }
+                    }
+                }
+                .disabled(!settings.deezerConfigured)
+            }
+
+            settingsCard(settings.t("lyrics_provider.legal_title")) {
+                Text(settings.t("lyrics_provider.legal_notice"))
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.64))
+                if settings.lyricsProviderRemoteGlobalDisable {
+                    Text(settings.t("lyrics_provider.remote_disabled"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
+    private var normalizedLyricsProviderOrder: [String] {
+        var seen = Set<String>()
+        let valid = ["musixmatch", "deezer", "bugs", "genie", "lrclib"]
+        return (settings.lyricsProviderOrder + valid).filter { valid.contains($0) && seen.insert($0).inserted }
+    }
+
+    private func lyricsProviderEnabledBinding(_ provider: String) -> Binding<Bool> {
+        Binding(get: {
+            settings.lyricsProviderEnabled.contains(provider)
+        }, set: { enabled in
+            if enabled { settings.lyricsProviderEnabled.insert(provider) }
+            else { settings.lyricsProviderEnabled.remove(provider) }
+            model.showSavedToast(settings.t("toast.settings_saved"))
+        })
+    }
+
+    private func moveLyricsProvider(at index: Int, offset: Int) {
+        var order = normalizedLyricsProviderOrder
+        let destination = index + offset
+        guard order.indices.contains(index), order.indices.contains(destination) else { return }
+        order.swapAt(index, destination)
+        settings.lyricsProviderOrder = order
+    }
+
+    private func lyricsProviderName(_ rawValue: String) -> String {
+        switch rawValue {
+        case "musixmatch": return "Musixmatch"
+        case "deezer": return "Deezer"
+        case "bugs": return "Bugs"
+        case "genie": return "Genie"
+        default: return "LRCLIB"
         }
     }
 
