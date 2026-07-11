@@ -72,9 +72,15 @@ jobs:
             exit 1
           fi
           version_name="${release_tag#v}"
-          release_target="$(git rev-parse --verify "${release_tag}^{commit}" 2>/dev/null || git rev-parse HEAD)"
+          if release_target="$(git rev-parse --verify "${release_tag}^{commit}" 2>/dev/null)"; then
+            tag_exists=true
+          else
+            release_target="$(git rev-parse HEAD)"
+            tag_exists=false
+          fi
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "release_target=$release_target" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$tag_exists" >> "$GITHUB_OUTPUT"
           echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
           echo "artifact_name=ivLyrics-IOS-${release_tag}-release" >> "$GITHUB_OUTPUT"
 
@@ -118,6 +124,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           RELEASE_TARGET: ${{ steps.release.outputs.release_target }}
+          TAG_EXISTS: ${{ steps.release.outputs.tag_exists }}
           PRERELEASE: ${{ inputs.prerelease || false }}
           IPA_PATH: ${{ steps.package.outputs.ipa_path }}
           CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
@@ -137,27 +144,27 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             if [[ "$PRERELEASE" == "true" ]]; then
               gh release edit "$RELEASE_TAG" \
-                --target "$RELEASE_TARGET" \
                 --title "ivLyrics iOS $RELEASE_TAG" \
                 --notes-file "$NOTES_PATH" \
                 --prerelease
             else
               gh release edit "$RELEASE_TAG" \
-                --target "$RELEASE_TARGET" \
                 --title "ivLyrics iOS $RELEASE_TAG" \
                 --notes-file "$NOTES_PATH"
             fi
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
+            if [[ "$TAG_EXISTS" != "true" ]]; then
+              git tag "$RELEASE_TAG" "$RELEASE_TARGET"
+              git push origin "refs/tags/$RELEASE_TAG"
+            fi
             if [[ "$PRERELEASE" == "true" ]]; then
               gh release create "$RELEASE_TAG" "${assets[@]}" \
-                --target "$RELEASE_TARGET" \
                 --title "ivLyrics iOS $RELEASE_TAG" \
                 --notes-file "$NOTES_PATH" \
                 --prerelease
             else
               gh release create "$RELEASE_TAG" "${assets[@]}" \
-                --target "$RELEASE_TARGET" \
                 --title "ivLyrics iOS $RELEASE_TAG" \
                 --notes-file "$NOTES_PATH"
             fi
