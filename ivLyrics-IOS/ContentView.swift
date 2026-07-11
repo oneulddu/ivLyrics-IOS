@@ -660,9 +660,13 @@ struct ContentView: View {
 
     private func openSystemLyricsPictureInPicture() {
         showingLyricsMetaMenu = false
+        #if targetEnvironment(simulator)
+        model.showSavedToast(settings.t("pip.simulator_unavailable"))
+        #else
         if !model.startLyricsPictureInPicture() {
             model.showSavedToast(settings.t("pip.unavailable"))
         }
+        #endif
     }
 
     private func applyKeepScreenOn(_ enabled: Bool) {
@@ -3533,16 +3537,21 @@ struct LyricsTimelineView: View {
                     Group {
                         switch item {
                         case .line(let index, let line):
+                            let lineActive = itemActive || (activeItemID == nil && index == model.activeLineIndex)
                             LyricsLineView(
                                 lineIndex: index,
                                 line: line,
                                 originalText: model.displayText(for: line),
-                                active: itemActive || (activeItemID == nil && index == model.activeLineIndex),
+                                active: lineActive,
                                 displayDistance: displayDistance,
-                                progress: model.progress(for: line),
-                                positionMs: position,
-                                alignment: settings.lyricsTextAlignment
+                                progress: lineActive ? model.progress(for: line) : 0,
+                                positionMs: lineActive ? position : 0,
+                                alignment: settings.lyricsTextAlignment,
+                                pronunciationLoading: model.lyricsSupplementPronunciationLoading,
+                                translationLoading: model.lyricsSupplementTranslationLoading,
+                                onSeek: { model.seek(toLyricsTimeMs: $0) }
                             )
+                            .equatable()
                         case .interlude(let info):
                             LyricsInterludeView(
                                 info: info,
@@ -4211,9 +4220,8 @@ struct LyricsInterludeView: View {
     }
 }
 
-struct LyricsLineView: View {
+struct LyricsLineView: View, Equatable {
     @EnvironmentObject private var settings: AppSettings
-    @EnvironmentObject private var model: AppViewModel
     var lineIndex: Int
     var line: LyricsLine
     var originalText: String
@@ -4222,6 +4230,23 @@ struct LyricsLineView: View {
     var progress: Double
     var positionMs: Int64
     var alignment: String
+    var pronunciationLoading: Bool
+    var translationLoading: Bool
+    var onSeek: (Int64) -> Void
+
+    static func == (lhs: LyricsLineView, rhs: LyricsLineView) -> Bool {
+        // onSeek is intentionally excluded because the parent provides a stable seek contract.
+        lhs.lineIndex == rhs.lineIndex
+            && lhs.line == rhs.line
+            && lhs.originalText == rhs.originalText
+            && lhs.active == rhs.active
+            && lhs.displayDistance == rhs.displayDistance
+            && lhs.progress == rhs.progress
+            && lhs.positionMs == rhs.positionMs
+            && lhs.alignment == rhs.alignment
+            && lhs.pronunciationLoading == rhs.pronunciationLoading
+            && lhs.translationLoading == rhs.translationLoading
+    }
 
     var body: some View {
         let _ = settings.typographyRevision
@@ -4235,7 +4260,7 @@ struct LyricsLineView: View {
                     .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 14))
                     .foregroundStyle(active ? lineActiveColor.opacity(212.0 / 255.0) : lineSupplementInactiveColor)
                     .multilineTextAlignment(textAlignment)
-            } else if !useVocalPartSupplements, model.lyricsSupplementPronunciationLoading {
+            } else if !useVocalPartSupplements, pronunciationLoading {
                 supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsPronunciation, baseSize: 14)
             }
             if !useVocalPartSupplements, !line.translationText.trimmed.isEmpty {
@@ -4243,7 +4268,7 @@ struct LyricsLineView: View {
                     .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 14))
                     .foregroundStyle(active ? lineActiveColor.opacity(184.0 / 255.0) : lineSupplementInactiveColor)
                     .multilineTextAlignment(textAlignment)
-            } else if !useVocalPartSupplements, model.lyricsSupplementTranslationLoading {
+            } else if !useVocalPartSupplements, translationLoading {
                 supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsTranslation, baseSize: 14)
             }
         }
@@ -4270,7 +4295,7 @@ struct LyricsLineView: View {
 
     private func seekToLine() {
         guard line.isTimed else { return }
-        model.seek(toLyricsTimeMs: line.startTimeMs)
+        onSeek(line.startTimeMs)
     }
 
     private var speakerColors: AppSettings.SpeakerColorSettings {
@@ -4387,7 +4412,7 @@ struct LyricsLineView: View {
                 .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5))
                 .foregroundStyle(active ? speakerColor.opacity(212.0 / 255.0) : inactiveColor)
                 .multilineTextAlignment(textAlignment)
-        } else if model.lyricsSupplementPronunciationLoading {
+        } else if pronunciationLoading {
             supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5)
         }
         if !part.translationText.trimmed.isEmpty {
@@ -4395,7 +4420,7 @@ struct LyricsLineView: View {
                 .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5))
                 .foregroundStyle(active ? speakerColor.opacity(184.0 / 255.0) : inactiveColor)
                 .multilineTextAlignment(textAlignment)
-        } else if model.lyricsSupplementTranslationLoading {
+        } else if translationLoading {
             supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5)
         }
     }
@@ -5331,8 +5356,12 @@ private struct KaraokeDebugPreview: View {
                 displayDistance: 0,
                 progress: 0.52,
                 positionMs: 2_100,
-                alignment: "left"
+                alignment: "left",
+                pronunciationLoading: false,
+                translationLoading: false,
+                onSeek: { _ in }
             )
+            .equatable()
             .frame(width: 330)
 
             Text("System PiP keeps the same vocal stack")
