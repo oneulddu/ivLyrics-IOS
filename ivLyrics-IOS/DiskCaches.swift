@@ -12,14 +12,16 @@ nonisolated final class LyricsDiskCache: @unchecked Sendable {
     private let directory: URL
     private let maxEntries: Int
     private let baseLyricsCache: Bool
+    private let maxAgeMs: Int64?
     private let queue = DispatchQueue(label: "ivlyrics.disk-cache")
 
-    init(namespace: String, maxEntries: Int) {
+    init(namespace: String, maxEntries: Int, maxAgeMs: Int64? = nil) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let safeNamespace = Self.safeNamespace(namespace)
         directory = root.appendingPathComponent("lyrics_cache/\(safeNamespace)", isDirectory: true)
         self.maxEntries = max(16, maxEntries)
         baseLyricsCache = safeNamespace == "base_lyrics"
+        self.maxAgeMs = maxAgeMs.flatMap { $0 > 0 ? $0 : nil }
     }
 
     func get(_ key: String) -> LyricsResult? {
@@ -31,6 +33,11 @@ nonisolated final class LyricsDiskCache: @unchecked Sendable {
                 let envelope = try JSONDecoder().decode(Envelope.self, from: data)
                 guard envelope.version == 1 else { return nil }
                 if baseLyricsCache, (envelope.contributorSchemaVersion ?? 0) < 9 {
+                    return nil
+                }
+                if let maxAgeMs,
+                   (envelope.savedAtMs <= 0 || Int64(Date().timeIntervalSince1970 * 1000) - envelope.savedAtMs > maxAgeMs) {
+                    try? FileManager.default.removeItem(at: file)
                     return nil
                 }
                 guard !envelope.result.lines.isEmpty else { return nil }
@@ -136,13 +143,15 @@ nonisolated final class RawResponseDiskCache: @unchecked Sendable {
 
     private let directory: URL
     private let maxEntries: Int
+    private let maxAgeMs: Int64?
     private let queue = DispatchQueue(label: "ivlyrics.raw-cache")
 
-    init(namespace: String, maxEntries: Int) {
+    init(namespace: String, maxEntries: Int, maxAgeMs: Int64? = nil) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let safeNamespace = namespace.trimmed.lowercased().regexReplacing("[^a-z0-9_-]", with: "_")
         directory = root.appendingPathComponent("lyrics_cache/\(safeNamespace.isEmpty ? "raw" : safeNamespace)", isDirectory: true)
         self.maxEntries = max(16, maxEntries)
+        self.maxAgeMs = maxAgeMs.flatMap { $0 > 0 ? $0 : nil }
     }
 
     func get(_ key: String) -> String {
@@ -152,6 +161,11 @@ nonisolated final class RawResponseDiskCache: @unchecked Sendable {
             do {
                 let envelope = try JSONDecoder().decode(Envelope.self, from: Data(contentsOf: file))
                 guard envelope.version == 1, !envelope.body.isEmpty else { return "" }
+                if let maxAgeMs,
+                   (envelope.savedAtMs <= 0 || Int64(Date().timeIntervalSince1970 * 1000) - envelope.savedAtMs > maxAgeMs) {
+                    try? FileManager.default.removeItem(at: file)
+                    return ""
+                }
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
                 return envelope.body
             } catch {

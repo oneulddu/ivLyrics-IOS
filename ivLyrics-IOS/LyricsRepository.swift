@@ -20,15 +20,29 @@ actor LyricsRepository {
     private let syncedFallbackMinArtistScore = 0.45
     private let spotifyTokenMaxAgeMs: Int64 = 50 * 60 * 1000
     private let spotifyTokenRefreshGraceMs: Int64 = 30_000
+    private static let lyricsCacheMaxAgeMs: Int64 = 7 * 24 * 60 * 60 * 1000
     private let openDbFreshMs: Int64 = 60_000
     private let openDbUnavailableRetryMs: Int64 = 5 * 60 * 1000
     private let syncDataServerCacheBypassMs: Int64 = 30 * 1000
     private let networkRequestTimeout: TimeInterval = 47
     private let lrclibSignatureTimeout: TimeInterval = 18
 
-    private var cache: [String: LyricsResult] = [:]
-    private let diskCache = LyricsDiskCache(namespace: "base_lyrics", maxEntries: 350)
-    private let syncDataResponseCache = RawResponseDiskCache(namespace: "sync_data_api", maxEntries: 700)
+    private struct MemoryLyricsCacheEntry {
+        var result: LyricsResult
+        var savedAtMs: Int64
+    }
+
+    private var cache: [String: MemoryLyricsCacheEntry] = [:]
+    private let diskCache = LyricsDiskCache(
+        namespace: "base_lyrics",
+        maxEntries: 350,
+        maxAgeMs: LyricsRepository.lyricsCacheMaxAgeMs
+    )
+    private let syncDataResponseCache = RawResponseDiskCache(
+        namespace: "sync_data_api",
+        maxEntries: 700,
+        maxAgeMs: LyricsRepository.lyricsCacheMaxAgeMs
+    )
     private let defaults = UserDefaults.standard
     private var spotifyAccessToken = ""
     private var spotifyTokenSourceKey = ""
@@ -70,6 +84,20 @@ actor LyricsRepository {
         var logs: [String]
     }
 
+    private func getMemoryCachedLyrics(_ key: String) -> LyricsResult? {
+        guard let entry = cache[key] else { return nil }
+        if nowMs() - entry.savedAtMs > Self.lyricsCacheMaxAgeMs {
+            cache.removeValue(forKey: key)
+            return nil
+        }
+        return entry.result
+    }
+
+    private func putMemoryCachedLyrics(_ key: String, result: LyricsResult) {
+        guard !key.trimmed.isEmpty, !result.lines.isEmpty else { return }
+        cache[key] = MemoryLyricsCacheEntry(result: result, savedAtMs: nowMs())
+    }
+
     func loadLyrics(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
@@ -104,14 +132,22 @@ actor LyricsRepository {
             )
         }
 
-        if let cached = cache[key] {
-            log("cache hit: \(track.title) / \(track.artist)")
-            return LoadedLyrics(trackKey: key, result: cached, artworkURL: nil, logs: logs, resolvedIsrc: cached.isrc, resolvedSpotifyTrackId: cached.spotifyTrackId)
+        var cachedBase: LyricsResult?
+        if let cached = getMemoryCachedLyrics(key) {
+            if cached.karaoke {
+                log("cache hit: \(track.title) / \(track.artist)")
+                return LoadedLyrics(trackKey: key, result: cached, artworkURL: nil, logs: logs, resolvedIsrc: cached.isrc, resolvedSpotifyTrackId: cached.spotifyTrackId)
+            }
+            cachedBase = cached
+            log("cache hit: base lyrics, rechecking OpenDB sync-data")
         }
-        if let diskCached = diskCache.get(key) {
-            cache[key] = diskCached
-            log("disk cache hit: sync-data/LRCLIB lyrics / contributors=\(diskCached.contributors.count)")
-            return LoadedLyrics(trackKey: key, result: diskCached, artworkURL: nil, logs: logs, resolvedIsrc: diskCached.isrc, resolvedSpotifyTrackId: diskCached.spotifyTrackId)
+        if cachedBase == nil, let diskCached = diskCache.get(key) {
+            if diskCached.karaoke {
+                log("disk cache hit: sync-data/LRCLIB lyrics / contributors=\(diskCached.contributors.count)")
+                return LoadedLyrics(trackKey: key, result: diskCached, artworkURL: nil, logs: logs, resolvedIsrc: diskCached.isrc, resolvedSpotifyTrackId: diskCached.spotifyTrackId)
+            }
+            cachedBase = diskCached
+            log("base lyrics disk cache hit: rechecking OpenDB sync-data before reuse")
         }
 
         log("track: \"\(track.title)\" / \"\(track.artist)\"" + (track.album.isEmpty ? "" : " / album=\"\(track.album)\"") + " / duration=\(track.durationMs)ms" + (track.isrc.isEmpty ? "" : " / player ISRC=\(track.isrc)"))
@@ -120,15 +156,31 @@ actor LyricsRepository {
         let spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
             await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
         }
-        let isrc = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.isrc, track.isrc)
-        let spotifyTrackId = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.spotifyId, track.trackId)
-        let isrcSource = isrc.isEmpty ? "" : ((spotifyMatch?.isrc.isEmpty == false) ? "Spotify Web API" : "player metadata")
+        let isrc = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.isrc, track.isrc, cachedBase?.isrc)
+        let spotifyTrackId = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.spotifyId, track.trackId, cachedBase?.spotifyTrackId)
+        let hasSpotifyIsrc = spotifyMatch?.isrc.isEmpty == false
+        let isrcFromCache = !hasSpotifyIsrc && track.isrc.isEmpty && cachedBase?.isrc.isEmpty == false
+        let isrcSource = isrc.isEmpty ? "" : (hasSpotifyIsrc ? "Spotify Web API" : (isrcFromCache ? "lyrics cache" : "player metadata"))
         log(isrc.isEmpty ? "isrc: unavailable after Spotify lookup" : "isrc: \(isrc) (\(isrcSource))")
         if !isrc.isEmpty {
             await publishResolvedMetadata(isrc: isrc, spotifyTrackId: spotifyTrackId, artworkURL: spotifyMatch?.artworkURL)
         }
 
         let syncData = isrc.isEmpty ? nil : await fetchSyncData(isrc: isrc, track: track, spotifyMatch: spotifyMatch, log: log)
+        if let cachedBase {
+            let result = applySyncDataToCachedBase(
+                cachedBase,
+                syncData: syncData,
+                track: track,
+                isrc: isrc,
+                spotifyTrackId: spotifyTrackId,
+                settings: settings,
+                log: log
+            )
+            putMemoryCachedLyrics(key, result: result)
+            diskCache.put(key, result: result)
+            return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+        }
         var candidate: LrclibCandidate?
         var loadedFromSyncSource = false
 
@@ -190,7 +242,7 @@ actor LyricsRepository {
                     spotifyTrackId: spotifyTrackId,
                     contributors: syncData.contributors
                 )
-                cache[key] = result
+                putMemoryCachedLyrics(key, result: result)
                 diskCache.put(key, result: result)
                 return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
             }
@@ -212,9 +264,54 @@ actor LyricsRepository {
             isrc: isrc,
             spotifyTrackId: spotifyTrackId
         )
-        cache[key] = result
+        putMemoryCachedLyrics(key, result: result)
         diskCache.put(key, result: result)
         return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+    }
+
+    private func applySyncDataToCachedBase(
+        _ cachedBase: LyricsResult,
+        syncData: SyncDataResult?,
+        track: TrackSnapshot,
+        isrc: String,
+        spotifyTrackId: String,
+        settings: AppSettings.Snapshot,
+        log: (String) -> Void
+    ) -> LyricsResult {
+        let baseLines = cachedBase.lines
+        log("lyrics base: lines=\(baseLines.count) / source=cache")
+        if let syncData {
+            let applied = SyncDataApplier.applyWithDiagnostics(baseLyrics: baseLines, syncBody: syncData.syncBody, track: track)
+            for diagnostic in applied.diagnostics {
+                log("sync-data apply: \(diagnostic)")
+            }
+            if !applied.lines.isEmpty {
+                log("sync-data applied to cached lyrics: karaoke lines=\(applied.lines.count) / vocalParts=\(applied.lines.reduce(0) { $0 + $1.vocalParts.count })")
+                return LyricsResult(
+                    lines: applied.lines,
+                    providerLabel: "ivLyrics sync-data + LRCLIB",
+                    detail: ui("repo.detail.sync_applied_search", settings: settings),
+                    karaoke: true,
+                    isrc: isrc,
+                    spotifyTrackId: spotifyTrackId,
+                    contributors: syncData.contributors
+                )
+            }
+            log("sync-data apply failed for cached lyrics: keeping LRCLIB line lyrics")
+        }
+
+        let detail = isrc.isEmpty
+            ? ui("repo.detail.no_spotify_isrc", settings: settings)
+            : (syncData == nil ? cachedBase.detail : ui("repo.detail.sync_apply_failed", settings: settings))
+        return LyricsResult(
+            lines: baseLines,
+            providerLabel: cachedBase.providerLabel,
+            detail: detail,
+            karaoke: false,
+            isrc: IvLyricsUtilities.firstNonEmpty(isrc, cachedBase.isrc),
+            spotifyTrackId: IvLyricsUtilities.firstNonEmpty(spotifyTrackId, cachedBase.spotifyTrackId),
+            contributors: cachedBase.contributors
+        )
     }
 
     func clearCache() {
@@ -277,7 +374,7 @@ actor LyricsRepository {
             spotifyTrackId: track?.trackId ?? ""
         )
         if let key = track?.stableKey, !key.isEmpty {
-            cache[key] = result
+            putMemoryCachedLyrics(key, result: result)
             diskCache.put(key, result: result)
         }
         return result
@@ -752,18 +849,33 @@ actor LyricsRepository {
         if unavailableUntil > now {
             return nil
         }
-        if let cached = defaults.string(forKey: "sync_data_opendb_provider_map"),
-           !cached.isEmpty,
+        let cached = defaults.string(forKey: "sync_data_opendb_provider_map") ?? ""
+        if !cached.isEmpty,
            now - Int64(defaults.double(forKey: "sync_data_opendb_fetched_at_ms")) < openDbFreshMs,
            let object = try? jsonObject(cached) {
             return object
         }
         do {
-            let refreshed = try await refreshOpenDbProviderMap(log: log)
+            log("sync-data opendb manifest request")
+            let manifest = try jsonObject(try await get("\(openDbRoot)/data/manifest.json"))
+            let signature = openDbManifestSignature(manifest)
+            if !cached.isEmpty,
+               !signature.isEmpty,
+               signature == (defaults.string(forKey: "sync_data_opendb_manifest_signature") ?? ""),
+               let providerMap = try? jsonObject(cached) {
+                defaults.set(Double(now), forKey: "sync_data_opendb_fetched_at_ms")
+                defaults.set(0.0, forKey: "sync_data_opendb_unavailable_until_ms")
+                log("sync-data opendb manifest unchanged: cached provider map reused")
+                return providerMap
+            }
+
+            let refreshed = try await refreshOpenDbProviderMap(manifest: manifest, log: log)
             if let data = try? JSONSerialization.data(withJSONObject: refreshed),
                let raw = String(data: data, encoding: .utf8) {
                 defaults.set(raw, forKey: "sync_data_opendb_provider_map")
                 defaults.set(Double(now), forKey: "sync_data_opendb_fetched_at_ms")
+                defaults.set(signature, forKey: "sync_data_opendb_manifest_signature")
+                defaults.set(stringValue((manifest["base"] as? [String: Any])?["date"]), forKey: "sync_data_opendb_base_date")
                 defaults.set(0.0, forKey: "sync_data_opendb_unavailable_until_ms")
             }
             return refreshed
@@ -773,9 +885,30 @@ actor LyricsRepository {
         }
     }
 
-    private func refreshOpenDbProviderMap(log: (String) -> Void) async throws -> [String: Any] {
-        log("sync-data opendb manifest request")
-        let manifest = try jsonObject(try await get("\(openDbRoot)/data/manifest.json"))
+    private func openDbManifestSignature(_ manifest: [String: Any]) -> String {
+        let deltas = (manifest["deltas"] as? [[String: Any]]) ?? []
+        let base = manifest["base"] as? [String: Any]
+        let current = manifest["current"] as? [String: Any]
+        let signatureObject: [String: Any] = [
+            "schema": (manifest["schema"] as? NSNumber)?.intValue ?? 0,
+            "base": IvLyricsUtilities.firstNonEmpty(stringValue(base?["sha256"]), stringValue(base?["url"])),
+            "deltas": deltas.map {
+                IvLyricsUtilities.firstNonEmpty(stringValue($0["sha256"]), stringValue($0["url"]), stringValue($0["date"]))
+            },
+            "current": IvLyricsUtilities.firstNonEmpty(
+                stringValue(current?["sha256"]),
+                stringValue(current?["updatedAt"]),
+                stringValue(current?["url"])
+            )
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: signatureObject, options: [.sortedKeys]),
+              let signature = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return signature
+    }
+
+    private func refreshOpenDbProviderMap(manifest: [String: Any], log: (String) -> Void) async throws -> [String: Any] {
         var providerMap: [String: Set<String>] = [:]
         if let base = manifest["base"] as? [String: Any] {
             try await mergeOpenDbProviderFile(providerMap: &providerMap, relativeUrl: stringValue(base["url"]), delta: false)
@@ -834,6 +967,8 @@ actor LyricsRepository {
     private func clearOpenDbCache() {
         defaults.removeObject(forKey: "sync_data_opendb_provider_map")
         defaults.removeObject(forKey: "sync_data_opendb_fetched_at_ms")
+        defaults.removeObject(forKey: "sync_data_opendb_manifest_signature")
+        defaults.removeObject(forKey: "sync_data_opendb_base_date")
         defaults.removeObject(forKey: "sync_data_opendb_unavailable_until_ms")
     }
 
