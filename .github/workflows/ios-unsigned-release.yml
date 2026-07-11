@@ -134,23 +134,33 @@ jobs:
             "$VERSION_PATH"
             "$ALTSTORE_SOURCE_PATH"
           )
-          args=(--latest)
-          if [[ "$PRERELEASE" == "true" ]]; then
-            args=(--prerelease --latest=false)
-          fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --target "$RELEASE_TARGET" \
-              --title "ivLyrics iOS $RELEASE_TAG" \
-              --notes-file "$NOTES_PATH" \
-              "${args[@]}"
+            if [[ "$PRERELEASE" == "true" ]]; then
+              gh release edit "$RELEASE_TAG" \
+                --target "$RELEASE_TARGET" \
+                --title "ivLyrics iOS $RELEASE_TAG" \
+                --notes-file "$NOTES_PATH" \
+                --prerelease
+            else
+              gh release edit "$RELEASE_TAG" \
+                --target "$RELEASE_TARGET" \
+                --title "ivLyrics iOS $RELEASE_TAG" \
+                --notes-file "$NOTES_PATH"
+            fi
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
-            gh release create "$RELEASE_TAG" "${assets[@]}" \
-              --target "$RELEASE_TARGET" \
-              --title "ivLyrics iOS $RELEASE_TAG" \
-              --notes-file "$NOTES_PATH" \
-              "${args[@]}"
+            if [[ "$PRERELEASE" == "true" ]]; then
+              gh release create "$RELEASE_TAG" "${assets[@]}" \
+                --target "$RELEASE_TARGET" \
+                --title "ivLyrics iOS $RELEASE_TAG" \
+                --notes-file "$NOTES_PATH" \
+                --prerelease
+            else
+              gh release create "$RELEASE_TAG" "${assets[@]}" \
+                --target "$RELEASE_TARGET" \
+                --title "ivLyrics iOS $RELEASE_TAG" \
+                --notes-file "$NOTES_PATH"
+            fi
           fi
 
       - name: Update AltStore source on main
