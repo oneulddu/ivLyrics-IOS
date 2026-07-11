@@ -42,6 +42,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
 
     var isEngaged: Bool { active || startReason != nil }
     var needsStateUpdates: Bool { active || startReason != nil || automaticPreparationEnabled }
+    var needsFrequentStateUpdates: Bool { active || startReason != nil }
 
     var onSetPlaying: ((Bool) -> Void)?
     var onSkip: ((Int64) -> Void)?
@@ -129,6 +130,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     func update(
         track: TrackSnapshot?,
         lyrics: LyricsResult,
+        activeLineIndex: Int,
         positionMs: Int64,
         title: String,
         artist: String,
@@ -138,6 +140,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let nextState = RenderState(
             track: track,
             lines: lyrics.lines,
+            activeLineIndex: activeLineIndex,
             positionMs: positionMs,
             title: title,
             artist: artist,
@@ -500,6 +503,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             vocalParts: [firstPart, secondPart],
             translationText: "Android PiP visual parity"
         )]
+        state.activeLineIndex = 0
         state.positionMs = 4_800
         state.title = "Midnight Signal"
         state.artist = "ivLyrics"
@@ -681,7 +685,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let nextSize = max(11, primarySize * 0.56)
         let renderedPrimarySize = state.typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: primarySize)
         let visiblePartCount = active.line.vocalParts.reduce(0) { count, part in
-            LyricsTimelineDisplayBuilder.vocalPartDisplayText(part).trimmed.isEmpty ? count : count + 1
+            LyricsTimelineDisplayBuilder.hasDisplayableVocalPartText(part) ? count + 1 : count
         }
         let stackMultiplier = 2.45 + CGFloat(max(0, min(3, visiblePartCount - 1))) * 1.35
         let primaryHeight = min(lyricRect.height * 0.74, renderedPrimarySize * stackMultiplier)
@@ -998,6 +1002,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private struct RenderState {
         var track: TrackSnapshot?
         var lines: [LyricsLine]
+        var activeLineIndex: Int
         var positionMs: Int64
         var title: String
         var artist: String
@@ -1019,6 +1024,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         static let empty = RenderState(
             track: nil,
             lines: [],
+            activeLineIndex: -1,
             positionMs: 0,
             title: "ivLyrics",
             artist: "",
@@ -1074,22 +1080,11 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         }
 
         var activeLine: ActiveLine? {
-            guard !lines.isEmpty else { return nil }
-            var index = 0
-            for candidate in lines.indices {
-                let line = lines[candidate]
-                if positionMs >= line.startTimeMs { index = candidate }
-                if line.endTimeMs > line.startTimeMs,
-                   positionMs >= line.startTimeMs,
-                   positionMs < line.endTimeMs {
-                    index = candidate
-                    break
-                }
-            }
-            let line = lines[index]
+            guard lines.indices.contains(activeLineIndex) else { return nil }
+            let line = lines[activeLineIndex]
             let duration = max(1, line.endTimeMs - line.startTimeMs)
             let progress = max(0, min(1, CGFloat(positionMs - line.startTimeMs) / CGFloat(duration)))
-            return ActiveLine(line: line, index: index, progress: progress)
+            return ActiveLine(line: line, index: activeLineIndex, progress: progress)
         }
 
         var nextLineText: String? {
@@ -1166,6 +1161,9 @@ struct PictureInPictureKaraokeContent: View {
     var typography: AppSettings.TypographySettings = .defaults
 
     var body: some View {
+        let displayParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).filter(
+            LyricsTimelineDisplayBuilder.hasDisplayableVocalPartText
+        )
         Group {
             if displayParts.isEmpty {
                 karaokeText(
@@ -1183,7 +1181,8 @@ struct PictureInPictureKaraokeContent: View {
                 )
             } else {
                 VStack(alignment: horizontalAlignment, spacing: 0) {
-                    ForEach(Array(displayParts.enumerated()), id: \.offset) { index, part in
+                    ForEach(displayParts.indices, id: \.self) { index in
+                        let part = displayParts[index]
                         let partActive = positionMs >= part.startTimeMs
                         karaokeText(
                             text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
@@ -1199,18 +1198,13 @@ struct PictureInPictureKaraokeContent: View {
                             inactiveDistance: partActive ? 0 : 0.45,
                             effectRowSeed: index
                         )
-                        .padding(.top, vocalPartTopSpacing(index: index))
+                        .padding(.top, vocalPartTopSpacing(index: index, parts: displayParts))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: frameAlignment)
             }
         }
         .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: fontSize))
-    }
-
-    private var displayParts: [LyricsLine.VocalPart] {
-        LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
-            .filter { !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty }
     }
 
     private var horizontalAlignment: HorizontalAlignment {
@@ -1221,9 +1215,9 @@ struct PictureInPictureKaraokeContent: View {
         }
     }
 
-    private func vocalPartTopSpacing(index: Int) -> CGFloat {
-        guard index > 0, displayParts.indices.contains(index) else { return 0 }
-        return displayParts[index].furiganaText.contains("<ruby>") ? 8 : 4
+    private func vocalPartTopSpacing(index: Int, parts: [LyricsLine.VocalPart]) -> CGFloat {
+        guard index > 0, parts.indices.contains(index) else { return 0 }
+        return parts[index].furiganaText.contains("<ruby>") ? 8 : 4
     }
 
     private func karaokeText(

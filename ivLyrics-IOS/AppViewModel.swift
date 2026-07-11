@@ -21,6 +21,7 @@ final class AppViewModel: ObservableObject {
     ]
     private static let playbackClockInterval: TimeInterval = 1.0 / 30.0
     private static let playbackClockTolerance: TimeInterval = 0.005
+    private static let inactivePictureInPictureUpdateInterval: TimeInterval = 1.0
 
     @Published var inputTitle: String
     @Published var inputArtist: String
@@ -144,6 +145,7 @@ final class AppViewModel: ObservableObject {
     private var youtubeBackgroundLoadTask: Task<Void, Never>?
     private var updateTask: Task<Void, Never>?
     private var timer: Timer?
+    private var lastPictureInPictureUpdateUptime: TimeInterval = 0
     private var cachedTimelineContext: LyricsTimelineContext?
     private var audioRouteObserver: NSObjectProtocol?
     private var creatorProfileUrlCache: [String: URL] = [:]
@@ -342,10 +344,6 @@ final class AppViewModel: ObservableObject {
 
     var effectiveSelectedRuleSourceLang: String {
         effectiveSelectedSourceLang(lines: baseLyricsResult.lines.isEmpty ? lyricsResult.lines : baseLyricsResult.lines)
-    }
-
-    var activeLineIndex: Int {
-        activeLineIndex(at: adjustedPositionMs)
     }
 
     func refreshLocalizedStatusStrings() {
@@ -2292,21 +2290,6 @@ final class AppViewModel: ObservableObject {
         return fallback
     }
 
-    private func activeLineIndex(at position: Int64) -> Int {
-        guard !lyricsResult.lines.isEmpty else { return -1 }
-        var candidate = 0
-        for index in lyricsResult.lines.indices {
-            let line = lyricsResult.lines[index]
-            if position >= line.startTimeMs {
-                candidate = index
-            }
-            if line.endTimeMs > line.startTimeMs, position >= line.startTimeMs, position < line.endTimeMs {
-                return index
-            }
-        }
-        return candidate
-    }
-
     private static func firstLyricTimeMs(in result: LyricsResult) -> Int64 {
         var best = Int64.max
         for line in result.lines {
@@ -2341,15 +2324,25 @@ final class AppViewModel: ObservableObject {
 
     private func updatePictureInPictureState(force: Bool = false) {
         guard force || currentTrack != nil || pictureInPictureController.needsStateUpdates else { return }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if !force, !pictureInPictureController.needsFrequentStateUpdates {
+            guard uptime - lastPictureInPictureUpdateUptime >= Self.inactivePictureInPictureUpdateInterval else {
+                return
+            }
+        }
+        let positionMs = adjustedPositionMs
+        let context = timelineContext
         pictureInPictureController.update(
             track: currentTrack,
             lyrics: lyricsResult,
-            positionMs: adjustedPositionMs,
+            activeLineIndex: context.activeLineIndex(at: positionMs),
+            positionMs: positionMs,
             title: titleText,
             artist: artistText,
             statusText: pipLyricsStatusText,
             settings: settings.snapshot
         )
+        lastPictureInPictureUpdateUptime = ProcessInfo.processInfo.systemUptime
     }
 
     private var pipLyricsStatusText: String {

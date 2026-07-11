@@ -3545,11 +3545,15 @@ struct LyricsTimelineView: View {
             trackDurationMs: model.durationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )?.id
-        let activeDisplayIndex = activeItemID.flatMap { id in
+        let matchedActiveDisplayIndex = activeItemID.flatMap { id in
             items.firstIndex { $0.id == id }
-        } ?? max(0, items.firstIndex { item in
+        }
+        let fallbackActiveLineIndex = matchedActiveDisplayIndex == nil
+            ? timelineContext.activeLineIndex(at: position)
+            : -1
+        let activeDisplayIndex = matchedActiveDisplayIndex ?? max(0, items.firstIndex { item in
             if case .line(let index, _) = item {
-                return index == model.activeLineIndex
+                return index == fallbackActiveLineIndex
             }
             return false
         } ?? 0)
@@ -3574,7 +3578,7 @@ struct LyricsTimelineView: View {
                     Group {
                         switch item {
                         case .line(let index, let line):
-                            let lineActive = itemActive || (activeItemID == nil && index == model.activeLineIndex)
+                            let lineActive = itemActive || (activeItemID == nil && index == fallbackActiveLineIndex)
                             LyricsLineView(
                                 lineIndex: index,
                                 line: line,
@@ -3829,21 +3833,203 @@ struct InterludeInfo {
     var automatic: Bool
 }
 
+private let lyricsTimelineInterludeMinDurationMs: Int64 = 500
+
 struct LyricsTimelineContext {
     let lines: [LyricsLine]
-    let candidateTexts: [String]
     let isMarker: [Bool]
+    fileprivate let nextRenderableLineStartTimes: [Int64]
+    fileprivate let lastLyricEndTimes: [Int64]
+    fileprivate let hasRenderableMarkerBeforeNextLine: [Bool]
+    fileprivate let firstRenderableLineIndex: Int?
+    fileprivate let firstUntimedRenderableLineIndex: Int?
+
+    private let lineStartTimes: [Int64]
+    // Prefix maxima preserve the legacy "first overlapping line" behavior while allowing binary search.
+    private let activeLineEndTimePrefix: [Int64]
+    private let lineStartTimesAreSorted: Bool
+    private let renderableTimedLineIndices: [Int]
+    private let renderableTimedLineStartTimes: [Int64]
+    private let renderableTimedLineEndTimePrefix: [Int64]
+    private let renderableTimedLineStartTimesAreSorted: Bool
 
     init(lines: [LyricsLine]) {
         self.lines = lines
-        let candidateTexts = lines.map(LyricsTimelineDisplayBuilder.candidateText)
-        self.candidateTexts = candidateTexts
-        isMarker = candidateTexts.map(LyricsTimelineDisplayBuilder.isInterludeMarkerText)
+        let markers = lines.map {
+            LyricsTimelineDisplayBuilder.isInterludeMarkerText(
+                LyricsTimelineDisplayBuilder.candidateText($0)
+            )
+        }
+        isMarker = markers
+
+        var nextStartTimes = Array(repeating: Int64(0), count: lines.count)
+        var markerBeforeNextLine = Array(repeating: false, count: lines.count)
+        var nextRenderableStart: Int64 = 0
+        var hasRenderableMarker = false
+        for index in lines.indices.reversed() {
+            nextStartTimes[index] = nextRenderableStart
+            markerBeforeNextLine[index] = hasRenderableMarker
+
+            let line = lines[index]
+            guard line.isTimed else { continue }
+            if markers[index] {
+                let markerEnd = max(line.endTimeMs, nextRenderableStart)
+                if markerEnd - line.startTimeMs > lyricsTimelineInterludeMinDurationMs {
+                    hasRenderableMarker = true
+                }
+            } else {
+                nextRenderableStart = line.startTimeMs
+                hasRenderableMarker = false
+            }
+        }
+        nextRenderableLineStartTimes = nextStartTimes
+        hasRenderableMarkerBeforeNextLine = markerBeforeNextLine
+        lastLyricEndTimes = lines.map(LyricsTimelineDisplayBuilder.lastLyricEndTime)
+        firstRenderableLineIndex = lines.indices.first {
+            lines[$0].isTimed && !markers[$0]
+        }
+        firstUntimedRenderableLineIndex = lines.indices.first {
+            !lines[$0].isTimed && !markers[$0]
+        }
+
+        let startTimes = lines.map(\.startTimeMs)
+        lineStartTimes = startTimes
+        activeLineEndTimePrefix = Self.activeEndTimePrefix(lines)
+        lineStartTimesAreSorted = Self.isNondecreasing(startTimes)
+
+        let timedIndices = lines.indices.filter {
+            lines[$0].isTimed && !markers[$0]
+        }
+        let timedStartTimes = timedIndices.map { lines[$0].startTimeMs }
+        renderableTimedLineIndices = timedIndices
+        renderableTimedLineStartTimes = timedStartTimes
+        renderableTimedLineEndTimePrefix = Self.activeEndTimePrefix(
+            timedIndices.map { lines[$0] }
+        )
+        renderableTimedLineStartTimesAreSorted = Self.isNondecreasing(timedStartTimes)
+    }
+
+    func activeLineIndex(at positionMs: Int64) -> Int {
+        guard !lines.isEmpty else { return -1 }
+        guard lineStartTimesAreSorted else {
+            var candidate = 0
+            for index in lines.indices {
+                let line = lines[index]
+                if positionMs >= line.startTimeMs {
+                    candidate = index
+                }
+                if line.endTimeMs > line.startTimeMs,
+                   positionMs >= line.startTimeMs,
+                   positionMs < line.endTimeMs {
+                    return index
+                }
+            }
+            return candidate
+        }
+
+        guard let candidate = Self.lastIndex(notAfter: positionMs, in: lineStartTimes) else {
+            return 0
+        }
+        guard activeLineEndTimePrefix[candidate] > positionMs else {
+            return candidate
+        }
+        return Self.firstActiveIndex(
+            at: positionMs,
+            through: candidate,
+            endTimePrefix: activeLineEndTimePrefix
+        )
+    }
+
+    fileprivate func activeRenderableLineIndex(at positionMs: Int64) -> Int? {
+        guard !renderableTimedLineIndices.isEmpty else { return nil }
+        guard renderableTimedLineStartTimesAreSorted else {
+            return renderableTimedLineIndices.first { index in
+                let line = lines[index]
+                return positionMs >= line.startTimeMs && positionMs < line.endTimeMs
+            }
+        }
+        guard let candidate = Self.lastIndex(notAfter: positionMs, in: renderableTimedLineStartTimes),
+              renderableTimedLineEndTimePrefix[candidate] > positionMs else {
+            return nil
+        }
+        let offset = Self.firstActiveIndex(
+            at: positionMs,
+            through: candidate,
+            endTimePrefix: renderableTimedLineEndTimePrefix
+        )
+        return renderableTimedLineIndices[offset]
+    }
+
+    fileprivate func latestRenderableLineIndex(at positionMs: Int64) -> Int? {
+        guard !renderableTimedLineIndices.isEmpty else { return nil }
+        if renderableTimedLineStartTimesAreSorted {
+            guard let offset = Self.lastIndex(notAfter: positionMs, in: renderableTimedLineStartTimes) else {
+                return nil
+            }
+            return renderableTimedLineIndices[offset]
+        }
+        var fallback: Int?
+        for index in renderableTimedLineIndices where positionMs >= lines[index].startTimeMs {
+            fallback = index
+        }
+        return fallback
+    }
+
+    private static func activeEndTimePrefix(_ lines: [LyricsLine]) -> [Int64] {
+        var result: [Int64] = []
+        result.reserveCapacity(lines.count)
+        var latestEnd = Int64.min
+        for line in lines {
+            if line.endTimeMs > line.startTimeMs {
+                latestEnd = max(latestEnd, line.endTimeMs)
+            }
+            result.append(latestEnd)
+        }
+        return result
+    }
+
+    private static func isNondecreasing(_ values: [Int64]) -> Bool {
+        guard values.count > 1 else { return true }
+        for index in 1..<values.count where values[index] < values[index - 1] {
+            return false
+        }
+        return true
+    }
+
+    private static func lastIndex(notAfter positionMs: Int64, in startTimes: [Int64]) -> Int? {
+        var lower = 0
+        var upper = startTimes.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if startTimes[middle] <= positionMs {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        return lower == 0 ? nil : lower - 1
+    }
+
+    private static func firstActiveIndex(
+        at positionMs: Int64,
+        through upperBound: Int,
+        endTimePrefix: [Int64]
+    ) -> Int {
+        var lower = 0
+        var upper = upperBound
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if endTimePrefix[middle] > positionMs {
+                upper = middle
+            } else {
+                lower = middle + 1
+            }
+        }
+        return lower
     }
 }
 
 enum LyricsTimelineDisplayBuilder {
-    private static let interludeMinDurationMs: Int64 = 500
     private static let trailingInterludeDelayMs: Int64 = 3_500
     private static let vocalPartCenterThreshold = 4
 
@@ -3856,16 +4042,29 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     static func orderedVocalParts(_ parts: [LyricsLine.VocalPart]) -> [LyricsLine.VocalPart] {
-        parts.filter { $0.role == "lead" } + parts.filter { $0.role != "lead" }
+        guard parts.count > 1 else { return parts }
+        var ordered: [LyricsLine.VocalPart] = []
+        ordered.reserveCapacity(parts.count)
+        for part in parts where part.role == "lead" {
+            ordered.append(part)
+        }
+        for part in parts where part.role != "lead" {
+            ordered.append(part)
+        }
+        return ordered
     }
 
     static func vocalPartDisplayText(_ part: LyricsLine.VocalPart) -> String {
         part.text.trimmed.isEmpty ? part.syllables.map(\.text).joined() : part.text
     }
 
+    static func hasDisplayableVocalPartText(_ part: LyricsLine.VocalPart) -> Bool {
+        if !part.text.trimmed.isEmpty { return true }
+        return part.syllables.contains { !$0.text.trimmed.isEmpty }
+    }
+
     static func shouldUseVocalPartSupplements(_ line: LyricsLine) -> Bool {
-        let parts = orderedVocalParts(line.vocalParts)
-        return hasVocalPartSupplements(parts) || displayableVocalPartCount(parts) > 1
+        hasVocalPartSupplements(line.vocalParts) || displayableVocalPartCount(line.vocalParts) > 1
     }
 
     static func supplementPlaceholderText(_ line: LyricsLine) -> String {
@@ -3967,19 +4166,12 @@ enum LyricsTimelineDisplayBuilder {
             }
         }
 
-        for index in lines.indices {
-            let line = lines[index]
-            if !line.isTimed, !context.isMarker[index] {
-                return .line(index: index, line: line)
-            }
+        if let index = context.firstUntimedRenderableLineIndex {
+            return .line(index: index, line: lines[index])
         }
 
-        for index in lines.indices {
-            let line = lines[index]
-            guard line.isTimed, !context.isMarker[index] else { continue }
-            if positionMs >= line.startTimeMs, positionMs < line.endTimeMs {
-                return .line(index: index, line: line)
-            }
+        if let index = context.activeRenderableLineIndex(at: positionMs) {
+            return .line(index: index, line: lines[index])
         }
 
         if let prelude = previewPreludeInfo(context: context, positionMs: positionMs) {
@@ -3995,15 +4187,10 @@ enum LyricsTimelineDisplayBuilder {
             return .interlude(trailing)
         }
 
-        var fallback: LyricsTimelineDisplayItem?
-        for index in lines.indices {
-            let line = lines[index]
-            guard line.isTimed, !context.isMarker[index] else { continue }
-            if positionMs >= line.startTimeMs {
-                fallback = .line(index: index, line: line)
-            }
+        if let index = context.latestRenderableLineIndex(at: positionMs) {
+            return .line(index: index, line: lines[index])
         }
-        return fallback
+        return nil
     }
 
     static func scrollTargetID(
@@ -4073,7 +4260,7 @@ enum LyricsTimelineDisplayBuilder {
 
     private static func displayableVocalPartCount(_ parts: [LyricsLine.VocalPart]) -> Int {
         parts.reduce(0) { count, part in
-            vocalPartDisplayText(part).trimmed.isEmpty ? count : count + 1
+            hasDisplayableVocalPartText(part) ? count + 1 : count
         }
     }
 
@@ -4093,9 +4280,9 @@ enum LyricsTimelineDisplayBuilder {
 
     private static func markerInterludeInfo(context: LyricsTimelineContext, line: LyricsLine, index: Int, count: Int) -> InterludeInfo? {
         guard line.isTimed, context.isMarker[index] else { return nil }
-        let nextStart = nextRenderableLineStartAfter(context: context, index: index)
+        let nextStart = context.nextRenderableLineStartTimes[index]
         let end = max(line.endTimeMs, nextStart)
-        guard end - line.startTimeMs > interludeMinDurationMs else { return nil }
+        guard end - line.startTimeMs > lyricsTimelineInterludeMinDurationMs else { return nil }
         return InterludeInfo(startTimeMs: line.startTimeMs, endTimeMs: end, kind: instrumentalKind(index: index, count: count), automatic: false)
     }
 
@@ -4111,25 +4298,25 @@ enum LyricsTimelineDisplayBuilder {
         guard autoInstrumentalBreakEnabled,
               line.isTimed,
               !context.isMarker[index],
-              !hasRenderableInterludeMarkerBeforeNextRenderableLine(context: context, index: index, count: count) else {
+              !context.hasRenderableMarkerBeforeNextLine[index] else {
             return nil
         }
-        let lyricEnd = lastLyricEndTime(line)
+        let lyricEnd = context.lastLyricEndTimes[index]
         guard lyricEnd >= 0 else { return nil }
         let start = lyricEnd + trailingInterludeDelayMs
-        let nextStart = nextRenderableLineStartAfter(context: context, index: index)
+        let nextStart = context.nextRenderableLineStartTimes[index]
         let end = nextStart > start ? nextStart : (index >= max(0, count - 1) ? trackDurationMs : 0)
-        guard end - start > interludeMinDurationMs else { return nil }
+        guard end - start > lyricsTimelineInterludeMinDurationMs else { return nil }
         let info = InterludeInfo(startTimeMs: start, endTimeMs: end, kind: nextStart > 0 ? "break" : "postlude", automatic: true)
         return contains(info, positionMs) ? info : nil
     }
 
     private static func previewPreludeInfo(context: LyricsTimelineContext, positionMs: Int64) -> InterludeInfo? {
-        guard let firstIndex = firstRenderableLineIndex(context: context) else { return nil }
+        guard let firstIndex = context.firstRenderableLineIndex else { return nil }
         let firstLine = context.lines[firstIndex]
         guard firstLine.isTimed, positionMs < firstLine.startTimeMs else { return nil }
         let info = InterludeInfo(startTimeMs: 0, endTimeMs: firstLine.startTimeMs, kind: "prelude", automatic: false)
-        guard info.endTimeMs - info.startTimeMs > interludeMinDurationMs else { return nil }
+        guard info.endTimeMs - info.startTimeMs > lyricsTimelineInterludeMinDurationMs else { return nil }
         return info
     }
 
@@ -4145,12 +4332,12 @@ enum LyricsTimelineDisplayBuilder {
         for index in lines.indices {
             let line = lines[index]
             guard line.isTimed, !context.isMarker[index] else { continue }
-            let lyricEnd = lastLyricEndTime(line)
+            let lyricEnd = context.lastLyricEndTimes[index]
             guard lyricEnd >= 0 else { continue }
             let start = lyricEnd + trailingInterludeDelayMs
-            let nextStart = nextRenderableLineStartAfter(context: context, index: index)
+            let nextStart = context.nextRenderableLineStartTimes[index]
             let end = nextStart > start ? nextStart : (index >= max(0, count - 1) ? trackDurationMs : 0)
-            guard end - start > interludeMinDurationMs else { continue }
+            guard end - start > lyricsTimelineInterludeMinDurationMs else { continue }
             let info = InterludeInfo(startTimeMs: start, endTimeMs: end, kind: nextStart > 0 ? "break" : "postlude", automatic: true)
             if contains(info, positionMs) {
                 return info
@@ -4159,40 +4346,7 @@ enum LyricsTimelineDisplayBuilder {
         return nil
     }
 
-    private static func firstRenderableLineIndex(context: LyricsTimelineContext) -> Int? {
-        for index in context.lines.indices {
-            let line = context.lines[index]
-            guard line.isTimed else { continue }
-            if !context.isMarker[index] {
-                return index
-            }
-        }
-        return nil
-    }
-
-    private static func nextRenderableLineStartAfter(context: LyricsTimelineContext, index: Int) -> Int64 {
-        for nextIndex in (index + 1)..<context.lines.count {
-            let candidate = context.lines[nextIndex]
-            guard candidate.isTimed else { continue }
-            if context.isMarker[nextIndex] { continue }
-            return candidate.startTimeMs
-        }
-        return 0
-    }
-
-    private static func hasRenderableInterludeMarkerBeforeNextRenderableLine(context: LyricsTimelineContext, index: Int, count: Int) -> Bool {
-        for nextIndex in (index + 1)..<context.lines.count {
-            let candidate = context.lines[nextIndex]
-            guard candidate.isTimed else { continue }
-            if !context.isMarker[nextIndex] { return false }
-            if markerInterludeInfo(context: context, line: candidate, index: nextIndex, count: count) != nil {
-                return true
-            }
-        }
-        return false
-    }
-
-    private static func lastLyricEndTime(_ line: LyricsLine) -> Int64 {
+    fileprivate static func lastLyricEndTime(_ line: LyricsLine) -> Int64 {
         var lastEnd = maxSyllableEnd(line.syllables, fallbackLineEndMs: line.endTimeMs)
         for part in line.vocalParts {
             lastEnd = max(lastEnd, maxSyllableEnd(part.syllables, fallbackLineEndMs: line.endTimeMs))
@@ -4351,9 +4505,15 @@ struct LyricsLineView: View, Equatable {
     var body: some View {
         let _ = settings.typographyRevision
         let typography = settings.typographySettings()
+        let displayVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).filter(
+            LyricsTimelineDisplayBuilder.hasDisplayableVocalPartText
+        )
         let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line)
         VStack(alignment: stackAlignment, spacing: 4) {
-            originalLyricsView
+            originalLyricsView(
+                displayVocalParts: displayVocalParts,
+                useVocalPartSupplements: useVocalPartSupplements
+            )
                 .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: 25))
             if !useVocalPartSupplements, !line.pronunciationText.trimmed.isEmpty {
                 Text(line.pronunciationText)
@@ -4409,10 +4569,14 @@ struct LyricsLineView: View, Equatable {
     }
 
     @ViewBuilder
-    private var originalLyricsView: some View {
+    private func originalLyricsView(
+        displayVocalParts: [LyricsLine.VocalPart],
+        useVocalPartSupplements: Bool
+    ) -> some View {
         if !displayVocalParts.isEmpty {
             VStack(alignment: stackAlignment, spacing: 0) {
-                ForEach(Array(displayVocalParts.enumerated()), id: \.offset) { index, part in
+                ForEach(displayVocalParts.indices, id: \.self) { index in
+                    let part = displayVocalParts[index]
                     let partActive = active && positionMs >= part.startTimeMs
                     VStack(alignment: stackAlignment, spacing: 2) {
                         SyllableKaraokeText(
@@ -4432,7 +4596,7 @@ struct LyricsLineView: View, Equatable {
                             effectRowSeed: index
                         )
                         .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
-                        if LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line) {
+                        if useVocalPartSupplements {
                             vocalPartSupplements(part, active: partActive)
                         }
                     }
@@ -4486,12 +4650,6 @@ struct LyricsLineView: View, Equatable {
                 kind: line.kind,
                 inactiveColor: inactiveOriginalColor
             )
-        }
-    }
-
-    private var displayVocalParts: [LyricsLine.VocalPart] {
-        LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).filter {
-            !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
         }
     }
 
