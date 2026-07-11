@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import LyricsProviderCore
 
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
@@ -146,6 +147,31 @@ final class AppSettings: ObservableObject {
     @Published var backgroundVideoScale: Int { didSet { set("background_video_scale", Self.clampBackgroundVideoScale(backgroundVideoScale)); bumpBackgroundRevisionIfNeeded() } }
     @Published var spotifyClientId: String { didSet { set("spotify_client_id", spotifyClientId) } }
     @Published var spotifyClientSecret: String { didSet { set("spotify_client_secret", spotifyClientSecret) } }
+    @Published var lyricsProviderModeRaw: String {
+        didSet {
+            set("lyrics_provider_mode", LyricsProviderMode.normalize(lyricsProviderModeRaw).rawValue)
+            recordLyricsProviderPolicyChange()
+        }
+    }
+    @Published var lyricsProviderEnabled: Set<String> {
+        didSet {
+            defaults.set(Array(lyricsProviderEnabled).sorted(), forKey: "lyrics_provider_enabled")
+            recordLyricsProviderPolicyChange()
+        }
+    }
+    @Published var lyricsProviderOrder: [String] {
+        didSet {
+            defaults.set(lyricsProviderOrder, forKey: "lyrics_provider_order")
+            recordLyricsProviderPolicyChange()
+        }
+    }
+    @Published private(set) var deezerConfigured: Bool
+    @Published private(set) var lyricsProviderCredentialGeneration: UInt64
+    @Published private(set) var lyricsProviderRemoteGlobalDisable = false
+    @Published private(set) var lyricsProviderRemoteDisabled: Set<String> = []
+    @Published private(set) var lyricsProviderRemoteCohortAllowed = false
+    @Published private(set) var lyricsProviderPolicyVersion = 1
+    @Published private(set) var lyricsProviderPolicyGeneration: UInt64
     @Published private(set) var languageRulesRevision = 0
     @Published private(set) var backgroundSettingsRevision = 0
     @Published private(set) var typographyRevision = 0
@@ -156,6 +182,8 @@ final class AppSettings: ObservableObject {
     private var isApplyingRuleState = false
     private var cachedSnapshot: Snapshot?
     private var snapshotInvalidationCancellable: AnyCancellable?
+    private static let lyricsProviderRemotePolicyCacheKey = "lyrics_provider_verified_remote_policy_v1"
+    private static let defaultRemotePolicyCacheLifetimeMs: Int64 = 24 * 60 * 60 * 1_000
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -204,6 +232,18 @@ final class AppSettings: ObservableObject {
         backgroundVideoScale = Self.clampBackgroundVideoScale(defaults.object(forKey: "background_video_scale") as? Int ?? 100)
         spotifyClientId = defaults.string(forKey: "spotify_client_id") ?? ""
         spotifyClientSecret = defaults.string(forKey: "spotify_client_secret") ?? ""
+        lyricsProviderModeRaw = LyricsProviderMode.normalize(defaults.string(forKey: "lyrics_provider_mode")).rawValue
+        lyricsProviderEnabled = Set(defaults.stringArray(forKey: "lyrics_provider_enabled") ?? [LyricsProviderID.lrclib.rawValue])
+        lyricsProviderOrder = defaults.stringArray(forKey: "lyrics_provider_order") ?? LyricsProviderID.defaultOrder.map(\.rawValue)
+        deezerConfigured = defaults.bool(forKey: "lyrics_provider_deezer_configured")
+        lyricsProviderCredentialGeneration = (defaults.object(forKey: "lyrics_provider_credential_generation") as? NSNumber)?.uint64Value ?? 0
+        lyricsProviderPolicyGeneration = (defaults.object(forKey: "lyrics_provider_policy_generation") as? NSNumber)?.uint64Value ?? 0
+        if let restored = Self.restoreLyricsProviderRemotePolicy(defaults: defaults) {
+            lyricsProviderRemoteGlobalDisable = restored.globalDisable
+            lyricsProviderRemoteDisabled = restored.disabledProviderIDs
+            lyricsProviderRemoteCohortAllowed = restored.cohortAllowed
+            lyricsProviderPolicyVersion = restored.policyVersion
+        }
         isBootstrapping = false
         snapshotInvalidationCancellable = objectWillChange.sink { [weak self] _ in
             self?.cachedSnapshot = nil
@@ -223,6 +263,12 @@ final class AppSettings: ObservableObject {
             return cachedSnapshot
         }
         let ruleConfig = Self.loadRuleConfig(defaults: defaults).withTarget(outputLang)
+        let explicitLocalOptIn = LyricsProviderMode.normalize(lyricsProviderModeRaw) == .multiProvider
+        let multiProviderAuthorized = LyricsProviderAppContracts.multiProviderAuthorized(
+            internalBuild: Self.isInternalLyricsProviderBuild,
+            explicitLocalOptIn: explicitLocalOptIn,
+            verifiedCohort: lyricsProviderRemoteCohortAllowed
+        )
         let snapshot = Snapshot(
             uiLang: uiLang,
             outputLang: outputLang,
@@ -267,7 +313,10 @@ final class AppSettings: ObservableObject {
             typography: typographySettings(),
             speakerColors: speakerColorSettings(),
             spotifyClientId: spotifyClientId,
-            spotifyClientSecret: spotifyClientSecret
+            spotifyClientSecret: spotifyClientSecret,
+            lyricsProviderSettings: lyricsProviderSettingsSnapshot,
+            lyricsProviderMultiProviderAuthorized: multiProviderAuthorized,
+            lyricsProviderPolicyGeneration: lyricsProviderPolicyGeneration
         )
         cachedSnapshot = snapshot
         return snapshot
@@ -278,6 +327,150 @@ final class AppSettings: ObservableObject {
         providerId = provider.id
         baseUrl = provider.defaultBaseUrl
         model = provider.defaultModel
+    }
+
+    var lyricsProviderSettingsSnapshot: LyricsProviderSettingsSnapshot {
+        let localMode = LyricsProviderMode.normalize(lyricsProviderModeRaw)
+        let requestedMode: LyricsProviderMode = LyricsProviderAppContracts.multiProviderRequested(
+            explicitLocalOptIn: localMode == .multiProvider,
+            verifiedCohort: lyricsProviderRemoteCohortAllowed
+        ) ? .multiProvider : .legacy
+        let enabled = Set(lyricsProviderEnabled.compactMap(LyricsProviderID.init(rawValue:))).union([.lrclib])
+        let order = lyricsProviderOrder.compactMap(LyricsProviderID.init(rawValue:))
+        return LyricsProviderSettingsSnapshot(
+            mode: requestedMode,
+            enabledProviders: enabled,
+            providerOrder: order,
+            deezerConfigured: deezerConfigured,
+            remoteDisabledProviders: Set(lyricsProviderRemoteDisabled.compactMap(LyricsProviderID.init(rawValue:))),
+            globalRemoteDisable: lyricsProviderRemoteGlobalDisable,
+            policyVersion: lyricsProviderPolicyVersion,
+            credentialGeneration: lyricsProviderCredentialGeneration
+        )
+    }
+
+    @MainActor
+    func refreshDeezerConfiguration() async {
+        let configured = await LyricsProviderCredentialManager.shared.deezerIsConfigured()
+        if deezerConfigured != configured {
+            deezerConfigured = configured
+            defaults.set(configured, forKey: "lyrics_provider_deezer_configured")
+        }
+    }
+
+    @MainActor
+    func saveDeezerARL(_ value: String) async throws {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            try await removeDeezerARL()
+            return
+        }
+        do {
+            try await LyricsProviderCredentialManager.shared.saveDeezerARL(normalized)
+            recordLyricsProviderCredentialChange(configured: true)
+        } catch {
+            recordLyricsProviderCredentialChange(configured: false)
+            throw error
+        }
+    }
+
+    @MainActor
+    func removeDeezerARL() async throws {
+        try await LyricsProviderCredentialManager.shared.removeDeezerARL()
+        lyricsProviderEnabled.remove(LyricsProviderID.deezer.rawValue)
+        recordLyricsProviderCredentialChange(configured: false)
+    }
+
+    @MainActor
+    func applyLyricsProviderRemotePolicy(
+        payload: Data,
+        signature: Data,
+        publicKeyRawRepresentation: Data
+    ) {
+        guard let policy = LyricsProviderRemotePolicyDecoder.decode(
+            payload: payload,
+            signature: signature,
+            publicKeyRawRepresentation: publicKeyRawRepresentation
+        ) else {
+            return
+        }
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        let verified = CachedLyricsProviderRemotePolicy(
+            globalDisable: policy.globalDisable,
+            disabledProviderIDs: Set(policy.disabledProviders.map(\.rawValue)),
+            cohortAllowed: policy.multiProviderCohortAllowed,
+            policyVersion: policy.policyVersion,
+            expiresAtMs: policy.expiresAtMs ?? now + Self.defaultRemotePolicyCacheLifetimeMs
+        )
+        let current = currentLyricsProviderRemotePolicyState(nowMs: now)
+        guard let next = LyricsProviderAppContracts.policyAfterVerification(current: current, verified: verified) else {
+            return
+        }
+        persistLyricsProviderRemotePolicy(next)
+        let changed = next != current
+        lyricsProviderRemoteGlobalDisable = next.globalDisable
+        lyricsProviderRemoteDisabled = next.disabledProviderIDs
+        lyricsProviderRemoteCohortAllowed = next.cohortAllowed
+        lyricsProviderPolicyVersion = next.policyVersion
+        if changed {
+            recordLyricsProviderPolicyChange()
+        }
+    }
+
+    @MainActor
+    private func recordLyricsProviderCredentialChange(configured: Bool) {
+        deezerConfigured = configured
+        lyricsProviderCredentialGeneration &+= 1
+        defaults.set(configured, forKey: "lyrics_provider_deezer_configured")
+        defaults.set(NSNumber(value: lyricsProviderCredentialGeneration), forKey: "lyrics_provider_credential_generation")
+        recordLyricsProviderPolicyChange()
+    }
+
+    private func currentLyricsProviderRemotePolicyState(nowMs: Int64) -> CachedLyricsProviderRemotePolicy? {
+        guard lyricsProviderRemoteGlobalDisable || !lyricsProviderRemoteDisabled.isEmpty
+                || lyricsProviderRemoteCohortAllowed || lyricsProviderPolicyVersion != 1 else { return nil }
+        let cachedExpiry = Self.cachedLyricsProviderRemotePolicy(defaults: defaults)?.expiresAtMs
+        return CachedLyricsProviderRemotePolicy(
+            globalDisable: lyricsProviderRemoteGlobalDisable,
+            disabledProviderIDs: lyricsProviderRemoteDisabled,
+            cohortAllowed: lyricsProviderRemoteCohortAllowed,
+            policyVersion: lyricsProviderPolicyVersion,
+            expiresAtMs: cachedExpiry ?? nowMs + Self.defaultRemotePolicyCacheLifetimeMs
+        )
+    }
+
+    private func persistLyricsProviderRemotePolicy(_ policy: CachedLyricsProviderRemotePolicy) {
+        guard let data = try? JSONEncoder().encode(policy) else { return }
+        defaults.set(data, forKey: Self.lyricsProviderRemotePolicyCacheKey)
+    }
+
+    private static func cachedLyricsProviderRemotePolicy(defaults: UserDefaults) -> CachedLyricsProviderRemotePolicy? {
+        guard let data = defaults.data(forKey: lyricsProviderRemotePolicyCacheKey) else { return nil }
+        return try? JSONDecoder().decode(CachedLyricsProviderRemotePolicy.self, from: data)
+    }
+
+    private static func restoreLyricsProviderRemotePolicy(defaults: UserDefaults) -> CachedLyricsProviderRemotePolicy? {
+        guard let cached = cachedLyricsProviderRemotePolicy(defaults: defaults) else { return nil }
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        return LyricsProviderAppContracts.restoredPolicy(cached, nowMs: now)
+    }
+
+    private func recordLyricsProviderPolicyChange() {
+        guard !isBootstrapping else { return }
+        lyricsProviderPolicyGeneration &+= 1
+        defaults.set(NSNumber(value: lyricsProviderPolicyGeneration), forKey: "lyrics_provider_policy_generation")
+        let generation = lyricsProviderPolicyGeneration
+        Task {
+            await LyricsProviderCredentialManager.shared.cancelActiveRequests(policyGeneration: generation)
+        }
+    }
+
+    private static var isInternalLyricsProviderBuild: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
     }
 
     func setPreviewItems(_ items: Int) {
@@ -1023,6 +1216,9 @@ final class AppSettings: ObservableObject {
         var speakerColors: SpeakerColorSettings
         var spotifyClientId: String
         var spotifyClientSecret: String
+        var lyricsProviderSettings: LyricsProviderSettingsSnapshot
+        var lyricsProviderMultiProviderAuthorized: Bool
+        var lyricsProviderPolicyGeneration: UInt64
 
         var hasApiKey: Bool {
             if provider.id == "pollinations", !pollinationsAccessToken.trimmed.isEmpty {
