@@ -4,6 +4,8 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     private static let isrcSeparatorsRegex = try? NSRegularExpression(pattern: #"[\s-]"#)
     private static let validIsrcRegex = try? NSRegularExpression(pattern: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#)
     private static let spotifyTrackURIPrefix = "spotify:track:"
+    private static let spotifyTrackIdUTF8Count = 22
+    private static let spotifyTrackURIUTF8Count = 36
 
     var title: String
     var artist: String
@@ -151,13 +153,15 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
 
     static func extractSpotifyTrackId(_ value: String?) -> String {
         let text = (value ?? "").trimmed
-        if text.hasPrefix(spotifyTrackURIPrefix) {
+        let utf8Count = text.utf8.count
+        if utf8Count == spotifyTrackURIUTF8Count,
+           text.hasPrefix(spotifyTrackURIPrefix) {
             let candidate = text.dropFirst(spotifyTrackURIPrefix.count)
             if isAsciiSpotifyTrackId(candidate) {
                 return String(candidate)
             }
         }
-        if isAsciiSpotifyTrackId(text[...]) {
+        if utf8Count == spotifyTrackIdUTF8Count, isAsciiSpotifyTrackId(text[...]) {
             return text
         }
         let pattern = #"(?:spotify:track:|open\.spotify\.com/track/)([A-Za-z0-9]{22})"#
@@ -172,7 +176,6 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     }
 
     private static func isAsciiSpotifyTrackId(_ value: Substring) -> Bool {
-        guard value.utf8.count == 22 else { return false }
         return value.utf8.allSatisfy { byte in
             (byte >= 48 && byte <= 57)
                 || (byte >= 65 && byte <= 90)
