@@ -3,6 +3,7 @@ import Foundation
 struct TrackSnapshot: Equatable, Hashable, Sendable {
     private static let isrcSeparatorsRegex = try? NSRegularExpression(pattern: #"[\s-]"#)
     private static let validIsrcRegex = try? NSRegularExpression(pattern: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#)
+    private static let spotifyTrackURIPrefix = "spotify:track:"
 
     var title: String
     var artist: String
@@ -63,8 +64,9 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     }
 
     var stableKey: String {
-        if !trackId.isEmpty {
-            return "spotify:\(trackId)"
+        let spotifyTrackId = trackId
+        if !spotifyTrackId.isEmpty {
+            return "spotify:\(spotifyTrackId)"
         }
         return "\(Self.normalizeForKey(title))|\(Self.normalizeForKey(artist))|\(durationMs)"
     }
@@ -149,6 +151,15 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
 
     static func extractSpotifyTrackId(_ value: String?) -> String {
         let text = (value ?? "").trimmed
+        if text.hasPrefix(spotifyTrackURIPrefix) {
+            let candidate = text.dropFirst(spotifyTrackURIPrefix.count)
+            if isAsciiSpotifyTrackId(candidate) {
+                return String(candidate)
+            }
+        }
+        if isAsciiSpotifyTrackId(text[...]) {
+            return text
+        }
         let pattern = #"(?:spotify:track:|open\.spotify\.com/track/)([A-Za-z0-9]{22})"#
         guard let match = text.range(of: pattern, options: .regularExpression) else {
             return text.range(of: #"^[A-Za-z0-9]{22}$"#, options: .regularExpression) == nil ? "" : text
@@ -158,6 +169,15 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
             return String(raw[idRange])
         }
         return ""
+    }
+
+    private static func isAsciiSpotifyTrackId(_ value: Substring) -> Bool {
+        guard value.utf8.count == 22 else { return false }
+        return value.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57)
+                || (byte >= 65 && byte <= 90)
+                || (byte >= 97 && byte <= 122)
+        }
     }
 
     static func normalizedSpotifyMediaId(_ value: String?) -> String {
