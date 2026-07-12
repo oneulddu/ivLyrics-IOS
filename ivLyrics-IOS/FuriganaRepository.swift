@@ -467,20 +467,19 @@ final class FuriganaRepository: NSObject, WKNavigationDelegate, WKScriptMessageH
             guard safeStart < safeEnd, !reading.isEmpty else { return "" }
             guard safeStart != start || safeEnd != end else { return reading }
 
-            let readingCharacters = reading.map(String.init)
-            guard length > 1, !readingCharacters.isEmpty else { return reading }
-            let charactersPerBase = max(1, readingCharacters.count / length)
-            var result = ""
-            for sourceIndex in safeStart..<safeEnd {
-                let relativeIndex = sourceIndex - start
-                let readStart = min(readingCharacters.count, relativeIndex * charactersPerBase)
-                let readEnd = relativeIndex == length - 1
-                    ? readingCharacters.count
-                    : min(readingCharacters.count, (relativeIndex + 1) * charactersPerBase)
-                guard readStart < readEnd else { continue }
-                result += readingCharacters[readStart..<readEnd].joined()
-            }
-            return result
+            let characterCount = reading.count
+            guard length > 1, characterCount > 0 else { return reading }
+            let charactersPerBase = max(1, characterCount / length)
+            let firstRelativeIndex = safeStart - start
+            let lastRelativeIndex = safeEnd - start - 1
+            let readStart = min(characterCount, firstRelativeIndex * charactersPerBase)
+            let readEnd = lastRelativeIndex == length - 1
+                ? characterCount
+                : min(characterCount, (lastRelativeIndex + 1) * charactersPerBase)
+            guard readStart < readEnd else { return "" }
+            let lowerBound = reading.index(reading.startIndex, offsetBy: readStart)
+            let upperBound = reading.index(lowerBound, offsetBy: readEnd - readStart)
+            return String(reading[lowerBound..<upperBound])
         }
     }
 
