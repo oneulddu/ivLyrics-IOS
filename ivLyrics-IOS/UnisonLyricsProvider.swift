@@ -13,6 +13,20 @@ enum UnisonLyricsProvider {
     private static let inlineWhitespaceRegex = try? NSRegularExpression(
         pattern: inlineWhitespacePattern
     )
+    private static let lrcOffsetPattern = #"^\[offset:([+-]?\d+)\]"#
+    private static let lrcOffsetRegex = try? NSRegularExpression(
+        pattern: lrcOffsetPattern,
+        options: .caseInsensitive
+    )
+    private static let lrcMetadataPattern = #"^\[(ar|al|ti|by|re|ve|length):"#
+    private static let lrcMetadataRegex = try? NSRegularExpression(
+        pattern: lrcMetadataPattern,
+        options: .caseInsensitive
+    )
+    private static let lrcTimestampPattern = #"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]"#
+    private static let lrcTimestampRegex = try? NSRegularExpression(
+        pattern: lrcTimestampPattern
+    )
 
     private static let speakerPalette = [
         SpeakerPresentation(speaker: "CUSTOM", color: "#a8ccff", fallback: "MALE 1"),
@@ -513,17 +527,47 @@ enum UnisonLyricsProvider {
         var offset: Int64 = 0
         var synced: [LrcLine] = []
         for rawLine in stripBom(lrc).components(separatedBy: .newlines) {
-            if let match = firstRegexMatch(#"^\[offset:([+-]?\d+)\]"#, in: rawLine, options: .caseInsensitive),
+            let offsetMatch: [String]?
+            if let lrcOffsetRegex {
+                offsetMatch = firstRegexMatch(lrcOffsetRegex, in: rawLine)
+            } else {
+                offsetMatch = firstRegexMatch(lrcOffsetPattern, in: rawLine, options: .caseInsensitive)
+            }
+            if let match = offsetMatch,
                let parsedOffset = Int64(match[1]) {
                 offset = parsedOffset
                 continue
             }
-            if rawLine.range(of: #"^\[(ar|al|ti|by|re|ve|length):"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            let isMetadataLine: Bool
+            if let lrcMetadataRegex {
+                let source = rawLine as NSString
+                isMetadataLine = lrcMetadataRegex.firstMatch(
+                    in: rawLine,
+                    range: NSRange(location: 0, length: source.length)
+                ) != nil
+            } else {
+                isMetadataLine = rawLine.range(
+                    of: lrcMetadataPattern,
+                    options: [.regularExpression, .caseInsensitive]
+                ) != nil
+            }
+            if isMetadataLine {
                 continue
             }
-            let matches = regexMatches(#"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]"#, in: rawLine)
+            let matches = lrcTimestampRegex.map { regexMatches($0, in: rawLine) }
+                ?? regexMatches(lrcTimestampPattern, in: rawLine)
             guard !matches.isEmpty else { continue }
-            let text = rawLine.regexReplacing(#"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]"#, with: "").trimmed
+            let text: String
+            if let lrcTimestampRegex {
+                let source = rawLine as NSString
+                text = lrcTimestampRegex.stringByReplacingMatches(
+                    in: rawLine,
+                    range: NSRange(location: 0, length: source.length),
+                    withTemplate: ""
+                ).trimmed
+            } else {
+                text = rawLine.regexReplacing(lrcTimestampPattern, with: "").trimmed
+            }
             guard !text.isEmpty else { continue }
             for match in matches {
                 synced.append(
@@ -770,6 +814,10 @@ enum UnisonLyricsProvider {
         options: NSRegularExpression.Options = []
     ) -> [[String]] {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return [] }
+        return regexMatches(regex, in: value)
+    }
+
+    private static func regexMatches(_ regex: NSRegularExpression, in value: String) -> [[String]] {
         let source = value as NSString
         return regex.matches(in: value, range: NSRange(location: 0, length: source.length)).map { match in
             (0..<match.numberOfRanges).map { index in
@@ -785,6 +833,10 @@ enum UnisonLyricsProvider {
         options: NSRegularExpression.Options = []
     ) -> [String]? {
         regexMatches(pattern, in: value, options: options).first
+    }
+
+    private static func firstRegexMatch(_ regex: NSRegularExpression, in value: String) -> [String]? {
+        regexMatches(regex, in: value).first
     }
 
     private static func firstRegexMatchWithRange(
