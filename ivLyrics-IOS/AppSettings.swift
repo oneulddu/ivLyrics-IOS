@@ -45,6 +45,15 @@ final class AppSettings: ObservableObject {
 
     static let lyricsProviders: [LyricsProvider] = [
         LyricsProvider(
+            id: "lrclib",
+            name: "LRCLIB",
+            author: "default",
+            supportsNativeKaraoke: false,
+            supportsIvLyricsSync: true,
+            supportsSynced: true,
+            supportsPlain: true
+        ),
+        LyricsProvider(
             id: "lyricsplus",
             name: "LyricsPlus",
             author: "default",
@@ -59,15 +68,6 @@ final class AppSettings: ObservableObject {
             author: "default",
             supportsNativeKaraoke: true,
             supportsIvLyricsSync: false,
-            supportsSynced: true,
-            supportsPlain: true
-        ),
-        LyricsProvider(
-            id: "lrclib",
-            name: "LRCLIB",
-            author: "default",
-            supportsNativeKaraoke: false,
-            supportsIvLyricsSync: true,
             supportsSynced: true,
             supportsPlain: true
         )
