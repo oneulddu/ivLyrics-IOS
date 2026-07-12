@@ -4,6 +4,11 @@ enum UnisonLyricsProvider {
     private static let apiBase = "https://unison.boidu.dev"
     private static let attribution = "Lyrics from Unison (https://unison.boidu.dev)."
     private static let requestTimeout: TimeInterval = 10
+    private static let timeUnitPattern = #"^([+-]?[\d.]+)(ms|h|m|s)$"#
+    private static let timeUnitRegex = try? NSRegularExpression(
+        pattern: timeUnitPattern,
+        options: .caseInsensitive
+    )
 
     private static let speakerPalette = [
         SpeakerPresentation(speaker: "CUSTOM", color: "#a8ccff", fallback: "MALE 1"),
@@ -552,7 +557,22 @@ enum UnisonLyricsProvider {
     private static func parseTimeMs(_ value: String) -> Int64? {
         let input = value.trimmed
         guard !input.isEmpty else { return nil }
-        if let match = firstRegexMatch(#"^([+-]?[\d.]+)(ms|h|m|s)$"#, in: input, options: .caseInsensitive),
+        let timeUnitMatch: [String]?
+        if let regex = timeUnitRegex {
+            let source = input as NSString
+            timeUnitMatch = regex.matches(
+                in: input,
+                range: NSRange(location: 0, length: source.length)
+            ).first.map { match in
+                (0..<match.numberOfRanges).map { index in
+                    let range = match.range(at: index)
+                    return range.location == NSNotFound ? "" : source.substring(with: range)
+                }
+            }
+        } else {
+            timeUnitMatch = firstRegexMatch(timeUnitPattern, in: input, options: .caseInsensitive)
+        }
+        if let match = timeUnitMatch,
            let amount = Double(match[1]) {
             let multiplier: Double
             switch match[2].lowercased() {
