@@ -3577,6 +3577,10 @@ struct LyricsTimelineView: View {
                         .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
                 }
             } else {
+                let _ = settings.typographyRevision
+                let _ = settings.speakerColorRevision
+                let typography = settings.typographySettings()
+                let speakerColors = settings.speakerColorSettings()
                 ForEach(Array(items.enumerated()), id: \.element.id) { displayIndex, item in
                     let itemActive = item.id == activeItemID
                     let displayDistance = abs(Double(displayIndex) - visualCenterIndex)
@@ -3595,6 +3599,8 @@ struct LyricsTimelineView: View {
                                 alignment: settings.lyricsTextAlignment,
                                 pronunciationLoading: model.lyricsSupplementPronunciationLoading,
                                 translationLoading: model.lyricsSupplementTranslationLoading,
+                                typography: typography,
+                                speakerColors: speakerColors,
                                 onSeek: { model.seek(toLyricsTimeMs: $0) }
                             )
                             .equatable()
@@ -4379,6 +4385,8 @@ struct LyricsLineView: View, Equatable {
     var alignment: String
     var pronunciationLoading: Bool
     var translationLoading: Bool
+    var typography: AppSettings.TypographySettings
+    var speakerColors: AppSettings.SpeakerColorSettings
     var onSeek: (Int64) -> Void
 
     static func == (lhs: LyricsLineView, rhs: LyricsLineView) -> Bool {
@@ -4393,11 +4401,11 @@ struct LyricsLineView: View, Equatable {
             && lhs.alignment == rhs.alignment
             && lhs.pronunciationLoading == rhs.pronunciationLoading
             && lhs.translationLoading == rhs.translationLoading
+            && lhs.typography == rhs.typography
+            && lhs.speakerColors == rhs.speakerColors
     }
 
     var body: some View {
-        let _ = settings.typographyRevision
-        let typography = settings.typographySettings()
         let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
         let displayVocalParts = orderedVocalParts.filter {
             !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
@@ -4452,16 +4460,6 @@ struct LyricsLineView: View, Equatable {
     private func seekToLine() {
         guard line.isTimed else { return }
         onSeek(line.startTimeMs)
-    }
-
-    private var speakerColors: AppSettings.SpeakerColorSettings {
-        _ = settings.speakerColorRevision
-        return settings.speakerColorSettings()
-    }
-
-    private var typography: AppSettings.TypographySettings {
-        _ = settings.typographyRevision
-        return settings.typographySettings()
     }
 
     @ViewBuilder
@@ -5474,6 +5472,10 @@ private struct KaraokeDebugPreview: View {
     }
 
     var body: some View {
+        let _ = settings.typographyRevision
+        let _ = settings.speakerColorRevision
+        let typography = settings.typographySettings()
+        let speakerColors = settings.speakerColorSettings()
         VStack(alignment: .leading, spacing: 44) {
             Text("Synthetic line sync at 50%")
                 .font(.pretendard(15, weight: .semibold))
@@ -5525,6 +5527,8 @@ private struct KaraokeDebugPreview: View {
                 alignment: "left",
                 pronunciationLoading: false,
                 translationLoading: false,
+                typography: typography,
+                speakerColors: speakerColors,
                 onSeek: { _ in }
             )
             .equatable()
@@ -5539,7 +5543,7 @@ private struct KaraokeDebugPreview: View {
                 alignment: .leading,
                 frameAlignment: .leading,
                 fontSize: 32,
-                speakerColors: settings.speakerColorSettings(),
+                speakerColors: speakerColors,
                 useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
                 karaokeDataAsLineSynced: false,
                 syncedLyricsKaraokeAnimationEnabled: true,
