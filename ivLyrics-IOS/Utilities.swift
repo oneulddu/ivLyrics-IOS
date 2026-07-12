@@ -147,14 +147,13 @@ enum IvLyricsUtilities {
 
     static func lyricsFingerprint(_ text: String) -> String {
         var hash: UInt64 = 2_166_136_261
-        let chars = splitChars(text)
-        for character in chars {
-            for scalar in character.unicodeScalars {
-                hash ^= UInt64(scalar.value)
-                hash = (hash * 16_777_619) & 0xffff_ffff
-            }
+        var count = 0
+        for scalar in text.nfc().unicodeScalars {
+            hash ^= UInt64(scalar.value)
+            hash = (hash * 16_777_619) & 0xffff_ffff
+            count += 1
         }
-        return "lrclib-\(String(hash, radix: 36))-\(String(chars.count, radix: 36))"
+        return "lrclib-\(String(hash, radix: 36))-\(String(count, radix: 36))"
     }
 
     static func comparableLyricsLines(_ text: String?, stripTimestamps: Bool, normalizeParentheticalLines: Bool = false) -> [String] {
