@@ -9,6 +9,10 @@ enum UnisonLyricsProvider {
         pattern: timeUnitPattern,
         options: .caseInsensitive
     )
+    private static let inlineWhitespacePattern = #"\s+"#
+    private static let inlineWhitespaceRegex = try? NSRegularExpression(
+        pattern: inlineWhitespacePattern
+    )
 
     private static let speakerPalette = [
         SpeakerPresentation(speaker: "CUSTOM", color: "#a8ccff", fallback: "MALE 1"),
@@ -732,7 +736,14 @@ enum UnisonLyricsProvider {
     }
 
     private static func normalizeInlineText(_ value: String) -> String {
-        value.regexReplacing(#"\s+"#, with: " ")
+        guard let regex = inlineWhitespaceRegex else {
+            return value.regexReplacing(inlineWhitespacePattern, with: " ")
+        }
+        return regex.stringByReplacingMatches(
+            in: value,
+            range: NSRange(value.startIndex..<value.endIndex, in: value),
+            withTemplate: " "
+        )
     }
 
     private static func normalizeDisplayText(_ value: String) -> String {
