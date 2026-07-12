@@ -1803,8 +1803,14 @@ final class AppViewModel: ObservableObject {
         inputDuration = formatDurationInput(incoming.durationMs)
         currentTrack = incoming
         nowPositionMs = playback.progressMs
-        trackOffsetMs = settings.trackSyncOffsetMs(incoming.stableKey)
-        videoOffsetMs = settings.trackVideoSyncOffsetMs(incoming.stableKey)
+        let nextTrackOffsetMs = settings.trackSyncOffsetMs(incoming.stableKey)
+        if trackOffsetMs != nextTrackOffsetMs {
+            trackOffsetMs = nextTrackOffsetMs
+        }
+        let nextVideoOffsetMs = settings.trackVideoSyncOffsetMs(incoming.stableKey)
+        if videoOffsetMs != nextVideoOffsetMs {
+            videoOffsetMs = nextVideoOffsetMs
+        }
         saveManualInputs()
         if changedTrack {
             selectedRuleSourceLang = "auto"
@@ -2552,12 +2558,18 @@ final class AppViewModel: ObservableObject {
     }
 
     private func saveManualInputs() {
-        defaults.set(inputTitle.trimmed, forKey: "manual_track_title")
-        defaults.set(inputArtist.trimmed, forKey: "manual_track_artist")
-        defaults.set(inputAlbum.trimmed, forKey: "manual_track_album")
-        defaults.set(inputDuration.trimmed, forKey: "manual_track_duration")
-        defaults.set(inputSpotifyId.trimmed, forKey: "manual_track_spotify_id")
-        defaults.set(inputIsrc.trimmed, forKey: "manual_track_isrc")
+        saveManualInput(inputTitle, key: "manual_track_title")
+        saveManualInput(inputArtist, key: "manual_track_artist")
+        saveManualInput(inputAlbum, key: "manual_track_album")
+        saveManualInput(inputDuration, key: "manual_track_duration")
+        saveManualInput(inputSpotifyId, key: "manual_track_spotify_id")
+        saveManualInput(inputIsrc, key: "manual_track_isrc")
+    }
+
+    private func saveManualInput(_ value: String, key: String) {
+        let normalized = value.trimmed
+        guard defaults.string(forKey: key) != normalized else { return }
+        defaults.set(normalized, forKey: key)
     }
 
     private func parseDurationMs(_ value: String) -> Int64 {
