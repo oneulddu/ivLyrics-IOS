@@ -407,9 +407,12 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     }
 
     private func stringValue(_ value: Any?, fallback: String = "") -> String {
-        if let value = value as? String { return value.trimmed.isEmpty ? fallback : value.trimmed }
-        if let value = value { return String(describing: value).trimmed }
-        return fallback
+        guard let value = value as? String else {
+            if let value { return String(describing: value).trimmed }
+            return fallback
+        }
+        let trimmed = value.trimmed
+        return trimmed.isEmpty ? fallback : trimmed
     }
 
     private func int64Value(_ value: Any?, fallback: Int64 = 0) -> Int64 {
