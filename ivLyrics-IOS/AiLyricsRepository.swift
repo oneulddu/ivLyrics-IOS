@@ -1,6 +1,12 @@
 import Foundation
 
 actor AiLyricsRepository {
+    private static let taggedOutputLinePattern = #"^\s*(?:[-*]\s*)?(?:\[?L(\d{1,4})\]?|(?:row|line)\s*(\d{1,4})|#?(\d{1,4}))\s*(?:\t|[:：|\-]|\.\s+|\s+)\s*(.*)$"#
+    private static let taggedOutputLineRegex = try? NSRegularExpression(
+        pattern: taggedOutputLinePattern,
+        options: [.caseInsensitive]
+    )
+
     private let supplementPromptVersion = "v4-id-aligned-ai-only"
     private let supplementTaskPronunciation = "pronunciation"
     private let supplementTaskTranslation = "translation"
@@ -1362,9 +1368,19 @@ actor AiLyricsRepository {
     }
 
     nonisolated private func parseTaggedOutputLine(_ value: String) -> TaggedOutputLine? {
-        let pattern = #"^\s*(?:[-*]\s*)?(?:\[?L(\d{1,4})\]?|(?:row|line)\s*(\d{1,4})|#?(\d{1,4}))\s*(?:\t|[:：|\-]|\.\s+|\s+)\s*(.*)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else {
+        let regex: NSRegularExpression
+        if let cached = Self.taggedOutputLineRegex {
+            regex = cached
+        } else {
+            guard let fallback = try? NSRegularExpression(
+                pattern: Self.taggedOutputLinePattern,
+                options: [.caseInsensitive]
+            ) else {
+                return nil
+            }
+            regex = fallback
+        }
+        guard let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else {
             return nil
         }
         let rawNumber = [1, 2, 3].compactMap { group(match, $0, value) }.first(where: { !$0.isEmpty }) ?? ""
