@@ -3006,7 +3006,14 @@ struct MainLyricPreviewPanel: View {
     }
 
     private func hasMultiplePreviewVocalParts(_ line: LyricsLine) -> Bool {
-        line.vocalParts.filter { !$0.text.trimmed.isEmpty }.count > 1
+        var count = 0
+        for part in line.vocalParts where !part.text.trimmed.isEmpty {
+            count += 1
+            if count > 1 {
+                return true
+            }
+        }
+        return false
     }
 
     private func interludeLabel(_ kind: String) -> String {
