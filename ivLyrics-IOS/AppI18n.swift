@@ -82,6 +82,8 @@ enum AppI18n {
             "section.speaker_colors": "파트 색상",
             "section.ai_lyrics": "가사 AI",
             "section.provider": "제공자",
+            "section.lyrics_providers": "가사 제공자",
+            "section.lyrics_providers_desc": "가사 제공자를 켜거나 끄고 우선순위와 허용할 가사 유형을 설정합니다.",
             "section.spotify_api_desc": "Client ID는 Spotify App Remote 연결에 사용합니다. Client Secret은 ISRC와 메타데이터 보강을 사용할 때만 선택적으로 입력하며 앱 내부에 저장됩니다.",
             "setting.ui_language": "앱 표시 언어",
             "setting.metadata_translation": "곡 제목/아티스트 번역",
@@ -90,6 +92,10 @@ enum AppI18n {
             "setting.synced_karaoke_animation": "일반 싱크 가사 노래방 효과",
             "setting.karaoke_bounce_effect": "노래방 튐 효과",
             "setting.karaoke_line_mode": "노래방 데이터를 일반 싱크로 표시",
+            "setting.lyrics_type_priority": "가사 유형 우선 조회",
+            "setting.lyrics_type_priority_desc": "모든 제공자의 노래방 가사를 먼저 찾은 뒤 싱크 가사, 일반 가사 순서로 조회합니다. 같은 유형 안에서는 설정한 제공자 순서를 따릅니다.",
+            "setting.sync_data_provider_priority": "ivLyrics Sync 데이터가 있는 제공자 우선",
+            "setting.sync_data_provider_priority_desc": "OpenDB에 현재 곡의 ivLyrics Sync 데이터가 있으면 해당 가사 제공자를 일반 우선순위보다 먼저 시도합니다.",
             "setting.creator_speaker_colors": "싱크 제작자 커스텀 색상 사용",
             "setting.creator_speaker_colors_desc": "싱크 제작자가 데이터에 지정한 보컬 색상을 사용합니다. 끄면 CUSTOM 스피커는 싱크 제작자가 지정한 대체 색상을 사용합니다.",
             "setting.japanese_furigana": "일본어 후리가나",
@@ -263,7 +269,15 @@ enum AppI18n {
             "pip.simulator_unavailable": "시뮬레이터에서는 시스템 PiP를 사용할 수 없습니다. 실기기에서 확인해 주세요.",
             "label.lyrics_settings": "가사 설정",
             "label.open_lrclib_list": "LRCLIB 목록 열기",
-            "label.sync_by": "sync by"
+            "label.sync_by": "sync by",
+            "lyrics.provider.author_default": "제작자 · default",
+            "lyrics.provider.enabled": "이 제공자 사용",
+            "lyrics.provider.allowed_types": "허용할 가사 유형",
+            "lyrics.provider.type_karaoke": "노래방 가사",
+            "lyrics.provider.type_karaoke_sync_data": "노래방 가사 (ivLyrics Sync 데이터)",
+            "lyrics.provider.type_synced": "싱크 가사",
+            "lyrics.provider.type_plain": "일반 가사",
+            "lyrics.provider.open_project": "LyricsPlus 프로젝트 열기"
         ],
         "en": [
             "button.close": "Close",
@@ -306,6 +320,8 @@ enum AppI18n {
             "section.speaker_colors": "Speaker Colors",
             "section.ai_lyrics": "Lyrics AI",
             "section.provider": "Provider",
+            "section.lyrics_providers": "Lyrics Providers",
+            "section.lyrics_providers_desc": "Enable, reorder, and choose the allowed lyric types for each provider.",
             "section.spotify_api_desc": "The Client ID connects Spotify App Remote. The optional Client Secret enables ISRC and metadata enrichment and is stored only on this device.",
             "setting.ui_language": "App Language",
             "setting.metadata_translation": "Translate title/artist",
@@ -314,6 +330,10 @@ enum AppI18n {
             "setting.synced_karaoke_animation": "Line-synced karaoke effect",
             "setting.karaoke_bounce_effect": "Karaoke bounce effect",
             "setting.karaoke_line_mode": "Treat karaoke data as line-synced",
+            "setting.lyrics_type_priority": "Prioritize lyrics type over provider order",
+            "setting.lyrics_type_priority_desc": "Try karaoke lyrics across all providers first, then synced lyrics, then plain lyrics. The configured provider order is preserved within each type.",
+            "setting.sync_data_provider_priority": "Prioritize providers with ivLyrics Sync data",
+            "setting.sync_data_provider_priority_desc": "When OpenDB has ivLyrics Sync data for the current track, try its matching lyrics provider before the normal provider order.",
             "setting.creator_speaker_colors": "Use sync creator custom colors",
             "setting.creator_speaker_colors_desc": "Use custom speaker colors embedded by sync creators. When disabled, CUSTOM speakers use the fallback selected by the sync creator.",
             "setting.japanese_furigana": "Japanese Furigana",
@@ -487,7 +507,15 @@ enum AppI18n {
             "pip.simulator_unavailable": "System PiP is unavailable in the Simulator. Please check it on a physical device.",
             "label.lyrics_settings": "Lyrics settings",
             "label.open_lrclib_list": "Open LRCLIB list",
-            "label.sync_by": "sync by"
+            "label.sync_by": "sync by",
+            "lyrics.provider.author_default": "Author · default",
+            "lyrics.provider.enabled": "Enable this provider",
+            "lyrics.provider.allowed_types": "Allowed Lyrics Types",
+            "lyrics.provider.type_karaoke": "Karaoke Lyrics",
+            "lyrics.provider.type_karaoke_sync_data": "Karaoke Lyrics (ivLyrics Sync data)",
+            "lyrics.provider.type_synced": "Synced Lyrics",
+            "lyrics.provider.type_plain": "Plain Lyrics",
+            "lyrics.provider.open_project": "Open LyricsPlus project"
         ]
     ]
 

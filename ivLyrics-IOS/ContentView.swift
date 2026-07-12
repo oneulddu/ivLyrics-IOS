@@ -6430,6 +6430,27 @@ struct SettingsView: View {
 
     private var lyricsSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
+            settingsSection(
+                settings.t("section.lyrics_providers"),
+                description: settings.t("section.lyrics_providers_desc")
+            ) {
+                settingsToggleCard(
+                    settings.t("setting.lyrics_type_priority"),
+                    description: settings.t("setting.lyrics_type_priority_desc"),
+                    binding: lyricsTypePriorityBinding
+                )
+                settingsToggleCard(
+                    settings.t("setting.sync_data_provider_priority"),
+                    description: settings.t("setting.sync_data_provider_priority_desc"),
+                    binding: syncDataProviderPriorityBinding
+                )
+                ForEach(Array(settings.lyricsProviderOrder.enumerated()), id: \.element) { index, providerId in
+                    if let provider = AppSettings.lyricsProviderById(providerId) {
+                        lyricsProviderSettingsCard(provider, index: index)
+                    }
+                }
+            }
+
             settingsSection(settings.t("section.language"), description: settings.t("section.language_desc")) {
                 settingsCard(settings.t("setting.ui_language"), description: settings.t("setting.ui_language_desc")) {
                     Picker("", selection: uiLanguageBinding) {
@@ -6478,6 +6499,80 @@ struct SettingsView: View {
                 settingsToggleCard(settings.t("setting.synced_karaoke_animation"), description: settings.t("setting.synced_karaoke_animation_desc"), binding: settingsSavedBinding(\.syncedLyricsKaraokeAnimationEnabled))
                 settingsToggleCard(settings.t("setting.karaoke_bounce_effect"), description: settings.t("setting.karaoke_bounce_effect_desc"), binding: settingsSavedBinding(\.karaokeBounceEffectEnabled))
                 settingsToggleCard(settings.t("setting.karaoke_data_as_line_synced"), description: settings.t("setting.karaoke_data_as_line_synced_desc"), binding: settingsSavedBinding(\.karaokeDataAsLineSynced))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func lyricsProviderSettingsCard(_ provider: AppSettings.LyricsProvider, index: Int) -> some View {
+        settingsCard(
+            provider.name,
+            description: settings.t("lyrics.provider.author_default")
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Toggle(
+                        settings.t("lyrics.provider.enabled"),
+                        isOn: lyricsProviderEnabledBinding(provider.id)
+                    )
+                    .font(.pretendard(14, weight: .semibold))
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        settings.moveLyricsProvider(provider.id, offset: -1)
+                        model.reloadLyrics(bypassCache: true)
+                    } label: {
+                        Image(systemName: "chevron.up")
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(index == 0)
+
+                    Button {
+                        settings.moveLyricsProvider(provider.id, offset: 1)
+                        model.reloadLyrics(bypassCache: true)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(index == settings.lyricsProviderOrder.count - 1)
+                }
+
+                Divider().overlay(.white.opacity(0.12))
+
+                VStack(alignment: .leading, spacing: 9) {
+                    Text(settings.t("lyrics.provider.allowed_types"))
+                        .font(.pretendard(13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.64))
+                    Toggle(
+                        provider.supportsNativeKaraoke
+                            ? settings.t("lyrics.provider.type_karaoke")
+                            : settings.t("lyrics.provider.type_karaoke_sync_data"),
+                        isOn: lyricsProviderTypeBinding(provider.id, type: AppSettings.lyricsTypeKaraoke)
+                    )
+                    if provider.supportsSynced {
+                        Toggle(
+                            settings.t("lyrics.provider.type_synced"),
+                            isOn: lyricsProviderTypeBinding(provider.id, type: AppSettings.lyricsTypeSynced)
+                        )
+                    }
+                    if provider.supportsPlain {
+                        Toggle(
+                            settings.t("lyrics.provider.type_plain"),
+                            isOn: lyricsProviderTypeBinding(provider.id, type: AppSettings.lyricsTypePlain)
+                        )
+                    }
+                }
+                .font(.pretendard(14))
+
+                if provider.id == "lyricsplus", let url = URL(string: LyricsPlusProvider.projectURL) {
+                    Link(destination: url) {
+                        Label(settings.t("lyrics.provider.open_project"), systemImage: "arrow.up.right.square")
+                            .font(.pretendard(13, weight: .semibold))
+                    }
+                }
             }
         }
     }
@@ -7043,6 +7138,46 @@ struct SettingsView: View {
             \.autoInstrumentalBreakEnabled,
             onToastKey: "toast.auto_interlude_on",
             offToastKey: "toast.auto_interlude_off"
+        )
+    }
+
+    private var lyricsTypePriorityBinding: Binding<Bool> {
+        Binding(
+            get: { settings.preferLyricsTypeOverProviderOrder },
+            set: { value in
+                settings.preferLyricsTypeOverProviderOrder = value
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    private var syncDataProviderPriorityBinding: Binding<Bool> {
+        Binding(
+            get: { settings.preferSyncDataProvider },
+            set: { value in
+                settings.preferSyncDataProvider = value
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    private func lyricsProviderEnabledBinding(_ providerId: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.lyricsProviderEnabled[providerId] ?? true },
+            set: { value in
+                settings.setLyricsProviderEnabled(providerId, enabled: value)
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    private func lyricsProviderTypeBinding(_ providerId: String, type: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.lyricsProviderTypes[providerId]?[type] ?? true },
+            set: { value in
+                settings.setLyricsProviderTypeEnabled(providerId, type: type, enabled: value)
+                model.reloadLyrics(bypassCache: true)
+            }
         )
     }
 

@@ -1125,7 +1125,9 @@ actor AiLyricsRepository {
             karaoke: result.karaoke,
             isrc: result.isrc,
             spotifyTrackId: result.spotifyTrackId,
-            contributors: baseResult.contributors
+            contributors: baseResult.contributors,
+            providerId: baseResult.providerId,
+            selectionPolicyKey: baseResult.selectionPolicyKey
         )
     }
 
@@ -1177,7 +1179,9 @@ actor AiLyricsRepository {
             karaoke: baseResult.karaoke,
             isrc: baseResult.isrc,
             spotifyTrackId: baseResult.spotifyTrackId,
-            contributors: baseResult.contributors
+            contributors: baseResult.contributors,
+            providerId: baseResult.providerId,
+            selectionPolicyKey: baseResult.selectionPolicyKey
         )
     }
 
@@ -1236,7 +1240,9 @@ actor AiLyricsRepository {
             karaoke: baseResult.karaoke,
             isrc: baseResult.isrc,
             spotifyTrackId: baseResult.spotifyTrackId,
-            contributors: baseResult.contributors
+            contributors: baseResult.contributors,
+            providerId: baseResult.providerId,
+            selectionPolicyKey: baseResult.selectionPolicyKey
         )
     }
 

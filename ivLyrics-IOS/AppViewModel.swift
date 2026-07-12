@@ -1115,7 +1115,9 @@ final class AppViewModel: ObservableObject {
             karaoke: result.karaoke,
             isrc: result.isrc,
             spotifyTrackId: result.spotifyTrackId,
-            contributors: result.contributors
+            contributors: result.contributors,
+            providerId: result.providerId,
+            selectionPolicyKey: result.selectionPolicyKey
         )
     }
 
@@ -2066,7 +2068,9 @@ final class AppViewModel: ObservableObject {
             karaoke: target.karaoke,
             isrc: target.isrc,
             spotifyTrackId: target.spotifyTrackId,
-            contributors: target.contributors
+            contributors: target.contributors,
+            providerId: target.providerId,
+            selectionPolicyKey: target.selectionPolicyKey
         )
     }
 
@@ -2252,7 +2256,9 @@ final class AppViewModel: ObservableObject {
             karaoke: source.karaoke,
             isrc: normalizedIsrc,
             spotifyTrackId: safeSpotifyTrackId,
-            contributors: source.contributors
+            contributors: source.contributors,
+            providerId: source.providerId,
+            selectionPolicyKey: source.selectionPolicyKey
         )
     }
 

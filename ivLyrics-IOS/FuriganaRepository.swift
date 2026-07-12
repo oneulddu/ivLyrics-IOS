@@ -262,7 +262,9 @@ final class FuriganaRepository: NSObject, WKNavigationDelegate, WKScriptMessageH
             karaoke: baseResult.karaoke,
             isrc: baseResult.isrc,
             spotifyTrackId: baseResult.spotifyTrackId,
-            contributors: baseResult.contributors
+            contributors: baseResult.contributors,
+            providerId: baseResult.providerId,
+            selectionPolicyKey: baseResult.selectionPolicyKey
         )
     }
 

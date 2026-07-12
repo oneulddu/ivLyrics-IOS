@@ -438,6 +438,8 @@ struct LyricsResult: Codable, Equatable, Sendable {
     var isrc: String
     var spotifyTrackId: String
     var contributors: [SyncContributor]
+    var providerId: String
+    var selectionPolicyKey: String
 
     init(
         lines: [LyricsLine],
@@ -446,7 +448,9 @@ struct LyricsResult: Codable, Equatable, Sendable {
         karaoke: Bool,
         isrc: String = "",
         spotifyTrackId: String = "",
-        contributors: [SyncContributor] = []
+        contributors: [SyncContributor] = [],
+        providerId: String = "",
+        selectionPolicyKey: String = ""
     ) {
         self.lines = lines
         self.providerLabel = providerLabel
@@ -455,10 +459,59 @@ struct LyricsResult: Codable, Equatable, Sendable {
         self.isrc = TrackSnapshot.normalizeIsrc(isrc)
         self.spotifyTrackId = spotifyTrackId.trimmed
         self.contributors = contributors
+        self.providerId = providerId.trimmed.lowercased()
+        self.selectionPolicyKey = selectionPolicyKey.trimmed
+    }
+
+    func withSelection(providerId: String, selectionPolicyKey: String) -> LyricsResult {
+        LyricsResult(
+            lines: lines,
+            providerLabel: providerLabel,
+            detail: detail,
+            karaoke: karaoke,
+            isrc: isrc,
+            spotifyTrackId: spotifyTrackId,
+            contributors: contributors,
+            providerId: providerId,
+            selectionPolicyKey: selectionPolicyKey
+        )
     }
 
     static func empty(_ detail: String) -> LyricsResult {
         LyricsResult(lines: [], providerLabel: "", detail: detail, karaoke: false)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lines, providerLabel, detail, karaoke, isrc, spotifyTrackId, contributors
+        case providerId, selectionPolicyKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            lines: try container.decodeIfPresent([LyricsLine].self, forKey: .lines) ?? [],
+            providerLabel: try container.decodeIfPresent(String.self, forKey: .providerLabel) ?? "",
+            detail: try container.decodeIfPresent(String.self, forKey: .detail) ?? "",
+            karaoke: try container.decodeIfPresent(Bool.self, forKey: .karaoke) ?? false,
+            isrc: try container.decodeIfPresent(String.self, forKey: .isrc) ?? "",
+            spotifyTrackId: try container.decodeIfPresent(String.self, forKey: .spotifyTrackId) ?? "",
+            contributors: try container.decodeIfPresent([SyncContributor].self, forKey: .contributors) ?? [],
+            providerId: try container.decodeIfPresent(String.self, forKey: .providerId) ?? "",
+            selectionPolicyKey: try container.decodeIfPresent(String.self, forKey: .selectionPolicyKey) ?? ""
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(lines, forKey: .lines)
+        try container.encode(providerLabel, forKey: .providerLabel)
+        try container.encode(detail, forKey: .detail)
+        try container.encode(karaoke, forKey: .karaoke)
+        try container.encode(isrc, forKey: .isrc)
+        try container.encode(spotifyTrackId, forKey: .spotifyTrackId)
+        try container.encode(contributors, forKey: .contributors)
+        try container.encode(providerId, forKey: .providerId)
+        try container.encode(selectionPolicyKey, forKey: .selectionPolicyKey)
     }
 
     struct SyncContributor: Codable, Equatable, Hashable, Sendable {
