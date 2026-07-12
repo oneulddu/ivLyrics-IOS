@@ -17,6 +17,18 @@ enum LyricsPlusProvider {
     private static let parallelMinimumOverlapMs: Int64 = 30
     private static let parallelMaximumSegmentDelayMs: Int64 = 16
     private static let endpointRotation = EndpointRotation()
+#if DEBUG
+    private static let boundaryRegressionChecks: Void = {
+        func syllable(_ text: String, _ start: Int64, _ end: Int64) -> LyricsLine.Syllable {
+            LyricsLine.Syllable(text: text, startTimeMs: start, endTimeMs: end)
+        }
+
+        assert(safeBoundary(syllable("Eng", 0, 100), syllable("lish", 100, 200)) == nil)
+        assert(safeBoundary(syllable("한국", 0, 100), syllable("어", 100, 200)) == nil)
+        assert(safeBoundary(syllable("한국어 ", 0, 100), syllable("가사", 100, 200)) != nil)
+        assert(safeBoundary(syllable("ドラ", 0, 100), syllable("マ", 100, 200)) != nil)
+    }()
+#endif
     private static let speakerPalette: [(String, String)] = [
         ("#a8ccff", "MALE 1"),
         ("#ffb8c7", "FEMALE 1"),
@@ -179,6 +191,9 @@ enum LyricsPlusProvider {
     }
 
     static func parse(data: Data, durationMs: Int64) throws -> FetchOutcome {
+#if DEBUG
+        _ = boundaryRegressionChecks
+#endif
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CocoaError(.fileReadCorruptFile)
         }
@@ -992,11 +1007,12 @@ enum LyricsPlusProvider {
         let punctuation = "。！？?!…；;：:、，,.".contains(leftCharacter)
         let scriptChange = (isCjk(leftCharacter) && isLatinOrNumber(rightCharacter))
             || (isLatinOrNumber(leftCharacter) && isCjk(rightCharacter))
+        let noSpaceScriptBoundary = isNoSpaceCjk(leftCharacter) && isNoSpaceCjk(rightCharacter)
         if isLatinOrNumber(leftCharacter), isLatinOrNumber(rightCharacter), !hasWhitespace, !punctuation {
             return nil
         }
-        guard hasWhitespace || punctuation || scriptChange else { return nil }
-        return hasWhitespace ? 0 : (punctuation ? 1 : 10)
+        guard hasWhitespace || punctuation || scriptChange || noSpaceScriptBoundary else { return nil }
+        return hasWhitespace ? 0 : (punctuation ? 1 : (scriptChange ? 10 : 12))
     }
 
     private static func boundaryCharacter(_ text: String, fromEnd: Bool) -> Character? {
@@ -1026,6 +1042,15 @@ enum LyricsPlusProvider {
             return (0x3040...0x30ff).contains(value)
                 || (0x3400...0x9fff).contains(value)
                 || (0xac00...0xd7af).contains(value)
+                || (0xf900...0xfaff).contains(value)
+        }
+    }
+
+    private static func isNoSpaceCjk(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { scalar in
+            let value = scalar.value
+            return (0x3040...0x30ff).contains(value)
+                || (0x3400...0x9fff).contains(value)
                 || (0xf900...0xfaff).contains(value)
         }
     }
