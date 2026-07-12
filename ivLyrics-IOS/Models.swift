@@ -6,6 +6,8 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     private static let spotifyTrackURIPrefix = "spotify:track:"
     private static let spotifyTrackIdUTF8Count = 22
     private static let spotifyTrackURIUTF8Count = 36
+    private static let keyWhitespacePattern = #"\s+"#
+    private static let keyWhitespaceRegex = try? NSRegularExpression(pattern: keyWhitespacePattern)
 
     var title: String
     var artist: String
@@ -189,8 +191,21 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
         return spotifyId.isEmpty ? text : "spotify:track:\(spotifyId)"
     }
 
+    @inline(never)
     private static func normalizeForKey(_ value: String) -> String {
-        value.trimmed.lowercased().replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let normalized = value.trimmed.lowercased()
+        guard let regex = keyWhitespaceRegex else {
+            return normalized.replacingOccurrences(
+                of: keyWhitespacePattern,
+                with: " ",
+                options: .regularExpression
+            )
+        }
+        return regex.stringByReplacingMatches(
+            in: normalized,
+            range: NSRange(normalized.startIndex..<normalized.endIndex, in: normalized),
+            withTemplate: " "
+        )
     }
 
     private func sameMetadata(_ lhs: String, _ rhs: String) -> Bool {
