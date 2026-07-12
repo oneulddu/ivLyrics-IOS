@@ -1617,11 +1617,25 @@ final class AppViewModel: ObservableObject {
         if !line.text.trimmed.isEmpty {
             return line.text
         }
-        return line.vocalParts.map { part in
-            part.text.trimmed.isEmpty ? part.syllables.map(\.text).joined() : part.text
+        var result = ""
+        for part in line.vocalParts {
+            let value: String
+            if !part.text.trimmed.isEmpty {
+                value = part.text
+            } else {
+                var syllableText = ""
+                for syllable in part.syllables {
+                    syllableText.append(contentsOf: syllable.text)
+                }
+                guard !syllableText.trimmed.isEmpty else { continue }
+                value = syllableText
+            }
+            if !result.isEmpty {
+                result.append(" / ")
+            }
+            result.append(contentsOf: value)
         }
-        .filter { !$0.trimmed.isEmpty }
-        .joined(separator: " / ")
+        return result
     }
 
     private func pendingManualTrackSnapshot() -> TrackSnapshot? {
