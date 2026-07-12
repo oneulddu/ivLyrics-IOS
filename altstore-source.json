@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.4",
+          "buildVersion": "9",
+          "date": "2026-07-12",
+          "localizedDescription": "v1.0.4는 가사 파싱, 동기화, Spotify 트랙 식별 성능을 개선한 업데이트입니다.\n\nv1.0.4 improves performance for lyric parsing, synchronization, and Spotify track identification.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.4/ivLyrics-IOS-v1.0.4-unsigned.ipa",
+          "size": 6260573,
+          "sha256": "3af83a78de1b22f538472031b8adeca6aaecb7b2da6ec93c33bc334171cd4b15",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.3",
           "buildVersion": "8",
           "date": "2026-07-11",
