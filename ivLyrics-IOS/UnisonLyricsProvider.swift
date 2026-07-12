@@ -606,7 +606,9 @@ enum UnisonLyricsProvider {
         let input = value.trimmed
         guard !input.isEmpty else { return nil }
         let timeUnitMatch: [String]?
-        if let regex = timeUnitRegex {
+        if input.contains(":") {
+            timeUnitMatch = nil
+        } else if let regex = timeUnitRegex {
             let source = input as NSString
             timeUnitMatch = regex.matches(
                 in: input,
@@ -632,14 +634,22 @@ enum UnisonLyricsProvider {
             return Int64((amount * multiplier).rounded())
         }
         let components = input.split(separator: ":", omittingEmptySubsequences: false)
-        let parts = components.compactMap { Double($0) }
-        guard parts.count == components.count,
-              (1...3).contains(parts.count) else { return nil }
         let seconds: Double
-        switch parts.count {
-        case 3: seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
-        case 2: seconds = parts[0] * 60 + parts[1]
-        default: seconds = parts[0]
+        switch components.count {
+        case 3:
+            guard let hours = Double(components[0]),
+                  let minutes = Double(components[1]),
+                  let value = Double(components[2]) else { return nil }
+            seconds = hours * 3600 + minutes * 60 + value
+        case 2:
+            guard let minutes = Double(components[0]),
+                  let value = Double(components[1]) else { return nil }
+            seconds = minutes * 60 + value
+        case 1:
+            guard let value = Double(components[0]) else { return nil }
+            seconds = value
+        default:
+            return nil
         }
         return Int64((seconds * 1000).rounded())
     }
