@@ -87,6 +87,11 @@ enum LyricsPlusProvider {
         var distanceMs: Int64
     }
 
+    private struct SplitSegmentKey: Hashable {
+        let start: Int
+        let end: Int
+    }
+
     private actor EndpointRotation {
         private var nextIndex = 0
 
@@ -862,8 +867,11 @@ enum LyricsPlusProvider {
     private static func splitLongSoloLine(_ line: LyricsLine, previous: LyricsLine?, next: LyricsLine?) -> [LyricsLine] {
         let syllables = line.syllables
         guard line.vocalParts.isEmpty,
-              syllables.count >= 2,
-              measureWidth(line.text) > splitTriggerWidth,
+              syllables.count >= 2 else {
+            return [line]
+        }
+        let lineWidth = measureWidth(line.text)
+        guard lineWidth > splitTriggerWidth,
               (previous == nil || previous!.endTimeMs <= line.startTimeMs),
               (next == nil || next!.startTimeMs >= line.endTimeMs),
               syllables.map(\.text).joined().trimmed == line.text.trimmed else {
@@ -877,14 +885,22 @@ enum LyricsPlusProvider {
                 guard item.startTimeMs >= prior.endTimeMs else { return [line] }
             }
         }
-        let candidates = (1..<syllables.count).filter { safeBoundary(syllables[$0 - 1], syllables[$0]) != nil }
+        var boundaryPenalties: [Int: Double] = [:]
+        let candidates = (1..<syllables.count).filter { boundary in
+            guard let penalty = safeBoundary(syllables[boundary - 1], syllables[boundary]) else {
+                return false
+            }
+            boundaryPenalties[boundary] = penalty
+            return true
+        }
         guard !candidates.isEmpty else { return [line] }
-        let minimumCount = max(2, Int(ceil(measureWidth(line.text) / splitHardWidth)))
+        let minimumCount = max(2, Int(ceil(lineWidth / splitHardWidth)))
         let maximumCount = min(splitMaximumSegments, candidates.count + 1)
         guard minimumCount <= maximumCount else { return [line] }
 
         var bestBoundaries: [Int]?
         var bestScore = Double.greatestFiniteMagnitude
+        var segmentMetrics: [SplitSegmentKey: (width: Double, duration: Int64)] = [:]
         for segmentCount in minimumCount...maximumCount {
             var chosen: [Int] = []
             chooseBoundaries(
@@ -894,18 +910,29 @@ enum LyricsPlusProvider {
                 chosen: &chosen
             ) { boundaries in
                 let points = [0] + boundaries + [syllables.count]
-                let target = measureWidth(line.text) / Double(segmentCount)
+                let target = lineWidth / Double(segmentCount)
                 var score = 0.0
                 for segment in 0..<segmentCount {
-                    let slice = Array(syllables[points[segment]..<points[segment + 1]])
-                    let width = measureWidth(slice.map(\.text).joined())
-                    let duration = (slice.last?.endTimeMs ?? 0) - (slice.first?.startTimeMs ?? 0)
-                    guard width >= splitMinimumWidth,
-                          width <= splitHardWidth,
-                          duration >= splitMinimumDurationMs else { return }
-                    score += pow(width - target, 2)
+                    let start = points[segment]
+                    let end = points[segment + 1]
+                    let key = SplitSegmentKey(start: start, end: end)
+                    let metrics: (width: Double, duration: Int64)
+                    if let cached = segmentMetrics[key] {
+                        metrics = cached
+                    } else {
+                        let slice = Array(syllables[start..<end])
+                        metrics = (
+                            width: measureWidth(slice.map(\.text).joined()),
+                            duration: (slice.last?.endTimeMs ?? 0) - (slice.first?.startTimeMs ?? 0)
+                        )
+                        segmentMetrics[key] = metrics
+                    }
+                    guard metrics.width >= splitMinimumWidth,
+                          metrics.width <= splitHardWidth,
+                          metrics.duration >= splitMinimumDurationMs else { return }
+                    score += pow(metrics.width - target, 2)
                     if segment < segmentCount - 1,
-                       let boundary = safeBoundary(syllables[points[segment + 1] - 1], syllables[points[segment + 1]]) {
+                       let boundary = boundaryPenalties[points[segment + 1]] {
                         score += boundary
                     }
                 }
