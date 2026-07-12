@@ -1,6 +1,9 @@
 import Foundation
 
 struct TrackSnapshot: Equatable, Hashable, Sendable {
+    private static let isrcSeparatorsRegex = try? NSRegularExpression(pattern: #"[\s-]"#)
+    private static let validIsrcRegex = try? NSRegularExpression(pattern: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#)
+
     var title: String
     var artist: String
     var album: String
@@ -118,11 +121,30 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     }
 
     static func normalizeIsrc(_ value: String?) -> String {
-        let normalized = (value ?? "")
-            .replacingOccurrences(of: #"[\s-]"#, with: "", options: .regularExpression)
+        let source = value ?? ""
+        let compact: String
+        if let regex = isrcSeparatorsRegex {
+            compact = regex.stringByReplacingMatches(
+                in: source,
+                range: NSRange(source.startIndex..<source.endIndex, in: source),
+                withTemplate: ""
+            )
+        } else {
+            compact = source.replacingOccurrences(of: #"[\s-]"#, with: "", options: .regularExpression)
+        }
+        let normalized = compact
             .uppercased()
             .trimmed
-        return normalized.range(of: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#, options: .regularExpression) == nil ? "" : normalized
+        let isValid: Bool
+        if let regex = validIsrcRegex {
+            isValid = regex.firstMatch(
+                in: normalized,
+                range: NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            ) != nil
+        } else {
+            isValid = normalized.range(of: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#, options: .regularExpression) != nil
+        }
+        return isValid ? normalized : ""
     }
 
     static func extractSpotifyTrackId(_ value: String?) -> String {
