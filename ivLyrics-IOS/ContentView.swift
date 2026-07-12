@@ -687,7 +687,12 @@ private struct PortraitPlayerProgressSection: View {
 
 private func androidPlayerTime(_ milliseconds: Int64) -> String {
     let total = max(0, Int(milliseconds / 1000))
-    return String(format: "%d:%02d", total / 60, total % 60)
+    let minutes = Int32(truncatingIfNeeded: total / 60)
+    let seconds = total % 60
+    if seconds < 10 {
+        return "\(minutes):0\(seconds)"
+    }
+    return "\(minutes):\(seconds)"
 }
 
 private struct AndroidMoreIcon: View {
@@ -2045,8 +2050,7 @@ private struct LandscapeTransportControls: View {
     }
 
     private func timeText(_ ms: Int64) -> String {
-        let total = max(0, Int(ms / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(ms)
     }
 }
 
@@ -2189,8 +2193,7 @@ private struct PlayerProgressBar: View {
     }
 
     private func timeText(_ ms: Int64) -> String {
-        let total = max(0, Int(ms / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(ms)
     }
 }
 
@@ -2633,8 +2636,7 @@ struct TransportPanel: View {
     }
 
     private func timeText(_ ms: Int64) -> String {
-        let total = max(0, Int(ms / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(ms)
     }
 }
 
@@ -5906,8 +5908,7 @@ struct LogsView: View {
     }
 
     private func debugTime(_ milliseconds: Int64) -> String {
-        let total = max(0, Int(milliseconds / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(milliseconds)
     }
 }
 
