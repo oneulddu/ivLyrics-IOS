@@ -587,8 +587,9 @@ enum UnisonLyricsProvider {
             }
             return Int64((amount * multiplier).rounded())
         }
-        let parts = input.split(separator: ":", omittingEmptySubsequences: false).compactMap { Double($0) }
-        guard parts.count == input.split(separator: ":", omittingEmptySubsequences: false).count,
+        let components = input.split(separator: ":", omittingEmptySubsequences: false)
+        let parts = components.compactMap { Double($0) }
+        guard parts.count == components.count,
               (1...3).contains(parts.count) else { return nil }
         let seconds: Double
         switch parts.count {
