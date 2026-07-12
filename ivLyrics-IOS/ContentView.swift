@@ -2815,7 +2815,7 @@ struct MainLyricPreviewPanel: View {
         switch entry {
         case .interlude(let info):
             return [MainLyricPreviewRow.interlude(interludeLabel(info.kind))]
-        case .line(_, let line):
+        case .line(_, let line, _):
             return previewRows(for: line, previewItems: previewItems)
         }
     }
@@ -3557,7 +3557,7 @@ struct LyricsTimelineView: View {
         let activeDisplayIndex = activeItemID.flatMap { id in
             items.firstIndex { $0.id == id }
         } ?? max(0, items.firstIndex { item in
-            if case .line(let index, _) = item {
+            if case .line(let index, _, _) = item {
                 return index == model.activeLineIndex
             }
             return false
@@ -3582,7 +3582,7 @@ struct LyricsTimelineView: View {
                     let displayDistance = abs(Double(displayIndex) - visualCenterIndex)
                     Group {
                         switch item {
-                        case .line(let index, let line):
+                        case .line(let index, let line, _):
                             let lineActive = itemActive || (activeItemID == nil && index == model.activeLineIndex)
                             LyricsLineView(
                                 lineIndex: index,
@@ -3818,13 +3818,13 @@ private struct LyricsTimelineEdgeFadeMask: View {
 }
 
 enum LyricsTimelineDisplayItem: Identifiable {
-    case line(index: Int, line: LyricsLine)
+    case line(index: Int, line: LyricsLine, id: String)
     case interlude(InterludeInfo)
 
     var id: String {
         switch self {
-        case .line(let index, let line):
-            return LyricsTimelineDisplayBuilder.lineID(index: index, line: line)
+        case .line(_, _, let id):
+            return id
         case .interlude(let info):
             return "interlude-\(info.kind)-\(info.startTimeMs)-\(info.endTimeMs)"
         }
@@ -3840,6 +3840,7 @@ struct InterludeInfo {
 
 struct LyricsTimelineContext {
     let lines: [LyricsLine]
+    let lineIDs: [String]
     let candidateTexts: [String]
     let isMarker: [Bool]
     let nonMarkerLineCount: Int
@@ -3849,6 +3850,9 @@ struct LyricsTimelineContext {
 
     init(lines: [LyricsLine], cacheLyricEndTimes: Bool = true) {
         self.lines = lines
+        lineIDs = lines.enumerated().map {
+            LyricsTimelineDisplayBuilder.lineID(index: $0.offset, line: $0.element)
+        }
         let candidateTexts = lines.map(LyricsTimelineDisplayBuilder.candidateText)
         self.candidateTexts = candidateTexts
         let isMarker = candidateTexts.map(LyricsTimelineDisplayBuilder.isInterludeMarkerText)
@@ -3952,7 +3956,7 @@ enum LyricsTimelineDisplayBuilder {
                !hasOverlap(result, marker) {
                 result.append(.interlude(marker))
             } else if marker == nil {
-                result.append(.line(index: index, line: line))
+                result.append(.line(index: index, line: line, id: context.lineIDs[index]))
             }
 
             if let trailing = trailingInterludeInfo(
@@ -3968,7 +3972,7 @@ enum LyricsTimelineDisplayBuilder {
             }
         }
         if result.isEmpty, let first = lines.first {
-            result.append(.line(index: 0, line: first))
+            result.append(.line(index: 0, line: first, id: context.lineIDs[0]))
         }
         return result
     }
@@ -4010,7 +4014,7 @@ enum LyricsTimelineDisplayBuilder {
         for index in lines.indices {
             let line = lines[index]
             if !line.isTimed, !context.isMarker[index] {
-                return .line(index: index, line: line)
+                return .line(index: index, line: line, id: context.lineIDs[index])
             }
         }
 
@@ -4018,7 +4022,7 @@ enum LyricsTimelineDisplayBuilder {
             let line = lines[index]
             guard line.isTimed, !context.isMarker[index] else { continue }
             if positionMs >= line.startTimeMs, positionMs < line.endTimeMs {
-                return .line(index: index, line: line)
+                return .line(index: index, line: line, id: context.lineIDs[index])
             }
         }
 
@@ -4040,7 +4044,7 @@ enum LyricsTimelineDisplayBuilder {
             let line = lines[index]
             guard line.isTimed, !context.isMarker[index] else { continue }
             if positionMs >= line.startTimeMs {
-                fallback = .line(index: index, line: line)
+                fallback = .line(index: index, line: line, id: context.lineIDs[index])
             }
         }
         return fallback
@@ -4081,7 +4085,7 @@ enum LyricsTimelineDisplayBuilder {
             return nil
         }
 
-        if case .line(let index, let line) = item,
+        if case .line(let index, let line, _) = item,
            vocalPartAnchorsEnabled,
            let partTargetID = activeVocalPartTargetID(lineIndex: index, line: line, positionMs: positionMs) {
             return partTargetID
