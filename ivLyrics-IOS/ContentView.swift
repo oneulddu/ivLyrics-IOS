@@ -3893,6 +3893,10 @@ enum LyricsTimelineDisplayBuilder {
 
     static func shouldUseVocalPartSupplements(_ line: LyricsLine) -> Bool {
         let parts = orderedVocalParts(line.vocalParts)
+        return shouldUseVocalPartSupplements(orderedParts: parts)
+    }
+
+    static func shouldUseVocalPartSupplements(orderedParts parts: [LyricsLine.VocalPart]) -> Bool {
         return hasVocalPartSupplements(parts) || displayableVocalPartCount(parts) > 1
     }
 
@@ -4390,9 +4394,18 @@ struct LyricsLineView: View, Equatable {
     var body: some View {
         let _ = settings.typographyRevision
         let typography = settings.typographySettings()
-        let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line)
+        let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
+        let displayVocalParts = orderedVocalParts.filter {
+            !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
+        }
+        let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(
+            orderedParts: orderedVocalParts
+        )
         VStack(alignment: stackAlignment, spacing: 4) {
-            originalLyricsView
+            originalLyricsView(
+                displayVocalParts: displayVocalParts,
+                useVocalPartSupplements: useVocalPartSupplements
+            )
                 .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: 25))
             if !useVocalPartSupplements, !line.pronunciationText.trimmed.isEmpty {
                 Text(line.pronunciationText)
@@ -4448,7 +4461,10 @@ struct LyricsLineView: View, Equatable {
     }
 
     @ViewBuilder
-    private var originalLyricsView: some View {
+    private func originalLyricsView(
+        displayVocalParts: [LyricsLine.VocalPart],
+        useVocalPartSupplements: Bool
+    ) -> some View {
         if !displayVocalParts.isEmpty {
             VStack(alignment: stackAlignment, spacing: 0) {
                 ForEach(Array(displayVocalParts.enumerated()), id: \.offset) { index, part in
@@ -4471,7 +4487,7 @@ struct LyricsLineView: View, Equatable {
                             effectRowSeed: index
                         )
                         .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
-                        if LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line) {
+                        if useVocalPartSupplements {
                             vocalPartSupplements(part, active: partActive)
                         }
                     }
@@ -4525,12 +4541,6 @@ struct LyricsLineView: View, Equatable {
                 kind: line.kind,
                 inactiveColor: inactiveOriginalColor
             )
-        }
-    }
-
-    private var displayVocalParts: [LyricsLine.VocalPart] {
-        LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).filter {
-            !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
         }
     }
 
