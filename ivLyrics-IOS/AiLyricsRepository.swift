@@ -6,6 +6,10 @@ actor AiLyricsRepository {
         pattern: taggedOutputLinePattern,
         options: [.caseInsensitive]
     )
+    private static let supplementOutputPrefixPattern = #"(?i)^\s*(translation|translated text|pronunciation|pronunciation text|romanization|furigana|ruby|reading|번역|발음|후리가나|후라가나)\s*[:：\-]\s*"#
+    private static let supplementOutputPrefixRegex = try? NSRegularExpression(
+        pattern: supplementOutputPrefixPattern
+    )
 
     private let supplementPromptVersion = "v4-id-aligned-ai-only"
     private let supplementTaskPronunciation = "pronunciation"
@@ -1397,7 +1401,17 @@ actor AiLyricsRepository {
     }
 
     nonisolated private func cleanSupplementOutput(_ value: String) -> String {
-        var cleaned = value.trimmed.regexReplacing(#"(?i)^\s*(translation|translated text|pronunciation|pronunciation text|romanization|furigana|ruby|reading|번역|발음|후리가나|후라가나)\s*[:：\-]\s*"#, with: "")
+        let trimmed = value.trimmed
+        var cleaned: String
+        if let regex = Self.supplementOutputPrefixRegex {
+            cleaned = regex.stringByReplacingMatches(
+                in: trimmed,
+                range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed),
+                withTemplate: ""
+            )
+        } else {
+            cleaned = trimmed.regexReplacing(Self.supplementOutputPrefixPattern, with: "")
+        }
         if (cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"")) || (cleaned.hasPrefix("'") && cleaned.hasSuffix("'")) {
             cleaned = String(cleaned.dropFirst().dropLast()).trimmed
         }
