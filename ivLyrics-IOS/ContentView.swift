@@ -3842,12 +3842,23 @@ struct LyricsTimelineContext {
     let lines: [LyricsLine]
     let candidateTexts: [String]
     let isMarker: [Bool]
+    let nonMarkerLineCount: Int
+    let lastLyricEndTimes: [Int64]?
 
-    init(lines: [LyricsLine]) {
+    var cachesLyricEndTimes: Bool { lastLyricEndTimes != nil }
+
+    init(lines: [LyricsLine], cacheLyricEndTimes: Bool = true) {
         self.lines = lines
         let candidateTexts = lines.map(LyricsTimelineDisplayBuilder.candidateText)
         self.candidateTexts = candidateTexts
-        isMarker = candidateTexts.map(LyricsTimelineDisplayBuilder.isInterludeMarkerText)
+        let isMarker = candidateTexts.map(LyricsTimelineDisplayBuilder.isInterludeMarkerText)
+        self.isMarker = isMarker
+        nonMarkerLineCount = isMarker.reduce(into: 0) { count, marker in
+            if !marker { count += 1 }
+        }
+        lastLyricEndTimes = cacheLyricEndTimes
+            ? lines.map(LyricsTimelineDisplayBuilder.lastLyricEndTime)
+            : nil
     }
 }
 
@@ -3907,7 +3918,10 @@ enum LyricsTimelineDisplayBuilder {
         autoInstrumentalBreakEnabled: Bool
     ) -> [LyricsTimelineDisplayItem] {
         items(
-            context: LyricsTimelineContext(lines: lines),
+            context: LyricsTimelineContext(
+                lines: lines,
+                cacheLyricEndTimes: autoInstrumentalBreakEnabled
+            ),
             positionMs: positionMs,
             trackDurationMs: trackDurationMs,
             autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
@@ -3924,6 +3938,8 @@ enum LyricsTimelineDisplayBuilder {
         guard !lines.isEmpty else { return [] }
         var result: [LyricsTimelineDisplayItem] = []
         let count = lines.count
+        let capacity = context.nonMarkerLineCount
+        result.reserveCapacity(capacity == Int.max ? capacity : capacity + 1)
         for index in lines.indices {
             let line = lines[index]
             let marker = markerInterludeInfo(context: context, line: line, index: index, count: count)
@@ -3960,7 +3976,10 @@ enum LyricsTimelineDisplayBuilder {
         autoInstrumentalBreakEnabled: Bool
     ) -> LyricsTimelineDisplayItem? {
         previewItem(
-            context: LyricsTimelineContext(lines: lines),
+            context: LyricsTimelineContext(
+                lines: lines,
+                cacheLyricEndTimes: autoInstrumentalBreakEnabled
+            ),
             positionMs: positionMs,
             trackDurationMs: trackDurationMs,
             autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
@@ -4031,7 +4050,10 @@ enum LyricsTimelineDisplayBuilder {
         vocalPartAnchorsEnabled: Bool
     ) -> String? {
         scrollTargetID(
-            context: LyricsTimelineContext(lines: lines),
+            context: LyricsTimelineContext(
+                lines: lines,
+                cacheLyricEndTimes: autoInstrumentalBreakEnabled
+            ),
             positionMs: positionMs,
             trackDurationMs: trackDurationMs,
             autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled,
@@ -4131,7 +4153,7 @@ enum LyricsTimelineDisplayBuilder {
               !hasRenderableInterludeMarkerBeforeNextRenderableLine(context: context, index: index, count: count) else {
             return nil
         }
-        let lyricEnd = lastLyricEndTime(line)
+        let lyricEnd = context.lastLyricEndTimes?[index] ?? lastLyricEndTime(line)
         guard lyricEnd >= 0 else { return nil }
         let start = lyricEnd + trailingInterludeDelayMs
         let nextStart = nextRenderableLineStartAfter(context: context, index: index)
@@ -4162,7 +4184,7 @@ enum LyricsTimelineDisplayBuilder {
         for index in lines.indices {
             let line = lines[index]
             guard line.isTimed, !context.isMarker[index] else { continue }
-            let lyricEnd = lastLyricEndTime(line)
+            let lyricEnd = context.lastLyricEndTimes?[index] ?? lastLyricEndTime(line)
             guard lyricEnd >= 0 else { continue }
             let start = lyricEnd + trailingInterludeDelayMs
             let nextStart = nextRenderableLineStartAfter(context: context, index: index)
@@ -4209,7 +4231,7 @@ enum LyricsTimelineDisplayBuilder {
         return false
     }
 
-    private static func lastLyricEndTime(_ line: LyricsLine) -> Int64 {
+    fileprivate static func lastLyricEndTime(_ line: LyricsLine) -> Int64 {
         var lastEnd = maxSyllableEnd(line.syllables, fallbackLineEndMs: line.endTimeMs)
         for part in line.vocalParts {
             lastEnd = max(lastEnd, maxSyllableEnd(part.syllables, fallbackLineEndMs: line.endTimeMs))

@@ -166,10 +166,15 @@ final class AppViewModel: ObservableObject {
     private var lyricsLoadRequestID = UUID()
 
     var timelineContext: LyricsTimelineContext {
-        if let cachedTimelineContext {
+        let cacheLyricEndTimes = settings.autoInstrumentalBreakEnabled
+        if let cachedTimelineContext,
+           cachedTimelineContext.cachesLyricEndTimes == cacheLyricEndTimes {
             return cachedTimelineContext
         }
-        let context = LyricsTimelineContext(lines: lyricsResult.lines)
+        let context = LyricsTimelineContext(
+            lines: lyricsResult.lines,
+            cacheLyricEndTimes: cacheLyricEndTimes
+        )
         cachedTimelineContext = context
         return context
     }
