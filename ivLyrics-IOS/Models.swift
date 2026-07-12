@@ -64,7 +64,10 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     }
 
     var isSpotifyDjSegment: Bool {
-        sameMetadata(artist, "DJ X") && (sameMetadata(title, "Welcome") || sameMetadata(title, "Up Next"))
+        let normalizedArtist = Self.normalizeForKey(artist)
+        guard normalizedArtist == "dj x" else { return false }
+        let normalizedTitle = Self.normalizeForKey(title)
+        return normalizedTitle == "welcome" || normalizedTitle == "up next"
     }
 
     var stableKey: String {
@@ -206,10 +209,6 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
             range: NSRange(normalized.startIndex..<normalized.endIndex, in: normalized),
             withTemplate: " "
         )
-    }
-
-    private func sameMetadata(_ lhs: String, _ rhs: String) -> Bool {
-        Self.normalizeForKey(lhs) == Self.normalizeForKey(rhs)
     }
 }
 
