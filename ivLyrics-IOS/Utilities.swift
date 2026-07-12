@@ -36,6 +36,20 @@ enum IvLyricsUtilities {
         pattern: leadingLrcTimestampPattern
     )
     private static let lrcMetadataLinePattern = #"^\s*\[(?:ar|al|ti|au|length|by|offset|re|ve):[^\]]*\]\s*$"#
+    private static let comparableSingleQuoteRegex = try? NSRegularExpression(
+        pattern: "[\\u{2018}\\u{2019}]"
+    )
+    private static let comparableDoubleQuoteRegex = try? NSRegularExpression(
+        pattern: "[\\u{201c}\\u{201d}]"
+    )
+    private static let comparableBracketPattern = #"[()\[\]{}]"#
+    private static let comparableBracketRegex = try? NSRegularExpression(
+        pattern: comparableBracketPattern
+    )
+    private static let comparableWhitespacePattern = #"\s+"#
+    private static let comparableWhitespaceRegex = try? NSRegularExpression(
+        pattern: comparableWhitespacePattern
+    )
 
     static func sha256(_ value: String) -> String {
         let digest = SHA256.hash(data: Data(value.utf8))
@@ -80,14 +94,45 @@ enum IvLyricsUtilities {
     }
 
     static func normalizeComparable(_ value: String?) -> String {
-        (value ?? "")
+        var normalized = (value ?? "")
             .nfkc()
             .lowercased()
             .trimmed
-            .regexReplacing("[\\u{2018}\\u{2019}]", with: "'")
-            .regexReplacing("[\\u{201c}\\u{201d}]", with: "\"")
-            .regexReplacing("[()\\[\\]{}]", with: "")
-            .regexReplacing(#"\s+"#, with: " ")
+        if let comparableSingleQuoteRegex {
+            normalized = replacingMatches(in: normalized, regex: comparableSingleQuoteRegex, with: "'")
+        }
+        if let comparableDoubleQuoteRegex {
+            normalized = replacingMatches(in: normalized, regex: comparableDoubleQuoteRegex, with: "\"")
+        }
+        if let comparableBracketRegex {
+            normalized = replacingMatches(in: normalized, regex: comparableBracketRegex, with: "")
+        } else {
+            normalized = normalized.replacingOccurrences(
+                of: comparableBracketPattern,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        if let comparableWhitespaceRegex {
+            return replacingMatches(in: normalized, regex: comparableWhitespaceRegex, with: " ")
+        }
+        return normalized.replacingOccurrences(
+            of: comparableWhitespacePattern,
+            with: " ",
+            options: .regularExpression
+        )
+    }
+
+    private static func replacingMatches(
+        in value: String,
+        regex: NSRegularExpression,
+        with replacement: String
+    ) -> String {
+        regex.stringByReplacingMatches(
+            in: value,
+            range: NSRange(value.startIndex..<value.endIndex, in: value),
+            withTemplate: replacement
+        )
     }
 
     static func sameSearchMetadata(_ left: String, _ right: String) -> Bool {
