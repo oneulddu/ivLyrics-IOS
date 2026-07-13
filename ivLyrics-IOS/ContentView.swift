@@ -4852,7 +4852,8 @@ struct LyricsLineView: View, Equatable {
     ) -> some View {
         if !displayVocalParts.isEmpty {
             VStack(alignment: stackAlignment, spacing: 0) {
-                ForEach(Array(displayVocalParts.enumerated()), id: \.offset) { index, part in
+                ForEach(displayVocalParts.indices, id: \.self) { index in
+                    let part = displayVocalParts[index]
                     let partActive = active && positionMs >= part.startTimeMs
                     VStack(alignment: stackAlignment, spacing: 2) {
                         SyllableKaraokeText(
