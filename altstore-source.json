@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.7",
+          "buildVersion": "12",
+          "date": "2026-07-13",
+          "localizedDescription": "v1.0.7은 가라오케 가사 표시를 개선하고 가사 출처 표기 및 재생 성능 최적화를 추가한 업데이트입니다.\n\nv1.0.7 improves karaoke lyric display, adds lyric-provider attribution, and optimizes playback performance.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.7/ivLyrics-IOS-v1.0.7-unsigned.ipa",
+          "size": 6418058,
+          "sha256": "234bce336361115a6de6c9f02883da9157748617d05f515ed0a6df6749a34975",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.6",
           "buildVersion": "11",
           "date": "2026-07-13",
