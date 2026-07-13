@@ -32,6 +32,7 @@ enum AppI18n {
             result[key] = language.code
         }
     }
+    private static let canonicalLanguageCodes = Set(uiLanguages.map(\.code))
 
     private static let androidStrings: [String: [String: String]] = loadBundledStrings()
 
@@ -520,6 +521,9 @@ enum AppI18n {
     ]
 
     static func normalize(_ lang: String?) -> String {
+        if let lang, canonicalLanguageCodes.contains(lang) {
+            return lang
+        }
         let value = (lang ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return "en" }
         let lower = value.replacingOccurrences(of: "_", with: "-").lowercased()
