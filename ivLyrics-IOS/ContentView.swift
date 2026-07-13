@@ -4158,6 +4158,7 @@ enum LyricsTimelineDisplayBuilder {
     private static let interludeMinDurationMs: Int64 = 500
     private static let trailingInterludeDelayMs: Int64 = 3_500
     private static let vocalPartCenterThreshold = 4
+    private static let displayWhitespace = CharacterSet.whitespacesAndNewlines
 
     static func lineID(index: Int, line: LyricsLine) -> String {
         "line-\(index)-\(line.id)"
@@ -4180,7 +4181,14 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     static func vocalPartDisplayText(_ part: LyricsLine.VocalPart) -> String {
-        part.text.trimmed.isEmpty ? part.syllables.map(\.text).joined() : part.text
+        for scalar in part.text.unicodeScalars where !displayWhitespace.contains(scalar) {
+            return part.text
+        }
+        var text = ""
+        for syllable in part.syllables {
+            text.append(syllable.text)
+        }
+        return text
     }
 
     static func shouldUseVocalPartSupplements(_ line: LyricsLine) -> Bool {
