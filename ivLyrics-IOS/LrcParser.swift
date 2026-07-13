@@ -25,16 +25,13 @@ enum LrcParser {
             starts.append(LyricsLine(startTimeMs: startMs, endTimeMs: startMs, text: text))
         }
 
-        var result: [LyricsLine] = []
-        result.reserveCapacity(starts.count)
         for index in starts.indices {
             let current = starts[index]
             let nextStart = index + 1 < starts.count ? starts[index + 1].startTimeMs : 0
             let fallbackEnd = durationMs > current.startTimeMs ? durationMs : current.startTimeMs + 4_000
-            let end = nextStart > current.startTimeMs ? nextStart : fallbackEnd
-            result.append(LyricsLine(startTimeMs: current.startTimeMs, endTimeMs: end, text: current.text))
+            starts[index].endTimeMs = nextStart > current.startTimeMs ? nextStart : fallbackEnd
         }
-        return result
+        return starts
     }
 
     static func parsePlain(_ plainLyrics: String?) -> [LyricsLine] {
