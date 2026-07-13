@@ -1,6 +1,14 @@
 import Foundation
 
 struct TrackSnapshot: Equatable, Hashable, Sendable {
+    private static let isrcSeparatorsRegex = try? NSRegularExpression(pattern: #"[\s-]"#)
+    private static let validIsrcRegex = try? NSRegularExpression(pattern: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#)
+    private static let spotifyTrackURIPrefix = "spotify:track:"
+    private static let spotifyTrackIdUTF8Count = 22
+    private static let spotifyTrackURIUTF8Count = 36
+    private static let keyWhitespacePattern = #"\s+"#
+    private static let keyWhitespaceRegex = try? NSRegularExpression(pattern: keyWhitespacePattern)
+
     var title: String
     var artist: String
     var album: String
@@ -56,12 +64,16 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     }
 
     var isSpotifyDjSegment: Bool {
-        sameMetadata(artist, "DJ X") && (sameMetadata(title, "Welcome") || sameMetadata(title, "Up Next"))
+        let normalizedArtist = Self.normalizeForKey(artist)
+        guard normalizedArtist == "dj x" else { return false }
+        let normalizedTitle = Self.normalizeForKey(title)
+        return normalizedTitle == "welcome" || normalizedTitle == "up next"
     }
 
     var stableKey: String {
-        if !trackId.isEmpty {
-            return "spotify:\(trackId)"
+        let spotifyTrackId = trackId
+        if !spotifyTrackId.isEmpty {
+            return "spotify:\(spotifyTrackId)"
         }
         return "\(Self.normalizeForKey(title))|\(Self.normalizeForKey(artist))|\(durationMs)"
     }
@@ -118,15 +130,45 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     }
 
     static func normalizeIsrc(_ value: String?) -> String {
-        let normalized = (value ?? "")
-            .replacingOccurrences(of: #"[\s-]"#, with: "", options: .regularExpression)
+        let source = value ?? ""
+        let compact: String
+        if let regex = isrcSeparatorsRegex {
+            compact = regex.stringByReplacingMatches(
+                in: source,
+                range: NSRange(source.startIndex..<source.endIndex, in: source),
+                withTemplate: ""
+            )
+        } else {
+            compact = source.replacingOccurrences(of: #"[\s-]"#, with: "", options: .regularExpression)
+        }
+        let normalized = compact
             .uppercased()
             .trimmed
-        return normalized.range(of: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#, options: .regularExpression) == nil ? "" : normalized
+        let isValid: Bool
+        if let regex = validIsrcRegex {
+            isValid = regex.firstMatch(
+                in: normalized,
+                range: NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            ) != nil
+        } else {
+            isValid = normalized.range(of: #"^[A-Z]{2}[A-Z0-9]{3}\d{7}$"#, options: .regularExpression) != nil
+        }
+        return isValid ? normalized : ""
     }
 
     static func extractSpotifyTrackId(_ value: String?) -> String {
         let text = (value ?? "").trimmed
+        let utf8Count = text.utf8.count
+        if utf8Count == spotifyTrackURIUTF8Count,
+           text.hasPrefix(spotifyTrackURIPrefix) {
+            let candidate = text.dropFirst(spotifyTrackURIPrefix.count)
+            if isAsciiSpotifyTrackId(candidate) {
+                return String(candidate)
+            }
+        }
+        if utf8Count == spotifyTrackIdUTF8Count, isAsciiSpotifyTrackId(text[...]) {
+            return text
+        }
         let pattern = #"(?:spotify:track:|open\.spotify\.com/track/)([A-Za-z0-9]{22})"#
         guard let match = text.range(of: pattern, options: .regularExpression) else {
             return text.range(of: #"^[A-Za-z0-9]{22}$"#, options: .regularExpression) == nil ? "" : text
@@ -138,18 +180,35 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
         return ""
     }
 
+    private static func isAsciiSpotifyTrackId(_ value: Substring) -> Bool {
+        return value.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57)
+                || (byte >= 65 && byte <= 90)
+                || (byte >= 97 && byte <= 122)
+        }
+    }
+
     static func normalizedSpotifyMediaId(_ value: String?) -> String {
         let text = (value ?? "").trimmed
         let spotifyId = extractSpotifyTrackId(text)
         return spotifyId.isEmpty ? text : "spotify:track:\(spotifyId)"
     }
 
+    @inline(never)
     private static func normalizeForKey(_ value: String) -> String {
-        value.trimmed.lowercased().replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-    }
-
-    private func sameMetadata(_ lhs: String, _ rhs: String) -> Bool {
-        Self.normalizeForKey(lhs) == Self.normalizeForKey(rhs)
+        let normalized = value.trimmed.lowercased()
+        guard let regex = keyWhitespaceRegex else {
+            return normalized.replacingOccurrences(
+                of: keyWhitespacePattern,
+                with: " ",
+                options: .regularExpression
+            )
+        }
+        return regex.stringByReplacingMatches(
+            in: normalized,
+            range: NSRange(normalized.startIndex..<normalized.endIndex, in: normalized),
+            withTemplate: " "
+        )
     }
 }
 
@@ -371,6 +430,84 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+enum KaraokeSyllableTimingNormalizer {
+    static func expandTimedChunks(_ syllables: [LyricsLine.Syllable]) -> [LyricsLine.Syllable] {
+#if DEBUG
+        _ = regressionChecks
+#endif
+        return expandTimedChunksUnchecked(syllables)
+    }
+
+    private static func expandTimedChunksUnchecked(
+        _ syllables: [LyricsLine.Syllable]
+    ) -> [LyricsLine.Syllable] {
+        guard syllables.contains(where: {
+            $0.text.count > 1 && $0.endTimeMs > $0.startTimeMs
+        }) else {
+            return syllables
+        }
+        var result: [LyricsLine.Syllable] = []
+        result.reserveCapacity(syllables.count)
+        for syllable in syllables {
+            let characterCount = syllable.text.count
+            guard characterCount > 1,
+                  syllable.endTimeMs > syllable.startTimeMs else {
+                result.append(syllable)
+                continue
+            }
+
+            let duration = syllable.endTimeMs - syllable.startTimeMs
+            let characterCount64 = Int64(characterCount)
+            let step = duration / characterCount64
+            let remainder = duration % characterCount64
+
+            func boundary(_ index: Int64) -> Int64 {
+                syllable.startTimeMs
+                    + step * index
+                    + min(index, remainder)
+            }
+
+            for (index, character) in syllable.text.enumerated() {
+                let start = boundary(Int64(index))
+                let end = boundary(Int64(index + 1))
+                result.append(LyricsLine.Syllable(
+                    text: String(character),
+                    startTimeMs: start,
+                    endTimeMs: max(start, end)
+                ))
+            }
+        }
+        return result
+    }
+
+#if DEBUG
+    private static let regressionChecks: Void = {
+        let oneCharacter = LyricsLine.Syllable(text: "한", startTimeMs: 100, endTimeMs: 400)
+        assert(expandTimedChunksUnchecked([oneCharacter]) == [oneCharacter])
+
+        let word = expandTimedChunksUnchecked([
+            LyricsLine.Syllable(text: "Back", startTimeMs: 100, endTimeMs: 500)
+        ])
+        assert(word.map(\.text) == ["B", "a", "c", "k"])
+        assert(word.map(\.startTimeMs) == [100, 200, 300, 400])
+        assert(word.map(\.endTimeMs) == [200, 300, 400, 500])
+
+        let complexText = "A e\u{301}👩🏽‍🚀!"
+        let complex = expandTimedChunksUnchecked([
+            LyricsLine.Syllable(text: complexText, startTimeMs: 0, endTimeMs: 500)
+        ])
+        assert(complex.map(\.text) == complexText.map(String.init))
+        assert(complex.map(\.text).joined() == complexText)
+        assert(complex.first?.startTimeMs == 0)
+        assert(complex.last?.endTimeMs == 500)
+        assert(zip(complex, complex.dropFirst()).allSatisfy { $0.endTimeMs == $1.startTimeMs })
+
+        let untimed = LyricsLine.Syllable(text: "word", startTimeMs: 800, endTimeMs: 800)
+        assert(expandTimedChunksUnchecked([untimed]) == [untimed])
+    }()
+#endif
+}
+
 struct LyricsResult: Codable, Equatable, Sendable {
     var lines: [LyricsLine]
     var providerLabel: String
@@ -379,6 +516,8 @@ struct LyricsResult: Codable, Equatable, Sendable {
     var isrc: String
     var spotifyTrackId: String
     var contributors: [SyncContributor]
+    var providerId: String
+    var selectionPolicyKey: String
 
     init(
         lines: [LyricsLine],
@@ -387,7 +526,9 @@ struct LyricsResult: Codable, Equatable, Sendable {
         karaoke: Bool,
         isrc: String = "",
         spotifyTrackId: String = "",
-        contributors: [SyncContributor] = []
+        contributors: [SyncContributor] = [],
+        providerId: String = "",
+        selectionPolicyKey: String = ""
     ) {
         self.lines = lines
         self.providerLabel = providerLabel
@@ -396,10 +537,59 @@ struct LyricsResult: Codable, Equatable, Sendable {
         self.isrc = TrackSnapshot.normalizeIsrc(isrc)
         self.spotifyTrackId = spotifyTrackId.trimmed
         self.contributors = contributors
+        self.providerId = providerId.trimmed.lowercased()
+        self.selectionPolicyKey = selectionPolicyKey.trimmed
+    }
+
+    func withSelection(providerId: String, selectionPolicyKey: String) -> LyricsResult {
+        LyricsResult(
+            lines: lines,
+            providerLabel: providerLabel,
+            detail: detail,
+            karaoke: karaoke,
+            isrc: isrc,
+            spotifyTrackId: spotifyTrackId,
+            contributors: contributors,
+            providerId: providerId,
+            selectionPolicyKey: selectionPolicyKey
+        )
     }
 
     static func empty(_ detail: String) -> LyricsResult {
         LyricsResult(lines: [], providerLabel: "", detail: detail, karaoke: false)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lines, providerLabel, detail, karaoke, isrc, spotifyTrackId, contributors
+        case providerId, selectionPolicyKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            lines: try container.decodeIfPresent([LyricsLine].self, forKey: .lines) ?? [],
+            providerLabel: try container.decodeIfPresent(String.self, forKey: .providerLabel) ?? "",
+            detail: try container.decodeIfPresent(String.self, forKey: .detail) ?? "",
+            karaoke: try container.decodeIfPresent(Bool.self, forKey: .karaoke) ?? false,
+            isrc: try container.decodeIfPresent(String.self, forKey: .isrc) ?? "",
+            spotifyTrackId: try container.decodeIfPresent(String.self, forKey: .spotifyTrackId) ?? "",
+            contributors: try container.decodeIfPresent([SyncContributor].self, forKey: .contributors) ?? [],
+            providerId: try container.decodeIfPresent(String.self, forKey: .providerId) ?? "",
+            selectionPolicyKey: try container.decodeIfPresent(String.self, forKey: .selectionPolicyKey) ?? ""
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(lines, forKey: .lines)
+        try container.encode(providerLabel, forKey: .providerLabel)
+        try container.encode(detail, forKey: .detail)
+        try container.encode(karaoke, forKey: .karaoke)
+        try container.encode(isrc, forKey: .isrc)
+        try container.encode(spotifyTrackId, forKey: .spotifyTrackId)
+        try container.encode(contributors, forKey: .contributors)
+        try container.encode(providerId, forKey: .providerId)
+        try container.encode(selectionPolicyKey, forKey: .selectionPolicyKey)
     }
 
     struct SyncContributor: Codable, Equatable, Hashable, Sendable {

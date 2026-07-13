@@ -1,5 +1,20 @@
 import Foundation
 
+private func removeOldestCacheFileForSingleOverflow(_ files: [URL], maxEntries: Int) -> Bool {
+    guard files.count == maxEntries + 1 else { return false }
+    var oldestFile: URL?
+    var oldestDate = Date.distantFuture
+    for file in files {
+        let date = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        if oldestFile == nil || date < oldestDate {
+            oldestFile = file
+            oldestDate = date
+        }
+    }
+    if let oldestFile { try? FileManager.default.removeItem(at: oldestFile) }
+    return true
+}
+
 nonisolated final class LyricsDiskCache: @unchecked Sendable {
     private struct Envelope: Codable {
         var version: Int
@@ -117,13 +132,17 @@ nonisolated final class LyricsDiskCache: @unchecked Sendable {
               files.count > maxEntries else {
             return
         }
-        let sorted = files.sorted {
-            let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return left < right
-        }
-        for file in sorted.prefix(files.count - maxEntries) {
-            try? FileManager.default.removeItem(at: file)
+        if removeOldestCacheFileForSingleOverflow(files, maxEntries: maxEntries) { return }
+        let sorted = files
+            .map { file in
+                (
+                    file: file,
+                    modificationDate: (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                )
+            }
+            .sorted { $0.modificationDate < $1.modificationDate }
+        for entry in sorted.prefix(files.count - maxEntries) {
+            try? FileManager.default.removeItem(at: entry.file)
         }
     }
 
@@ -228,13 +247,17 @@ nonisolated final class RawResponseDiskCache: @unchecked Sendable {
               files.count > maxEntries else {
             return
         }
-        let sorted = files.sorted {
-            let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return left < right
-        }
-        for file in sorted.prefix(files.count - maxEntries) {
-            try? FileManager.default.removeItem(at: file)
+        if removeOldestCacheFileForSingleOverflow(files, maxEntries: maxEntries) { return }
+        let sorted = files
+            .map { file in
+                (
+                    file: file,
+                    modificationDate: (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                )
+            }
+            .sorted { $0.modificationDate < $1.modificationDate }
+        for entry in sorted.prefix(files.count - maxEntries) {
+            try? FileManager.default.removeItem(at: entry.file)
         }
     }
 }

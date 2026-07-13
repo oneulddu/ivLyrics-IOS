@@ -169,10 +169,15 @@ final class AppViewModel: ObservableObject {
     private var lyricsLoadRequestID = UUID()
 
     var timelineContext: LyricsTimelineContext {
-        if let cachedTimelineContext {
+        let cacheLyricEndTimes = settings.autoInstrumentalBreakEnabled
+        if let cachedTimelineContext,
+           cachedTimelineContext.cachesLyricEndTimes == cacheLyricEndTimes {
             return cachedTimelineContext
         }
-        let context = LyricsTimelineContext(lines: lyricsResult.lines)
+        let context = LyricsTimelineContext(
+            lines: lyricsResult.lines,
+            cacheLyricEndTimes: cacheLyricEndTimes
+        )
         cachedTimelineContext = context
         return context
     }
@@ -345,6 +350,10 @@ final class AppViewModel: ObservableObject {
 
     var effectiveSelectedRuleSourceLang: String {
         effectiveSelectedSourceLang(lines: baseLyricsResult.lines.isEmpty ? lyricsResult.lines : baseLyricsResult.lines)
+    }
+
+    var activeLineIndex: Int {
+        activeLineIndex(at: adjustedPositionMs)
     }
 
     func refreshLocalizedStatusStrings() {
@@ -1109,7 +1118,9 @@ final class AppViewModel: ObservableObject {
             karaoke: result.karaoke,
             isrc: result.isrc,
             spotifyTrackId: result.spotifyTrackId,
-            contributors: result.contributors
+            contributors: result.contributors,
+            providerId: result.providerId,
+            selectionPolicyKey: result.selectionPolicyKey
         )
     }
 
@@ -1611,11 +1622,25 @@ final class AppViewModel: ObservableObject {
         if !line.text.trimmed.isEmpty {
             return line.text
         }
-        return line.vocalParts.map { part in
-            part.text.trimmed.isEmpty ? part.syllables.map(\.text).joined() : part.text
+        var result = ""
+        for part in line.vocalParts {
+            let value: String
+            if !part.text.trimmed.isEmpty {
+                value = part.text
+            } else {
+                var syllableText = ""
+                for syllable in part.syllables {
+                    syllableText.append(contentsOf: syllable.text)
+                }
+                guard !syllableText.trimmed.isEmpty else { continue }
+                value = syllableText
+            }
+            if !result.isEmpty {
+                result.append(" / ")
+            }
+            result.append(contentsOf: value)
         }
-        .filter { !$0.trimmed.isEmpty }
-        .joined(separator: " / ")
+        return result
     }
 
     private func pendingManualTrackSnapshot() -> TrackSnapshot? {
@@ -1721,20 +1746,29 @@ final class AppViewModel: ObservableObject {
             latestSettings.lyricsProviderSettings,
             multiProviderAuthorized: latestSettings.lyricsProviderMultiProviderAuthorized
         )
+        let authorizationIsCurrent: Bool
+        switch preview.authorization {
+        case let .standard(signature, providerId):
+            authorizationIsCurrent = latestPolicy.effectiveMode == .legacy
+                && signature == latestSettings.standardLyricsProviderPolicySignature
+                && latestSettings.enabledStandardLyricsProviderOrder.contains(providerId)
+        case let .multiProvider(generation, effectiveMode, baseProvider):
+            authorizationIsCurrent = LyricsProviderAppContracts.cachePreviewStillAuthorized(
+                requestGeneration: generation,
+                currentGeneration: latestSettings.lyricsProviderPolicyGeneration,
+                requestEffectiveMode: effectiveMode.rawValue,
+                currentEffectiveMode: latestPolicy.effectiveMode.rawValue,
+                baseProviderIsAllowed: latestPolicy.allows(baseProvider)
+            )
+        }
         guard loaded.trackKey == track.stableKey,
               isLyricsLoadCurrent(requestID, trackKey: track.stableKey),
-              LyricsProviderAppContracts.cachePreviewStillAuthorized(
-                requestGeneration: preview.policyGeneration,
-                currentGeneration: latestSettings.lyricsProviderPolicyGeneration,
-                requestEffectiveMode: preview.effectiveMode.rawValue,
-                currentEffectiveMode: latestPolicy.effectiveMode.rawValue,
-                baseProviderIsAllowed: latestPolicy.allows(preview.baseProvider)
-              ) else {
+              authorizationIsCurrent else {
             return
         }
         appendLogs(loaded.logs)
         let cached = localizedLyricsResult(loaded.result)
-        guard !cached.lines.isEmpty, !cached.karaoke else { return }
+        guard !cached.lines.isEmpty else { return }
         baseLyricsResult = cached
         lyricsResult = cached
         status = .loaded
@@ -1784,8 +1818,9 @@ final class AppViewModel: ObservableObject {
             uptime: ProcessInfo.processInfo.systemUptime
         )
         let incoming = playback.track
+        let incomingKey = incoming.stableKey
         let previousKey = currentTrack?.stableKey ?? ""
-        let changedTrack = previousKey != incoming.stableKey
+        let changedTrack = previousKey != incomingKey
         inputTitle = incoming.title
         inputArtist = incoming.artist
         inputAlbum = incoming.album
@@ -1794,8 +1829,14 @@ final class AppViewModel: ObservableObject {
         inputDuration = formatDurationInput(incoming.durationMs)
         currentTrack = incoming
         nowPositionMs = playback.progressMs
-        trackOffsetMs = settings.trackSyncOffsetMs(incoming.stableKey)
-        videoOffsetMs = settings.trackVideoSyncOffsetMs(incoming.stableKey)
+        let nextTrackOffsetMs = settings.trackSyncOffsetMs(incomingKey)
+        if trackOffsetMs != nextTrackOffsetMs {
+            trackOffsetMs = nextTrackOffsetMs
+        }
+        let nextVideoOffsetMs = settings.trackVideoSyncOffsetMs(incomingKey)
+        if videoOffsetMs != nextVideoOffsetMs {
+            videoOffsetMs = nextVideoOffsetMs
+        }
         saveManualInputs()
         if changedTrack {
             selectedRuleSourceLang = "auto"
@@ -2059,7 +2100,9 @@ final class AppViewModel: ObservableObject {
             karaoke: target.karaoke,
             isrc: target.isrc,
             spotifyTrackId: target.spotifyTrackId,
-            contributors: target.contributors
+            contributors: target.contributors,
+            providerId: target.providerId,
+            selectionPolicyKey: target.selectionPolicyKey
         )
     }
 
@@ -2245,7 +2288,9 @@ final class AppViewModel: ObservableObject {
             karaoke: source.karaoke,
             isrc: normalizedIsrc,
             spotifyTrackId: safeSpotifyTrackId,
-            contributors: source.contributors
+            contributors: source.contributors,
+            providerId: source.providerId,
+            selectionPolicyKey: source.selectionPolicyKey
         )
     }
 
@@ -2338,6 +2383,23 @@ final class AppViewModel: ObservableObject {
         return fallback
     }
 
+    private func activeLineIndex(at position: Int64) -> Int {
+        guard !lyricsResult.lines.isEmpty else { return -1 }
+        var candidate = 0
+        for index in lyricsResult.lines.indices {
+            let line = lyricsResult.lines[index]
+            if position >= line.startTimeMs {
+                candidate = index
+            }
+            if line.endTimeMs > line.startTimeMs,
+               position >= line.startTimeMs,
+               position < line.endTimeMs {
+                return index
+            }
+        }
+        return candidate
+    }
+
     private static func firstLyricTimeMs(in result: LyricsResult) -> Int64 {
         var best = Int64.max
         for line in result.lines {
@@ -2379,11 +2441,9 @@ final class AppViewModel: ObservableObject {
             }
         }
         let positionMs = adjustedPositionMs
-        let context = timelineContext
         pictureInPictureController.update(
             track: currentTrack,
             lyrics: lyricsResult,
-            activeLineIndex: context.activeLineIndex(at: positionMs),
             positionMs: positionMs,
             title: titleText,
             artist: artistText,
@@ -2534,12 +2594,18 @@ final class AppViewModel: ObservableObject {
     }
 
     private func saveManualInputs() {
-        defaults.set(inputTitle.trimmed, forKey: "manual_track_title")
-        defaults.set(inputArtist.trimmed, forKey: "manual_track_artist")
-        defaults.set(inputAlbum.trimmed, forKey: "manual_track_album")
-        defaults.set(inputDuration.trimmed, forKey: "manual_track_duration")
-        defaults.set(inputSpotifyId.trimmed, forKey: "manual_track_spotify_id")
-        defaults.set(inputIsrc.trimmed, forKey: "manual_track_isrc")
+        saveManualInput(inputTitle, key: "manual_track_title")
+        saveManualInput(inputArtist, key: "manual_track_artist")
+        saveManualInput(inputAlbum, key: "manual_track_album")
+        saveManualInput(inputDuration, key: "manual_track_duration")
+        saveManualInput(inputSpotifyId, key: "manual_track_spotify_id")
+        saveManualInput(inputIsrc, key: "manual_track_isrc")
+    }
+
+    private func saveManualInput(_ value: String, key: String) {
+        let normalized = value.trimmed
+        guard defaults.string(forKey: key) != normalized else { return }
+        defaults.set(normalized, forKey: key)
     }
 
     private func parseDurationMs(_ value: String) -> Int64 {

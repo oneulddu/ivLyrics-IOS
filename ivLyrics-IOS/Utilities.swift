@@ -30,9 +30,37 @@ extension Array where Element == String {
 }
 
 enum IvLyricsUtilities {
+    private static let lowercaseHexDigits = Array("0123456789abcdef".utf8)
+    private static let leadingLrcTimestampPattern = #"^\[\d+:\d+(?:[.,]\d+)?\]\s*"#
+    private static let leadingLrcTimestampRegex = try? NSRegularExpression(
+        pattern: leadingLrcTimestampPattern
+    )
+    private static let lrcMetadataLinePattern = #"^\s*\[(?:ar|al|ti|au|length|by|offset|re|ve):[^\]]*\]\s*$"#
+    private static let comparableSingleQuoteRegex = try? NSRegularExpression(
+        pattern: "[\\u{2018}\\u{2019}]"
+    )
+    private static let comparableDoubleQuoteRegex = try? NSRegularExpression(
+        pattern: "[\\u{201c}\\u{201d}]"
+    )
+    private static let comparableBracketPattern = #"[()\[\]{}]"#
+    private static let comparableBracketRegex = try? NSRegularExpression(
+        pattern: comparableBracketPattern
+    )
+    private static let comparableWhitespacePattern = #"\s+"#
+    private static let comparableWhitespaceRegex = try? NSRegularExpression(
+        pattern: comparableWhitespacePattern
+    )
+
     static func sha256(_ value: String) -> String {
         let digest = SHA256.hash(data: Data(value.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        var encoded = [UInt8](repeating: 0, count: SHA256.Digest.byteCount * 2)
+        var offset = 0
+        for byte in digest {
+            encoded[offset] = lowercaseHexDigits[Int(byte >> 4)]
+            encoded[offset + 1] = lowercaseHexDigits[Int(byte & 0x0f)]
+            offset += 2
+        }
+        return String(decoding: encoded, as: UTF8.self)
     }
 
     static func encodeParams(_ params: [String: String]) -> String {
@@ -66,14 +94,45 @@ enum IvLyricsUtilities {
     }
 
     static func normalizeComparable(_ value: String?) -> String {
-        (value ?? "")
+        var normalized = (value ?? "")
             .nfkc()
             .lowercased()
             .trimmed
-            .regexReplacing("[\\u{2018}\\u{2019}]", with: "'")
-            .regexReplacing("[\\u{201c}\\u{201d}]", with: "\"")
-            .regexReplacing("[()\\[\\]{}]", with: "")
-            .regexReplacing(#"\s+"#, with: " ")
+        if let comparableSingleQuoteRegex {
+            normalized = replacingMatches(in: normalized, regex: comparableSingleQuoteRegex, with: "'")
+        }
+        if let comparableDoubleQuoteRegex {
+            normalized = replacingMatches(in: normalized, regex: comparableDoubleQuoteRegex, with: "\"")
+        }
+        if let comparableBracketRegex {
+            normalized = replacingMatches(in: normalized, regex: comparableBracketRegex, with: "")
+        } else {
+            normalized = normalized.replacingOccurrences(
+                of: comparableBracketPattern,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        if let comparableWhitespaceRegex {
+            return replacingMatches(in: normalized, regex: comparableWhitespaceRegex, with: " ")
+        }
+        return normalized.replacingOccurrences(
+            of: comparableWhitespacePattern,
+            with: " ",
+            options: .regularExpression
+        )
+    }
+
+    private static func replacingMatches(
+        in value: String,
+        regex: NSRegularExpression,
+        with replacement: String
+    ) -> String {
+        regex.stringByReplacingMatches(
+            in: value,
+            range: NSRange(value.startIndex..<value.endIndex, in: value),
+            withTemplate: replacement
+        )
     }
 
     static func sameSearchMetadata(_ left: String, _ right: String) -> Bool {
@@ -133,14 +192,13 @@ enum IvLyricsUtilities {
 
     static func lyricsFingerprint(_ text: String) -> String {
         var hash: UInt64 = 2_166_136_261
-        let chars = splitChars(text)
-        for character in chars {
-            for scalar in character.unicodeScalars {
-                hash ^= UInt64(scalar.value)
-                hash = (hash * 16_777_619) & 0xffff_ffff
-            }
+        var count = 0
+        for scalar in text.nfc().unicodeScalars {
+            hash ^= UInt64(scalar.value)
+            hash = (hash * 16_777_619) & 0xffff_ffff
+            count += 1
         }
-        return "lrclib-\(String(hash, radix: 36))-\(String(chars.count, radix: 36))"
+        return "lrclib-\(String(hash, radix: 36))-\(String(count, radix: 36))"
     }
 
     static func comparableLyricsLines(_ text: String?, stripTimestamps: Bool, normalizeParentheticalLines: Bool = false) -> [String] {
@@ -149,7 +207,7 @@ enum IvLyricsUtilities {
         for rawLine in text.components(separatedBy: .newlines) {
             var line = stripTimestamps ? stripLeadingLrcTimestamp(rawLine) : rawLine.trimmed
             line = line.nfc().trimmed
-            if line.isEmpty || line.range(of: #"^\s*\[(?:ar|al|ti|au|length|by|offset|re|ve):[^\]]*\]\s*$"#, options: .regularExpression) != nil {
+            if line.isEmpty || isLrcMetadataLine(line) {
                 continue
             }
             lines.append(line)
@@ -160,8 +218,24 @@ enum IvLyricsUtilities {
         return lines
     }
 
+    private static func isLrcMetadataLine(_ line: String) -> Bool {
+        guard line.utf8.contains(0x3A) else { return false }
+        return line.range(of: lrcMetadataLinePattern, options: .regularExpression) != nil
+    }
+
     static func stripLeadingLrcTimestamp(_ text: String) -> String {
-        text.replacingOccurrences(of: #"^\[\d+:\d+(?:[.,]\d+)?\]\s*"#, with: "", options: .regularExpression)
+        guard let regex = leadingLrcTimestampRegex else {
+            return text.replacingOccurrences(
+                of: leadingLrcTimestampPattern,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..<text.endIndex, in: text),
+            withTemplate: ""
+        )
     }
 
     static func stripLrcTimestamps(_ text: String?) -> String {

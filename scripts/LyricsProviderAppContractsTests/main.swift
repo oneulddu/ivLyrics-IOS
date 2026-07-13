@@ -112,6 +112,39 @@ expect(LyricsProviderAppContracts.unofficialProviderRawValues.contains("unison")
 expect(LyricsProviderAppContracts.providerDisplayName("unison") == "Unison",
        "Unison display name must be stable")
 
+let standardDefaults = LyricsProviderAppContracts.standardEffectiveProviderStates(
+    order: LyricsProviderAppContracts.standardProviderOrderRawValues,
+    enabled: [:],
+    remoteGlobalDisable: false
+)
+expect(standardDefaults.order == ["lrclib"],
+       "fresh installs must enable only the standard LRCLIB provider")
+expect(Set(standardDefaults.enabled.filter(\.value).map(\.key)) == ["lrclib"],
+       "standard enabled defaults must agree with the effective order")
+
+let standardOptIn = LyricsProviderAppContracts.standardEffectiveProviderStates(
+    order: ["lyricsplus", "unison", "lrclib"],
+    enabled: ["lrclib": true, "lyricsplus": true, "unison": true],
+    remoteGlobalDisable: false
+)
+let standardKilled = LyricsProviderAppContracts.standardEffectiveProviderStates(
+    order: ["lyricsplus", "unison", "lrclib"],
+    enabled: ["lrclib": true, "lyricsplus": true, "unison": true],
+    remoteGlobalDisable: true
+)
+expect(standardKilled.order == ["lrclib"],
+       "remote global disable must force the standard provider order to LRCLIB only")
+expect(standardKilled.signatureComponent != standardOptIn.signatureComponent,
+       "standard policy signature must change when the remote kill-switch flips")
+
+let standardToggled = LyricsProviderAppContracts.standardEffectiveProviderStates(
+    order: LyricsProviderAppContracts.standardProviderOrderRawValues,
+    enabled: ["lrclib": true, "lyricsplus": true],
+    remoteGlobalDisable: false
+)
+expect(standardToggled.signatureComponent != standardDefaults.signatureComponent,
+       "standard policy signature must change when a provider is toggled")
+
 expect(LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
     providerID: "unison",
     lineSyllableDurationsMs: [[500, 500]],

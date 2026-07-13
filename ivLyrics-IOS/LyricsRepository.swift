@@ -33,6 +33,22 @@ actor LyricsRepository {
         var savedAtMs: Int64
     }
 
+    private struct ProviderVariants {
+        var providerId: String
+        var karaoke: LyricsResult?
+        var synced: LyricsResult?
+        var plain: LyricsResult?
+
+        func result(for type: String) -> LyricsResult? {
+            switch type {
+            case AppSettings.standardLyricsTypeKaraoke: return karaoke
+            case AppSettings.standardLyricsTypeSynced: return synced
+            case AppSettings.standardLyricsTypePlain: return plain
+            default: return nil
+            }
+        }
+    }
+
     private var cache: [String: MemoryLyricsCacheEntry] = [:]
     private var providerCache: [String: LyricsCacheEnvelope<LyricsResult>] = [:]
     private let providerDiskCache = ProviderLyricsDiskCache()
@@ -77,11 +93,18 @@ actor LyricsRepository {
         var artworkURL: URL?
     }
 
+    enum CachedLyricsAuthorization: Sendable {
+        case standard(signature: String, providerId: String)
+        case multiProvider(
+            generation: UInt64,
+            effectiveMode: LyricsProviderMode,
+            baseProvider: LyricsProviderID
+        )
+    }
+
     struct CachedLyricsPreview: Sendable {
         var loaded: LoadedLyrics
-        var policyGeneration: UInt64
-        var effectiveMode: LyricsProviderMode
-        var baseProvider: LyricsProviderID
+        var authorization: CachedLyricsAuthorization
     }
 
     typealias CachedLyricsLoadedHandler = @MainActor @Sendable (CachedLyricsPreview) async -> Void
@@ -111,7 +134,84 @@ actor LyricsRepository {
         cache[key] = MemoryLyricsCacheEntry(result: result, savedAtMs: nowMs())
     }
 
+    private func canApplyIvLyricsSyncToCachedResult(
+        _ result: LyricsResult,
+        settings: AppSettings.Snapshot
+    ) -> Bool {
+        guard !result.lines.isEmpty,
+              !result.karaoke,
+              let provider = AppSettings.standardLyricsProviderById(result.providerId),
+              provider.supportsIvLyricsSync,
+              settings.enabledStandardLyricsProviderOrder.contains(provider.id) else {
+            return false
+        }
+        return settings.isStandardLyricsTypeEnabled(
+            providerId: provider.id,
+            type: AppSettings.standardLyricsTypeKaraoke
+        )
+    }
+
+    private func shouldRevalidateCachedResult(
+        _ result: LyricsResult,
+        settings: AppSettings.Snapshot,
+        resolvedIsrc: String
+    ) -> Bool {
+        guard !result.lines.isEmpty, result.selectionPolicyKey != "manual" else { return false }
+        if canApplyIvLyricsSyncToCachedResult(result, settings: settings) { return true }
+        guard settings.standardPreferSyncDataProvider,
+              !TrackSnapshot.normalizeIsrc(resolvedIsrc).isEmpty else {
+            return false
+        }
+        guard let provider = AppSettings.standardLyricsProviderById(result.providerId) else { return true }
+        return !provider.supportsIvLyricsSync || !result.karaoke
+    }
+
+    private func preferredIvLyricsSyncProviderId(
+        settings: AppSettings.Snapshot,
+        availableProviderIds: Set<String>
+    ) -> String {
+        guard settings.standardPreferSyncDataProvider, !availableProviderIds.isEmpty else { return "" }
+        return settings.enabledStandardLyricsProviderOrder.first { providerId in
+            guard let provider = AppSettings.standardLyricsProviderById(providerId) else { return false }
+            return provider.supportsIvLyricsSync
+                && availableProviderIds.contains(providerId)
+                && settings.isStandardLyricsTypeEnabled(
+                    providerId: providerId,
+                    type: AppSettings.standardLyricsTypeKaraoke
+                )
+        } ?? ""
+    }
+
     func loadLyrics(
+        track: TrackSnapshot,
+        settings: AppSettings.Snapshot,
+        onCachedLyricsLoaded: CachedLyricsLoadedHandler? = nil,
+        onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler? = nil,
+        allowPolicyChangeRetry: Bool = true
+    ) async throws -> LoadedLyrics {
+        let policy = LyricsProviderPolicyEvaluator.evaluate(
+            settings.lyricsProviderSettings,
+            multiProviderAuthorized: settings.lyricsProviderMultiProviderAuthorized
+        )
+        if policy.effectiveMode == .multiProvider {
+            return try await loadMultiProviderEntry(
+                track: track,
+                settings: settings,
+                onCachedLyricsLoaded: onCachedLyricsLoaded,
+                onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                allowPolicyChangeRetry: allowPolicyChangeRetry
+            )
+        }
+        return try await loadStandardLyrics(
+            track: track,
+            settings: settings,
+            onCachedLyricsLoaded: onCachedLyricsLoaded,
+            onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+            allowPolicyChangeRetry: allowPolicyChangeRetry
+        )
+    }
+
+    private func loadMultiProviderEntry(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
         onCachedLyricsLoaded: CachedLyricsLoadedHandler? = nil,
@@ -174,9 +274,11 @@ actor LyricsRepository {
                     resolvedIsrc: result.isrc,
                     resolvedSpotifyTrackId: result.spotifyTrackId
                 ),
-                policyGeneration: settings.lyricsProviderPolicyGeneration,
-                effectiveMode: providerPolicy.effectiveMode,
-                baseProvider: baseProvider
+                authorization: .multiProvider(
+                    generation: settings.lyricsProviderPolicyGeneration,
+                    effectiveMode: providerPolicy.effectiveMode,
+                    baseProvider: baseProvider
+                )
             )
         }
         var publishedSpotifyMetadataKeys = Set<String>()
@@ -360,7 +462,7 @@ actor LyricsRepository {
             await publishResolvedMetadata(isrc: isrc, spotifyTrackId: spotifyTrackId, artworkURL: spotifyMatch?.artworkURL)
         }
 
-        let syncData = isrc.isEmpty ? nil : await fetchSyncData(isrc: isrc, track: track, spotifyMatch: spotifyMatch, log: log)
+        let syncData = isrc.isEmpty ? nil : await fetchSyncData(isrc: isrc, providerId: lrclibProviderId, track: track, spotifyMatch: spotifyMatch, log: log)
         if let cachedBase {
             let latestSettings = AppSettings.shared.snapshot
             guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: cachedBaseProvider) else {
@@ -416,104 +518,7 @@ actor LyricsRepository {
                 allowPolicyChangeRetry: allowPolicyChangeRetry
             )
         }
-        guard providerPolicy.allows(.lrclib) else {
-            log("provider policy: LRCLIB disabled before legacy network lookup")
-            return LoadedLyrics(trackKey: key, result: .empty(ui("repo.lyrics_not_found", settings: settings)),
-                                artworkURL: spotifyMatch?.artworkURL, logs: logs,
-                                resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
-        }
-        var candidate: LrclibCandidate?
-        var loadedFromSyncSource = false
-
-        let syncSourceLrclibId = syncData?.lrclibId ?? 0
-        if syncSourceLrclibId > 0 {
-            log("sync-data source: lrclibId=\(syncSourceLrclibId), direct loading LRCLIB")
-            candidate = await fetchLrclibCandidateById(syncSourceLrclibId, log: log)
-            if let candidate {
-                decorateCandidateForSyncData(candidate, syncData: syncData)
-                loadedFromSyncSource = true
-            } else {
-                log("lrclib direct load failed; falling back to search")
-            }
-        } else if syncData != nil {
-            log("sync-data source: no lrclibId; falling back to LRCLIB search")
-        }
-
-        if candidate == nil {
-            candidate = try await searchBestCandidate(track: track, spotifyMatch: spotifyMatch, syncData: syncData, log: log)
-        }
-
-        guard let candidate else {
-            log("result: no LRCLIB candidate selected")
-            let result = LyricsResult.empty(ui("repo.lyrics_not_found", settings: settings))
-            return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
-        }
-        log("lrclib selected: \(describeLrclibCandidate(candidate))" + (loadedFromSyncSource ? " / source=sync-data.lrclibId" : " / source=search"))
-
-        let lineSynced = candidate.useSyncedLyrics()
-        let baseLines = lineSynced
-            ? LrcParser.parseSynced(candidate.syncedLyrics, durationMs: secondsToMs(candidate.durationSeconds, fallbackDurationMs: track.durationMs))
-            : LrcParser.parsePlain(candidate.plainLyrics)
-
-        guard !baseLines.isEmpty else {
-            if candidate.instrumental {
-                log("result: instrumental track")
-                let result = LyricsResult.empty(ui("repo.instrumental", settings: settings))
-                return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
-            }
-            log("result: LRCLIB result has no renderable lyrics")
-            let result = LyricsResult.empty(ui("repo.no_renderable_lyrics", settings: settings))
-            return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
-        }
-        log("lyrics base: lines=\(baseLines.count) / \(lineSynced ? "LRCLIB synced" : "LRCLIB plain")")
-
-        if let syncData {
-            let applied = SyncDataApplier.applyWithDiagnostics(baseLyrics: baseLines, syncBody: syncData.syncBody, track: track)
-            for diagnostic in applied.diagnostics {
-                log("sync-data apply: \(diagnostic)")
-            }
-            if !applied.lines.isEmpty {
-                log("sync-data applied: karaoke lines=\(applied.lines.count) / vocalParts=\(applied.lines.reduce(0) { $0 + $1.vocalParts.count })")
-                let result = LyricsResult(
-                    lines: applied.lines,
-                    providerLabel: "ivLyrics sync-data + LRCLIB",
-                    detail: ui(loadedFromSyncSource ? "repo.detail.sync_applied_direct" : "repo.detail.sync_applied_search", settings: settings),
-                    karaoke: true,
-                    isrc: isrc,
-                    spotifyTrackId: spotifyTrackId,
-                    contributors: syncData.contributors
-                )
-                putMemoryCachedLyrics(key, result: result)
-                diskCache.put(key, result: result)
-                storeProviderCache(result: result, key: providerCacheKey, policy: providerPolicy,
-                                   baseProvider: .lrclib, providerTrackID: String(candidate.id),
-                                   timing: lineSynced ? .lineSynced : .plain, syncDataApplied: true)
-                return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
-            }
-            log("sync-data apply failed: falling back to LRCLIB line lyrics")
-            if !syncData.contributors.isEmpty {
-                log("sync-data contributors ignored: sync-data was not applied")
-            }
-        }
-
-        let detail = ui(
-            isrc.isEmpty ? "repo.detail.no_spotify_isrc" : (syncData == nil ? "repo.detail.no_sync_data" : "repo.detail.sync_apply_failed"),
-            settings: settings
-        )
-        let result = LyricsResult(
-            lines: baseLines,
-            providerLabel: lineSynced ? "LRCLIB synced" : "LRCLIB plain",
-            detail: detail,
-            karaoke: false,
-            isrc: isrc,
-            spotifyTrackId: spotifyTrackId
-        )
-        putMemoryCachedLyrics(key, result: result)
-        diskCache.put(key, result: result)
-        storeProviderCache(result: result, key: providerCacheKey, policy: providerPolicy,
-                           baseProvider: .lrclib, providerTrackID: String(candidate.id),
-                           timing: lineSynced ? .lineSynced : .plain, syncDataApplied: false)
-        return LoadedLyrics(trackKey: key, result: result, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+        throw CancellationError()
     }
 
     private func applySyncDataToCachedBase(
@@ -562,6 +567,654 @@ actor LyricsRepository {
         )
     }
 
+    private func loadStandardLyrics(
+        track: TrackSnapshot,
+        settings: AppSettings.Snapshot,
+        onCachedLyricsLoaded: CachedLyricsLoadedHandler?,
+        onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler?,
+        allowPolicyChangeRetry: Bool
+    ) async throws -> LoadedLyrics {
+        guard track.hasUsableMetadata else {
+            return LoadedLyrics(trackKey: "", result: .empty(ui("repo.metadata_waiting", settings: settings)), artworkURL: nil, logs: [], resolvedIsrc: "", resolvedSpotifyTrackId: "")
+        }
+
+        var logs: [String] = []
+        func log(_ message: String) {
+            logs.append(message)
+        }
+
+        let key = track.stableKey
+        let requestPolicySignature = settings.standardLyricsProviderPolicySignature
+        let cacheKey = lyricsCacheKey(trackKey: key, settings: settings)
+
+        func restartIfStandardPolicyChanged() async throws -> LoadedLyrics? {
+            let latestSettings = AppSettings.shared.snapshot
+            let latestPolicy = LyricsProviderPolicyEvaluator.evaluate(
+                latestSettings.lyricsProviderSettings,
+                multiProviderAuthorized: latestSettings.lyricsProviderMultiProviderAuthorized
+            )
+            guard latestPolicy.effectiveMode == .legacy,
+                  latestSettings.standardLyricsProviderPolicySignature == requestPolicySignature else {
+                if allowPolicyChangeRetry {
+                    return try await loadLyrics(
+                        track: track,
+                        settings: latestSettings,
+                        onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onSpotifyMetadataResolved: onSpotifyMetadataResolved,
+                        allowPolicyChangeRetry: false
+                    )
+                }
+                throw CancellationError()
+            }
+            return nil
+        }
+
+        func validatedLoaded(
+            result: LyricsResult,
+            artworkURL: URL?,
+            resolvedIsrc: String,
+            resolvedSpotifyTrackId: String,
+            shouldStore: Bool
+        ) async throws -> LoadedLyrics {
+            if let restarted = try await restartIfStandardPolicyChanged() {
+                return restarted
+            }
+            if shouldStore {
+                putMemoryCachedLyrics(cacheKey, result: result)
+                diskCache.put(cacheKey, result: result)
+            }
+            return LoadedLyrics(
+                trackKey: key,
+                result: result,
+                artworkURL: artworkURL,
+                logs: logs,
+                resolvedIsrc: resolvedIsrc,
+                resolvedSpotifyTrackId: resolvedSpotifyTrackId
+            )
+        }
+
+        var publishedSpotifyMetadataKeys = Set<String>()
+        func publishResolvedMetadata(isrc: String, spotifyTrackId: String, artworkURL: URL?) async {
+            guard let onSpotifyMetadataResolved else { return }
+            let normalizedIsrc = TrackSnapshot.normalizeIsrc(isrc)
+            let safeSpotifyTrackId = spotifyTrackId.trimmed
+            guard !normalizedIsrc.isEmpty || !safeSpotifyTrackId.isEmpty || artworkURL != nil else { return }
+            let eventKey = "\(normalizedIsrc)|\(safeSpotifyTrackId)|\(artworkURL?.absoluteString ?? "")"
+            guard !publishedSpotifyMetadataKeys.contains(eventKey) else { return }
+            publishedSpotifyMetadataKeys.insert(eventKey)
+            await onSpotifyMetadataResolved(
+                ResolvedSpotifyMetadata(
+                    trackKey: key,
+                    isrc: normalizedIsrc,
+                    spotifyTrackId: safeSpotifyTrackId,
+                    artworkURL: artworkURL
+                )
+            )
+        }
+
+        var cachedBase: LyricsResult?
+        func admitStandardCachedResult(
+            _ candidate: LyricsResult,
+            source: String,
+            inheritedLegacyCache: Bool = false
+        ) async throws -> LoadedLyrics? {
+            if let restarted = try await restartIfStandardPolicyChanged() {
+                return restarted
+            }
+            let providerId = inheritedLegacyCache || candidate.providerId.trimmed.isEmpty
+                ? lrclibProviderId
+                : candidate.providerId
+            let result = inheritedLegacyCache
+                ? candidate.withSelection(providerId: lrclibProviderId, selectionPolicyKey: requestPolicySignature)
+                : candidate
+            if inheritedLegacyCache {
+                putMemoryCachedLyrics(cacheKey, result: result)
+                diskCache.put(cacheKey, result: result)
+                log("legacy cache inherited into standard LRCLIB policy cache")
+            }
+            let cachedIsrc = IvLyricsUtilities.firstNonEmpty(result.isrc, track.isrc)
+            if !shouldRevalidateCachedResult(result, settings: settings, resolvedIsrc: cachedIsrc) {
+                log("\(source) cache hit: provider=\(providerId) / contributors=\(result.contributors.count)")
+                return LoadedLyrics(
+                    trackKey: key,
+                    result: result,
+                    artworkURL: nil,
+                    logs: logs,
+                    resolvedIsrc: result.isrc,
+                    resolvedSpotifyTrackId: result.spotifyTrackId
+                )
+            }
+            cachedBase = result
+            log("\(source) cache hit: lyrics served immediately; rechecking OpenDB sync-data priority in background")
+            if let onCachedLyricsLoaded {
+                if let restarted = try await restartIfStandardPolicyChanged() {
+                    return restarted
+                }
+                await onCachedLyricsLoaded(
+                    CachedLyricsPreview(
+                        loaded: LoadedLyrics(
+                            trackKey: key,
+                            result: result,
+                            artworkURL: nil,
+                            logs: logs,
+                            resolvedIsrc: result.isrc,
+                            resolvedSpotifyTrackId: result.spotifyTrackId
+                        ),
+                        authorization: .standard(signature: requestPolicySignature, providerId: providerId)
+                    )
+                )
+                logs.removeAll(keepingCapacity: true)
+            }
+            return nil
+        }
+
+        if let cached = getMemoryCachedLyrics(cacheKey),
+           let loaded = try await admitStandardCachedResult(cached, source: "memory") {
+            return loaded
+        }
+        if cachedBase == nil, let diskCached = diskCache.get(cacheKey) {
+            putMemoryCachedLyrics(cacheKey, result: diskCached)
+            if let loaded = try await admitStandardCachedResult(diskCached, source: "disk") {
+                return loaded
+            }
+        }
+        if cachedBase == nil,
+           settings.enabledStandardLyricsProviderOrder == [lrclibProviderId],
+           let legacyCached = getMemoryCachedLyrics(key) ?? diskCache.get(key),
+           let loaded = try await admitStandardCachedResult(
+               legacyCached,
+               source: "legacy",
+               inheritedLegacyCache: true
+           ) {
+            return loaded
+        }
+
+        log("track: \"\(track.title)\" / \"\(track.artist)\"" + (track.album.isEmpty ? "" : " / album=\"\(track.album)\"") + " / duration=\(track.durationMs)ms" + (track.isrc.isEmpty ? "" : " / player ISRC=\(track.isrc)"))
+        let hasCachedIsrc = cachedBase?.isrc.isEmpty == false
+        log(hasCachedIsrc
+            ? "flow: cached ISRC -> provider quality selection"
+            : "flow: Spotify Web API search -> provider quality selection")
+
+        let spotifyMatch: SpotifyTrackMatch?
+        if let cachedBase, hasCachedIsrc {
+            log("spotify lookup skipped: cached ISRC=\(cachedBase.isrc)" + (cachedBase.spotifyTrackId.isEmpty ? "" : " / trackId=\(cachedBase.spotifyTrackId)"))
+            await publishResolvedMetadata(
+                isrc: cachedBase.isrc,
+                spotifyTrackId: cachedBase.spotifyTrackId,
+                artworkURL: nil
+            )
+            spotifyMatch = nil
+        } else {
+            spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
+                await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
+            }
+        }
+        let isrc = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.isrc, track.isrc, cachedBase?.isrc)
+        let spotifyTrackId = IvLyricsUtilities.firstNonEmpty(spotifyMatch?.spotifyId, track.trackId, cachedBase?.spotifyTrackId)
+        let hasSpotifyIsrc = spotifyMatch?.isrc.isEmpty == false
+        let isrcFromCache = !hasSpotifyIsrc && track.isrc.isEmpty && cachedBase?.isrc.isEmpty == false
+        let isrcSource = isrc.isEmpty ? "" : (hasSpotifyIsrc ? "Spotify Web API" : (isrcFromCache ? "lyrics cache" : "player metadata"))
+        log(isrc.isEmpty ? "isrc: unavailable after Spotify lookup" : "isrc: \(isrc) (\(isrcSource))")
+        if !isrc.isEmpty {
+            await publishResolvedMetadata(isrc: isrc, spotifyTrackId: spotifyTrackId, artworkURL: spotifyMatch?.artworkURL)
+        }
+
+        let syncDataProviders = isrc.isEmpty
+            ? Set<String>()
+            : await availableSyncDataProviderIds(isrc: isrc, log: log)
+        if let cachedBase {
+            let preferredSyncProvider = preferredIvLyricsSyncProviderId(
+                settings: settings,
+                availableProviderIds: syncDataProviders
+            )
+            let cachedProviderIsPreferred = !preferredSyncProvider.isEmpty
+                && cachedBase.providerId == preferredSyncProvider
+            if !preferredSyncProvider.isEmpty,
+               (!cachedProviderIsPreferred || !cachedBase.karaoke) {
+                if cachedProviderIsPreferred,
+                   canApplyIvLyricsSyncToCachedResult(cachedBase, settings: settings) {
+                    let syncData = await fetchSyncData(
+                        isrc: isrc,
+                        providerId: preferredSyncProvider,
+                        track: track,
+                        spotifyMatch: spotifyMatch,
+                        log: log
+                    )
+                    if let applied = applySyncData(
+                        syncData,
+                        base: cachedBase,
+                        providerName: AppSettings.standardLyricsProviderById(preferredSyncProvider)?.name ?? "LRCLIB",
+                        track: track,
+                        isrc: isrc,
+                        spotifyTrackId: spotifyTrackId,
+                        log: log
+                    ) {
+                        let selected = applied.withSelection(
+                            providerId: preferredSyncProvider,
+                            selectionPolicyKey: settings.standardLyricsProviderPolicySignature
+                        )
+                        return try await validatedLoaded(
+                            result: selected,
+                            artworkURL: spotifyMatch?.artworkURL,
+                            resolvedIsrc: isrc,
+                            resolvedSpotifyTrackId: spotifyTrackId,
+                            shouldStore: true
+                        )
+                    }
+                    log("cached provider sync-data apply failed; cached lyrics kept")
+                    return try await validatedLoaded(
+                        result: cachedBase,
+                        artworkURL: spotifyMatch?.artworkURL,
+                        resolvedIsrc: isrc,
+                        resolvedSpotifyTrackId: spotifyTrackId,
+                        shouldStore: false
+                    )
+                }
+                log("cached provider \(cachedBase.providerId.isEmpty ? "unknown" : cachedBase.providerId) replaced by OpenDB sync-data provider \(preferredSyncProvider)")
+            } else if canApplyIvLyricsSyncToCachedResult(cachedBase, settings: settings),
+                      syncDataProviders.contains(cachedBase.providerId) {
+                let syncData = await fetchSyncData(
+                    isrc: isrc,
+                    providerId: cachedBase.providerId,
+                    track: track,
+                    spotifyMatch: spotifyMatch,
+                    log: log
+                )
+                if let applied = applySyncData(
+                    syncData,
+                    base: cachedBase,
+                    providerName: AppSettings.standardLyricsProviderById(cachedBase.providerId)?.name ?? "LRCLIB",
+                    track: track,
+                    isrc: isrc,
+                    spotifyTrackId: spotifyTrackId,
+                    log: log
+                ) {
+                    let selected = applied.withSelection(
+                        providerId: cachedBase.providerId,
+                        selectionPolicyKey: settings.standardLyricsProviderPolicySignature
+                    )
+                    return try await validatedLoaded(
+                        result: selected,
+                        artworkURL: spotifyMatch?.artworkURL,
+                        resolvedIsrc: isrc,
+                        resolvedSpotifyTrackId: spotifyTrackId,
+                        shouldStore: true
+                    )
+                }
+                log("cached provider sync-data unavailable; cached lyrics kept")
+                return try await validatedLoaded(
+                result: cachedBase,
+                artworkURL: spotifyMatch?.artworkURL,
+                resolvedIsrc: isrc,
+                resolvedSpotifyTrackId: spotifyTrackId,
+                shouldStore: false
+            )
+            } else {
+                log("OpenDB sync-data priority unchanged; cached provider kept: \(cachedBase.providerId.isEmpty ? "unknown" : cachedBase.providerId)")
+                return try await validatedLoaded(
+                result: cachedBase,
+                artworkURL: spotifyMatch?.artworkURL,
+                resolvedIsrc: isrc,
+                resolvedSpotifyTrackId: spotifyTrackId,
+                shouldStore: false
+            )
+            }
+        }
+        var providerOrder = settings.enabledStandardLyricsProviderOrder
+        if settings.standardPreferSyncDataProvider, !syncDataProviders.isEmpty {
+            let preferred = providerOrder.filter {
+                syncDataProviders.contains($0)
+                    && AppSettings.standardLyricsProviderById($0)?.supportsIvLyricsSync == true
+                    && settings.isStandardLyricsTypeEnabled(providerId: $0, type: AppSettings.standardLyricsTypeKaraoke)
+            }
+            let preferredSet = Set(preferred)
+            providerOrder = preferred + providerOrder.filter { !preferredSet.contains($0) }
+        }
+        log("provider order: \(providerOrder.joined(separator: " -> ")) / sync-data=\(syncDataProviders.sorted()) / policy=\(settings.standardPreferLyricsTypeOverProviderOrder ? "type-first" : "provider-first")")
+
+        var attempts: [String: ProviderVariants] = [:]
+        var attempted = Set<String>()
+        func loadOnce(_ providerId: String) async -> ProviderVariants? {
+            if attempted.contains(providerId) { return attempts[providerId] }
+            attempted.insert(providerId)
+            do {
+                if let variants = try await loadProviderVariants(
+                    providerId: providerId,
+                    track: track,
+                    spotifyMatch: spotifyMatch,
+                    isrc: isrc,
+                    spotifyTrackId: spotifyTrackId,
+                    syncDataAvailable: syncDataProviders.contains(providerId),
+                    settings: settings,
+                    log: log
+                ) {
+                    attempts[providerId] = variants
+                    return variants
+                }
+            } catch {
+                log("provider \(providerId) error: \(error.localizedDescription)")
+            }
+            return nil
+        }
+
+        var selected: LyricsResult?
+        var selectedProvider = ""
+        var selectedType = ""
+        if settings.standardPreferLyricsTypeOverProviderOrder {
+            for type in [AppSettings.standardLyricsTypeKaraoke, AppSettings.standardLyricsTypeSynced, AppSettings.standardLyricsTypePlain] {
+                for providerId in providerOrder {
+                    guard settings.isStandardLyricsTypeEnabled(providerId: providerId, type: type),
+                          canProviderParticipate(
+                            providerId: providerId,
+                            type: type,
+                            syncDataAvailable: syncDataProviders.contains(providerId)
+                          ) else { continue }
+                    if let result = await loadOnce(providerId)?.result(for: type), !result.lines.isEmpty {
+                        selected = result
+                        selectedProvider = providerId
+                        selectedType = type
+                        break
+                    }
+                }
+                if selected != nil { break }
+            }
+        } else {
+            for providerId in providerOrder {
+                let allowedTypes = [
+                    AppSettings.standardLyricsTypeKaraoke,
+                    AppSettings.standardLyricsTypeSynced,
+                    AppSettings.standardLyricsTypePlain
+                ].filter { type in
+                    settings.isStandardLyricsTypeEnabled(providerId: providerId, type: type)
+                        && canProviderParticipate(
+                            providerId: providerId,
+                            type: type,
+                            syncDataAvailable: syncDataProviders.contains(providerId)
+                        )
+                }
+                guard !allowedTypes.isEmpty else { continue }
+                guard let variants = await loadOnce(providerId) else { continue }
+                for type in allowedTypes {
+                    if let result = variants.result(for: type), !result.lines.isEmpty {
+                        selected = result
+                        selectedProvider = providerId
+                        selectedType = type
+                        break
+                    }
+                }
+                if selected != nil { break }
+            }
+        }
+
+        if let selected {
+            let selectedWithPolicy = selected.withSelection(
+                providerId: selectedProvider,
+                selectionPolicyKey: settings.standardLyricsProviderPolicySignature
+            )
+            log("provider selected: \(selectedProvider) / type=\(selectedType) / lines=\(selected.lines.count)")
+            return try await validatedLoaded(
+                result: selectedWithPolicy,
+                artworkURL: spotifyMatch?.artworkURL,
+                resolvedIsrc: isrc,
+                resolvedSpotifyTrackId: spotifyTrackId,
+                shouldStore: true
+            )
+        }
+        if let cachedBase {
+            log("provider refresh failed: keeping cached lyrics")
+            return try await validatedLoaded(
+                result: cachedBase,
+                artworkURL: spotifyMatch?.artworkURL,
+                resolvedIsrc: isrc,
+                resolvedSpotifyTrackId: spotifyTrackId,
+                shouldStore: false
+            )
+        }
+        let result = LyricsResult.empty(ui("repo.lyrics_not_found", settings: settings))
+        return try await validatedLoaded(
+            result: result,
+            artworkURL: spotifyMatch?.artworkURL,
+            resolvedIsrc: isrc,
+            resolvedSpotifyTrackId: spotifyTrackId,
+            shouldStore: false
+        )
+    }
+
+    private func lyricsCacheKey(trackKey: String, settings: AppSettings.Snapshot) -> String {
+        "\(trackKey)|\(settings.standardLyricsProviderPolicySignature)"
+    }
+
+    private func availableSyncDataProviderIds(isrc: String, log: (String) -> Void) async -> Set<String> {
+        let normalizedIsrc = TrackSnapshot.normalizeIsrc(isrc)
+        guard !normalizedIsrc.isEmpty else { return [] }
+        do {
+            guard let providerMap = try await loadOpenDbProviderMap(log: log) else { return [] }
+            var result = Set<String>()
+            for (rawProvider, rawItems) in providerMap {
+                let provider = rawProvider.trimmed.lowercased()
+                guard AppSettings.standardLyricsProviderById(provider)?.supportsIvLyricsSync == true else { continue }
+                let items = rawItems as? [String] ?? []
+                if items.contains(where: { TrackSnapshot.normalizeIsrc($0) == normalizedIsrc }) {
+                    result.insert(provider)
+                }
+            }
+            return result
+        } catch {
+            markOpenDbUnavailable()
+            log("sync-data opendb provider lookup error: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private func canProviderParticipate(providerId: String, type: String, syncDataAvailable: Bool) -> Bool {
+        guard let provider = AppSettings.standardLyricsProviderById(providerId) else { return false }
+        switch type {
+        case AppSettings.standardLyricsTypeKaraoke:
+            return provider.supportsNativeKaraoke
+                || (provider.supportsIvLyricsSync && syncDataAvailable)
+        case AppSettings.standardLyricsTypeSynced:
+            return provider.supportsSynced
+        case AppSettings.standardLyricsTypePlain:
+            return provider.supportsPlain
+        default:
+            return false
+        }
+    }
+
+    private func loadProviderVariants(
+        providerId: String,
+        track: TrackSnapshot,
+        spotifyMatch: SpotifyTrackMatch?,
+        isrc: String,
+        spotifyTrackId: String,
+        syncDataAvailable: Bool,
+        settings: AppSettings.Snapshot,
+        log: @escaping (String) -> Void
+    ) async throws -> ProviderVariants? {
+        log("provider attempt: \(providerId)")
+        switch providerId {
+        case "lyricsplus":
+            guard let outcome = try await LyricsPlusProvider.fetch(track: track, isrc: isrc) else {
+                log("lyricsplus: no lyrics found")
+                return nil
+            }
+            outcome.logs.forEach(log)
+            let detail = "Lyrics from LyricsPlus (\(LyricsPlusProvider.projectURL))."
+            return ProviderVariants(
+                providerId: providerId,
+                karaoke: outcome.karaoke.map {
+                    lyricsResult(lines: $0, providerName: "LyricsPlus", type: AppSettings.standardLyricsTypeKaraoke, detail: detail, karaoke: true, isrc: isrc, spotifyTrackId: spotifyTrackId)
+                },
+                synced: outcome.synced.map {
+                    lyricsResult(lines: $0, providerName: "LyricsPlus", type: AppSettings.standardLyricsTypeSynced, detail: detail, karaoke: false, isrc: isrc, spotifyTrackId: spotifyTrackId)
+                },
+                plain: outcome.plain.map {
+                    lyricsResult(lines: $0, providerName: "LyricsPlus", type: AppSettings.standardLyricsTypePlain, detail: detail, karaoke: false, isrc: isrc, spotifyTrackId: spotifyTrackId)
+                }
+            )
+
+        case "unison":
+            let outcome = try await UnisonLyricsProvider.fetch(track: track, isrc: isrc, spotifyTrackId: spotifyTrackId)
+            outcome.logs.forEach(log)
+            guard let base = outcome.result, !base.lines.isEmpty else { return nil }
+            let isSynced = base.lines.contains(where: \.isTimed)
+            return ProviderVariants(
+                providerId: providerId,
+                karaoke: base.karaoke ? base : nil,
+                synced: isSynced ? demotedResult(base, type: AppSettings.standardLyricsTypeSynced) : nil,
+                plain: demotedResult(base, type: AppSettings.standardLyricsTypePlain)
+            )
+
+        case "lrclib":
+            let syncData = AppSettings.standardLyricsProviderById(providerId)?.supportsIvLyricsSync == true
+                && syncDataAvailable
+                && settings.isStandardLyricsTypeEnabled(providerId: providerId, type: AppSettings.standardLyricsTypeKaraoke)
+                ? await fetchSyncData(isrc: isrc, providerId: providerId, track: track, spotifyMatch: spotifyMatch, log: log)
+                : nil
+            return try await loadLrclibVariants(
+                track: track,
+                spotifyMatch: spotifyMatch,
+                syncData: syncData,
+                isrc: isrc,
+                spotifyTrackId: spotifyTrackId,
+                settings: settings,
+                log: log
+            )
+        default:
+            return nil
+        }
+    }
+
+    private func loadLrclibVariants(
+        track: TrackSnapshot,
+        spotifyMatch: SpotifyTrackMatch?,
+        syncData: SyncDataResult?,
+        isrc: String,
+        spotifyTrackId: String,
+        settings: AppSettings.Snapshot,
+        log: @escaping (String) -> Void
+    ) async throws -> ProviderVariants? {
+        var candidate: LrclibCandidate?
+        var loadedFromSyncSource = false
+        let syncDataContext = syncData.map(SyncDataCandidateContext.init)
+        let sourceId = syncDataContext?.lrclibId ?? 0
+        if sourceId > 0 {
+            log("sync-data source: lrclibId=\(sourceId), direct loading LRCLIB")
+            candidate = await fetchLrclibCandidateById(sourceId, log: log)
+            if let candidate {
+                decorateCandidateForSyncData(candidate, syncData: syncDataContext)
+                loadedFromSyncSource = true
+            }
+        }
+        if candidate == nil {
+            candidate = try await searchBestCandidate(track: track, spotifyMatch: spotifyMatch, syncData: syncDataContext, log: log)
+        }
+        guard let candidate else {
+            log("lrclib: no candidate selected")
+            return nil
+        }
+        log("lrclib selected: \(describeLrclibCandidate(candidate))" + (loadedFromSyncSource ? " / source=sync-data.lrclibId" : " / source=search"))
+        if candidate.instrumental, !candidate.hasLyrics { return nil }
+
+        let duration = secondsToMs(candidate.durationSeconds, fallbackDurationMs: track.durationMs)
+        let syncedLines = LrcParser.parseSynced(candidate.syncedLyrics, durationMs: duration)
+        var plainLines = LrcParser.parsePlain(candidate.plainLyrics)
+        if plainLines.isEmpty, !syncedLines.isEmpty {
+            plainLines = syncedLines.map { demoteLine($0, type: AppSettings.standardLyricsTypePlain) }
+        }
+        let detail = ui(
+            isrc.isEmpty ? "repo.detail.no_spotify_isrc" : (syncData == nil ? "repo.detail.no_sync_data" : "repo.detail.sync_apply_failed"),
+            settings: settings
+        )
+        var variants = ProviderVariants(
+            providerId: "lrclib",
+            karaoke: nil,
+            synced: syncedLines.isEmpty ? nil : lyricsResult(lines: syncedLines, providerName: "LRCLIB", type: AppSettings.standardLyricsTypeSynced, detail: detail, karaoke: false, isrc: isrc, spotifyTrackId: spotifyTrackId),
+            plain: plainLines.isEmpty ? nil : lyricsResult(lines: plainLines, providerName: "LRCLIB", type: AppSettings.standardLyricsTypePlain, detail: detail, karaoke: false, isrc: isrc, spotifyTrackId: spotifyTrackId)
+        )
+        variants.karaoke = applySyncData(
+            syncData,
+            base: candidate.useSyncedLyrics() ? (variants.synced ?? variants.plain) : (variants.plain ?? variants.synced),
+            providerName: "LRCLIB",
+            track: track,
+            isrc: isrc,
+            spotifyTrackId: spotifyTrackId,
+            detail: ui(loadedFromSyncSource ? "repo.detail.sync_applied_direct" : "repo.detail.sync_applied_search", settings: settings),
+            log: log
+        )
+        return variants.karaoke == nil && variants.synced == nil && variants.plain == nil ? nil : variants
+    }
+
+    private func applySyncData(
+        _ syncData: SyncDataResult?,
+        base: LyricsResult?,
+        providerName: String,
+        track: TrackSnapshot,
+        isrc: String,
+        spotifyTrackId: String,
+        detail: String? = nil,
+        log: (String) -> Void
+    ) -> LyricsResult? {
+        guard let syncData, let base, !base.lines.isEmpty else { return nil }
+        let applied = SyncDataApplier.applyWithDiagnostics(baseLyrics: base.lines, syncBody: syncData.syncBody, track: track)
+        applied.diagnostics.forEach { log("sync-data apply [\(providerName)]: \($0)") }
+        guard !applied.lines.isEmpty else { return nil }
+        log("sync-data applied [\(providerName)]: lines=\(applied.lines.count) / vocalParts=\(applied.lines.reduce(0) { $0 + $1.vocalParts.count })")
+        return LyricsResult(
+            lines: applied.lines,
+            providerLabel: "ivLyrics sync-data + \(providerName)",
+            detail: detail ?? base.detail,
+            karaoke: true,
+            isrc: isrc,
+            spotifyTrackId: spotifyTrackId,
+            contributors: syncData.contributors
+        )
+    }
+
+    private func lyricsResult(
+        lines: [LyricsLine],
+        providerName: String,
+        type: String,
+        detail: String,
+        karaoke: Bool,
+        isrc: String,
+        spotifyTrackId: String
+    ) -> LyricsResult {
+        LyricsResult(
+            lines: lines,
+            providerLabel: "\(providerName) \(type)",
+            detail: detail,
+            karaoke: karaoke,
+            isrc: isrc,
+            spotifyTrackId: spotifyTrackId
+        )
+    }
+
+    private func demotedResult(_ result: LyricsResult, type: String) -> LyricsResult {
+        LyricsResult(
+            lines: result.lines.map { demoteLine($0, type: type) },
+            providerLabel: result.providerLabel.components(separatedBy: " ").first.map { "\($0) \(type)" } ?? result.providerLabel,
+            detail: result.detail,
+            karaoke: false,
+            isrc: result.isrc,
+            spotifyTrackId: result.spotifyTrackId,
+            contributors: result.contributors,
+            providerId: result.providerId,
+            selectionPolicyKey: result.selectionPolicyKey
+        )
+    }
+
+    private func demoteLine(_ line: LyricsLine, type: String) -> LyricsLine {
+        LyricsLine(
+            startTimeMs: type == AppSettings.standardLyricsTypePlain ? 0 : line.startTimeMs,
+            endTimeMs: type == AppSettings.standardLyricsTypePlain ? 0 : line.endTimeMs,
+            text: line.text,
+            speaker: line.speaker,
+            speakerColor: line.speakerColor,
+            speakerFallback: line.speakerFallback
+        )
+    }
+
     func clearCache() {
         cache.removeAll()
         providerCache.removeAll()
@@ -575,8 +1228,9 @@ actor LyricsRepository {
     func clearCacheForTrack(_ trackKey: String) {
         let key = trackKey.trimmed
         guard !key.isEmpty else { return }
-        cache.removeValue(forKey: key)
+        cache.keys.filter { $0 == key || $0.hasPrefix("\(key)|provider-policy-") }.forEach { cache.removeValue(forKey: $0) }
         diskCache.remove(key)
+        diskCache.removeByKeyPrefix("\(key)|provider-policy-")
         let identity = providerTrackIdentity(fromStableKey: key)
         providerCache = providerCache.filter {
             LyricsCacheKey(encoded: $0.key)?.components.normalizedTrackIdentity != identity
@@ -585,9 +1239,9 @@ actor LyricsRepository {
     }
 
     func clearSyncDataCacheForIsrc(_ isrc: String) {
-        let key = syncDataCacheKey(isrc)
-        guard !key.isEmpty else { return }
-        syncDataResponseCache.remove(key)
+        let prefix = syncDataCacheKeyPrefix(isrc)
+        guard !prefix.isEmpty else { return }
+        syncDataResponseCache.removeByKeyPrefix(prefix)
         clearOpenDbCache()
         markSyncDataServerCacheBypass(TrackSnapshot.normalizeIsrc(isrc))
     }
@@ -601,7 +1255,7 @@ actor LyricsRepository {
         var candidates = try await searchManualLrclibCandidates(title: queryTitle, artist: queryArtist, log: log)
         let scoringTrack = manualScoringTrack(track: track, title: queryTitle, artist: queryArtist)
         for candidate in candidates {
-            candidate.score = scoringTrack == nil ? 0 : scoreCandidate(track: scoringTrack!, candidate: candidate, syncData: nil)
+            candidate.score = scoringTrack == nil ? 0 : scoreCandidate(track: scoringTrack!, candidate: candidate, hasSyncData: false)
         }
         candidates.sort(by: compareLrclibCandidates)
         return candidates.prefix(14).map { ManualLrclibCandidate(candidate: $0) }
@@ -627,10 +1281,11 @@ actor LyricsRepository {
             karaoke: false,
             isrc: IvLyricsUtilities.firstNonEmpty(candidate.isrc, track?.isrc),
             spotifyTrackId: track?.trackId ?? ""
-        )
+        ).withSelection(providerId: "lrclib", selectionPolicyKey: "manual")
         if let key = track?.stableKey, !key.isEmpty {
-            putMemoryCachedLyrics(key, result: result)
-            diskCache.put(key, result: result)
+            let cacheKey = lyricsCacheKey(trackKey: key, settings: settings)
+            putMemoryCachedLyrics(cacheKey, result: result)
+            diskCache.put(cacheKey, result: result)
         }
         return result
     }
@@ -690,7 +1345,7 @@ actor LyricsRepository {
         return SpotifyCredentialValidation(expiresInSeconds: response.expiresInSeconds, logs: logs)
     }
 
-    private func searchBestCandidate(track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, syncData: SyncDataResult?, log: @escaping (String) -> Void) async throws -> LrclibCandidate? {
+    private func searchBestCandidate(track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, syncData: SyncDataCandidateContext?, log: @escaping (String) -> Void) async throws -> LrclibCandidate? {
         var candidates: [LrclibCandidate] = []
         let spotifySearchTrack = buildSpotifyLrclibSearchTrack(track: track, spotifyMatch: spotifyMatch, log: log)
         let spotifySearchLabelPrefix = spotifyMatch?.hasEnglishMetadata == true ? "spotify-en" : "spotify"
@@ -728,9 +1383,9 @@ actor LyricsRepository {
         for candidate in candidates {
             decorateCandidateForSyncData(candidate, syncData: syncData)
             candidate.albumMatchScore = 0
-            candidate.score = scoreCandidate(track: track, candidate: candidate, syncData: syncData)
+            candidate.score = scoreCandidate(track: track, candidate: candidate, hasSyncData: syncData != nil)
             if let spotifySearchTrack {
-                candidate.score = max(candidate.score, scoreCandidate(track: spotifySearchTrack, candidate: candidate, syncData: syncData))
+                candidate.score = max(candidate.score, scoreCandidate(track: spotifySearchTrack, candidate: candidate, hasSyncData: syncData != nil))
             }
         }
         candidates.sort(by: compareLrclibCandidates)
@@ -1012,15 +1667,21 @@ actor LyricsRepository {
         }
     }
 
-    private func fetchSyncData(isrc: String, track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, log: (String) -> Void) async -> SyncDataResult? {
+    private func fetchSyncData(isrc: String, providerId: String, track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, log: (String) -> Void) async -> SyncDataResult? {
         do {
             let normalizedIsrc = TrackSnapshot.normalizeIsrc(isrc)
-            guard !normalizedIsrc.isEmpty else { return nil }
-            let cacheKey = syncDataCacheKey(isrc)
+            let normalizedProvider = providerId.trimmed.lowercased()
+            guard !normalizedIsrc.isEmpty, AppSettings.standardLyricsProviderById(normalizedProvider) != nil else { return nil }
+            let cacheKey = syncDataCacheKey(isrc, providerId: normalizedProvider)
             let cachedResponse = syncDataResponseCache.get(cacheKey)
             if !cachedResponse.isEmpty {
                 log("sync-data cache hit: isrc=\(normalizedIsrc)")
-                return try parseSyncDataResponse(cachedResponse, log: log, fromCache: true)
+                return try parseSyncDataResponse(
+                    cachedResponse,
+                    expectedProvider: normalizedProvider,
+                    log: log,
+                    fromCache: true
+                )
             }
 
             let bypassServerCache = shouldBypassSyncDataServerCache(normalizedIsrc)
@@ -1030,14 +1691,14 @@ actor LyricsRepository {
                     return nil
                 }
             } else {
-                guard await shouldRequestSyncDataFromOpenDb(isrc: normalizedIsrc, provider: lrclibProviderId, log: log) else {
+                guard await shouldRequestSyncDataFromOpenDb(isrc: normalizedIsrc, provider: normalizedProvider, log: log) else {
                     return nil
                 }
             }
 
             var params: [String: String] = [
                 "isrc": normalizedIsrc,
-                "provider": "lrclib",
+                "provider": normalizedProvider,
                 "request-version": syncDataRequestVersion,
                 "metadata": "1",
                 "title": IvLyricsUtilities.firstNonEmpty(spotifyMatch?.title, track.title),
@@ -1055,7 +1716,12 @@ actor LyricsRepository {
             let headers = syncDataHeaders()
             log("sync-data headers: Origin=\(headers["Origin"] ?? "")")
             let response = try await get("\(syncDataBase)?\(IvLyricsUtilities.encodeParams(params))", headers: headers)
-            let result = try parseSyncDataResponse(response, log: log, fromCache: false)
+            let result = try parseSyncDataResponse(
+                response,
+                expectedProvider: normalizedProvider,
+                log: log,
+                fromCache: false
+            )
             if !cacheKey.isEmpty {
                 syncDataResponseCache.put(cacheKey, body: response)
             }
@@ -1068,15 +1734,19 @@ actor LyricsRepository {
 
     private func shouldRequestSyncDataFromOpenDb(isrc: String, provider: String, log: (String) -> Void) async -> Bool {
         let normalizedIsrc = TrackSnapshot.normalizeIsrc(isrc)
-        let normalizedProvider = provider.trimmed
+        let normalizedProvider = provider.trimmed.lowercased()
         guard !normalizedIsrc.isEmpty, !normalizedProvider.isEmpty else { return false }
         do {
             guard let providerMap = try await loadOpenDbProviderMap(log: log) else {
                 log("sync-data opendb: unavailable, skip direct sync-data request")
                 return false
             }
-            let providerItems = providerMap[normalizedProvider] as? [String]
-            let exists = providerItems?.contains(normalizedIsrc) == true
+            let providerItems = providerMap.first { key, _ in
+                key.trimmed.lowercased() == normalizedProvider
+            }?.value as? [String]
+            let exists = providerItems?.contains(where: {
+                TrackSnapshot.normalizeIsrc($0) == normalizedIsrc
+            }) == true
             if !exists {
                 log("sync-data opendb: not listed, skip direct sync-data request / provider=\(normalizedProvider) / isrc=\(normalizedIsrc)")
             }
@@ -1262,22 +1932,33 @@ actor LyricsRepository {
         defaults.set(Double(nowMs() + openDbUnavailableRetryMs), forKey: "sync_data_opendb_unavailable_until_ms")
     }
 
-    private func parseSyncDataResponse(_ response: String, log: (String) -> Void, fromCache: Bool) throws -> SyncDataResult? {
+    private func parseSyncDataResponse(
+        _ response: String,
+        expectedProvider: String,
+        log: (String) -> Void,
+        fromCache: Bool
+    ) throws -> SyncDataResult? {
         let prefix = fromCache ? "sync-data cached response" : "sync-data response"
         let root = try jsonObject(response)
         guard let data = root["data"] as? [String: Any] else {
             log("\(prefix): no data")
             return nil
         }
+        let normalizedExpectedProvider = expectedProvider.trimmed.lowercased()
+        let responseProvider = stringValue(data["provider"], fallback: normalizedExpectedProvider).trimmed.lowercased()
+        guard responseProvider == normalizedExpectedProvider else {
+            log("\(prefix): provider mismatch / expected=\(normalizedExpectedProvider) / actual=\(responseProvider)")
+            return nil
+        }
         if let syncData = data["syncData"] as? [String: Any] {
             let body = syncBodyWithDurationFallback(syncBody: syncData, wrapper: data)
-            let result = SyncDataResult(syncBody: body, provider: stringValue(data["provider"], fallback: "lrclib"), contributors: parseSyncContributors(data: data, syncData: syncData))
+            let result = SyncDataResult(syncBody: body, provider: responseProvider, contributors: parseSyncContributors(data: data, syncData: syncData))
             log("\(prefix): provider=\(result.provider) / lines=\(result.lineCharCounts.count) / lrclibId=\(result.lrclibId) / contributors=\(result.contributors.count)\(syncDurationSuffix(result.syncBody))")
             return result
         }
         if data["lines"] is [[String: Any]] {
             let body = syncBodyWithDurationFallback(syncBody: data, wrapper: data)
-            let result = SyncDataResult(syncBody: body, provider: stringValue(data["provider"], fallback: "lrclib"), contributors: parseSyncContributors(data: data, syncData: data))
+            let result = SyncDataResult(syncBody: body, provider: responseProvider, contributors: parseSyncContributors(data: data, syncData: data))
             log("\(prefix): legacy body / provider=\(result.provider) / lines=\(result.lineCharCounts.count) / lrclibId=\(result.lrclibId) / contributors=\(result.contributors.count)\(syncDurationSuffix(result.syncBody))")
             return result
         }
@@ -1531,7 +2212,7 @@ actor LyricsRepository {
         error.statusCode == 401 || error.statusCode == 403
     }
 
-    private func scoreCandidate(track: TrackSnapshot, candidate: LrclibCandidate, syncData: SyncDataResult?) -> Double {
+    private func scoreCandidate(track: TrackSnapshot, candidate: LrclibCandidate, hasSyncData: Bool) -> Double {
         let titleScore = IvLyricsUtilities.titleScore(track.title, candidate.trackName)
         let artistScore = IvLyricsUtilities.bestArtistScore(track.artist, candidate.artistName)
         let albumScore = IvLyricsUtilities.albumScore(track.album, candidate.albumName)
@@ -1545,13 +2226,13 @@ actor LyricsRepository {
                 score -= min(2.5, (diff - durationToleranceSeconds) / 15.0)
             }
         }
-        if syncData != nil, candidate.syncLineExactMatch {
+        if hasSyncData, candidate.syncLineExactMatch {
             score += 2.5
         }
         return score
     }
 
-    private func decorateCandidateForSyncData(_ candidate: LrclibCandidate, syncData: SyncDataResult?) {
+    private func decorateCandidateForSyncData(_ candidate: LrclibCandidate, syncData: SyncDataCandidateContext?) {
         candidate.preferredLyricsSource = ""
         candidate.syncLineExactMatch = false
         candidate.exactSyncedLineMatch = false
@@ -1565,24 +2246,38 @@ actor LyricsRepository {
 
         let syncLineCounts = syncData.lineCharCounts
         let normalizeParentheticalLines = syncData.shouldNormalizeParentheticalLines
-        candidate.exactSyncedLineMatch = hasExactLineShape(syncLineCounts, candidateLineCharCounts(candidate.syncedLyrics, stripTimestamps: true, normalizeParentheticalLines: normalizeParentheticalLines))
-        candidate.exactPlainLineMatch = hasExactLineShape(syncLineCounts, candidateLineCharCounts(candidate.plainLyrics, stripTimestamps: false, normalizeParentheticalLines: normalizeParentheticalLines))
+        let syncedLineCharCounts = candidateLineCharCounts(
+            candidate.syncedLyrics,
+            stripTimestamps: true,
+            normalizeParentheticalLines: normalizeParentheticalLines
+        )
+        let plainLineCharCounts = candidateLineCharCounts(
+            candidate.plainLyrics,
+            stripTimestamps: false,
+            normalizeParentheticalLines: normalizeParentheticalLines
+        )
+        candidate.exactSyncedLineMatch = hasExactLineShape(syncLineCounts, syncedLineCharCounts)
+        candidate.exactPlainLineMatch = hasExactLineShape(syncLineCounts, plainLineCharCounts)
         candidate.syncLineExactMatch = candidate.exactSyncedLineMatch || candidate.exactPlainLineMatch
         candidate.preferredLyricsSource = candidate.exactSyncedLineMatch ? "synced" : (candidate.exactPlainLineMatch ? "plain" : syncData.preferredLyricsSource)
-        candidate.hasOriginalLyricsScript = IvLyricsUtilities.hasOriginalLyricsScript(candidateComparableText(candidate, preferredSource: candidate.preferredLyricsSource, normalizeParentheticalLines: normalizeParentheticalLines))
+        let initialPreferredSource = candidate.preferredLyricsSource
+        let initialCandidateText = candidateComparableText(candidate, preferredSource: initialPreferredSource, normalizeParentheticalLines: normalizeParentheticalLines)
+        candidate.hasOriginalLyricsScript = IvLyricsUtilities.hasOriginalLyricsScript(initialCandidateText)
 
         guard syncData.hasLrclibSource else { return }
         let sourceId = syncData.lrclibId
         candidate.syncSourceIdMatch = sourceId > 0 && candidate.id == sourceId
         let sourceLineCounts = syncData.sourceLineCharCounts
-        let sourceSyncedLineMatch = hasExactLineShape(sourceLineCounts, candidateLineCharCounts(candidate.syncedLyrics, stripTimestamps: true, normalizeParentheticalLines: normalizeParentheticalLines))
-        let sourcePlainLineMatch = hasExactLineShape(sourceLineCounts, candidateLineCharCounts(candidate.plainLyrics, stripTimestamps: false, normalizeParentheticalLines: normalizeParentheticalLines))
+        let sourceSyncedLineMatch = hasExactLineShape(sourceLineCounts, syncedLineCharCounts)
+        let sourcePlainLineMatch = hasExactLineShape(sourceLineCounts, plainLineCharCounts)
         if candidate.preferredLyricsSource.isEmpty {
             candidate.preferredLyricsSource = sourceSyncedLineMatch ? "synced" : (sourcePlainLineMatch ? "plain" : syncData.preferredLyricsSource)
         }
 
         let preferredSource = IvLyricsUtilities.firstNonEmpty(candidate.preferredLyricsSource, syncData.preferredLyricsSource)
-        let candidateText = candidateComparableText(candidate, preferredSource: preferredSource, normalizeParentheticalLines: normalizeParentheticalLines)
+        let candidateText = preferredSource == initialPreferredSource
+            ? initialCandidateText
+            : candidateComparableText(candidate, preferredSource: preferredSource, normalizeParentheticalLines: normalizeParentheticalLines)
         let sourceFingerprint = syncData.sourceLyricsFingerprint
         candidate.syncSourceTextMatch = !sourceFingerprint.isEmpty && sourceFingerprint == IvLyricsUtilities.lyricsFingerprint(candidateText)
         candidate.syncSourceLineCountMatch = hasExactLineShape(sourceLineCounts, IvLyricsUtilities.lineCharCounts(IvLyricsUtilities.comparableLyricsLines(candidateText, stripTimestamps: false)))
@@ -1613,16 +2308,16 @@ actor LyricsRepository {
         !expectedCounts.isEmpty && expectedCounts == actualCounts
     }
 
-    private func needsLegacySyncLineShapeMatch(_ syncData: SyncDataResult?, _ candidates: [LrclibCandidate]) -> Bool {
+    private func needsLegacySyncLineShapeMatch(_ syncData: SyncDataCandidateContext?, _ candidates: [LrclibCandidate]) -> Bool {
         shouldPreferLegacyExactSyncLineShape(syncData) && !hasSyncLineExactCandidate(candidates, syncData: syncData)
     }
 
-    private func shouldPreferLegacyExactSyncLineShape(_ syncData: SyncDataResult?) -> Bool {
+    private func shouldPreferLegacyExactSyncLineShape(_ syncData: SyncDataCandidateContext?) -> Bool {
         guard let syncData else { return false }
         return !syncData.lineCharCounts.isEmpty && syncData.lrclibId <= 0 && syncData.sourceLineCharCounts.isEmpty
     }
 
-    private func hasSyncLineExactCandidate(_ candidates: [LrclibCandidate], syncData: SyncDataResult?) -> Bool {
+    private func hasSyncLineExactCandidate(_ candidates: [LrclibCandidate], syncData: SyncDataCandidateContext?) -> Bool {
         guard let syncData else { return false }
         for candidate in candidates {
             decorateCandidateForSyncData(candidate, syncData: syncData)
@@ -1663,7 +2358,7 @@ actor LyricsRepository {
         return candidate.exactPlainLineMatch ? 1 : 0
     }
 
-    private func selectSyncedFallbackCandidate(track: TrackSnapshot, spotifySearchTrack: TrackSnapshot?, syncData: SyncDataResult?, candidates: [LrclibCandidate], best: LrclibCandidate, log: (String) -> Void) -> LrclibCandidate {
+    private func selectSyncedFallbackCandidate(track: TrackSnapshot, spotifySearchTrack: TrackSnapshot?, syncData: SyncDataCandidateContext?, candidates: [LrclibCandidate], best: LrclibCandidate, log: (String) -> Void) -> LrclibCandidate {
         guard shouldPreferSyncedLrclibFallback(syncData), !best.useSyncedLyrics() else { return best }
         if hasSyncedLyricsPayload(best), isReasonableSyncedFallbackMatch(track: track, spotifySearchTrack: spotifySearchTrack, candidate: best) {
             best.preferredLyricsSource = "synced"
@@ -1682,7 +2377,7 @@ actor LyricsRepository {
         return best
     }
 
-    private func shouldPreferSyncedLrclibFallback(_ syncData: SyncDataResult?) -> Bool {
+    private func shouldPreferSyncedLrclibFallback(_ syncData: SyncDataCandidateContext?) -> Bool {
         syncData == nil || (syncData!.lrclibId <= 0 && syncData!.lineCharCounts.isEmpty)
     }
 
@@ -1787,16 +2482,22 @@ actor LyricsRepository {
         abs(Double(track.durationMs - match.durationMs) / 1000.0)
     }
 
-    private func syncDataCacheKey(_ isrc: String) -> String {
+    private func syncDataCacheKey(_ isrc: String, providerId: String) -> String {
         let normalized = TrackSnapshot.normalizeIsrc(isrc)
-        return normalized.isEmpty ? "" : "\(syncDataCacheSchema)|isrc:\(normalized)|provider:\(lrclibProviderId)"
+        let provider = providerId.trimmed.lowercased()
+        return normalized.isEmpty || provider.isEmpty ? "" : "\(syncDataCacheSchema)|isrc:\(normalized)|provider:\(provider)"
+    }
+
+    private func syncDataCacheKeyPrefix(_ isrc: String) -> String {
+        let normalized = TrackSnapshot.normalizeIsrc(isrc)
+        return normalized.isEmpty ? "" : "\(syncDataCacheSchema)|isrc:\(normalized)|provider:"
     }
 
     private func syncDataHeaders() -> [String: String] {
         [
             "Origin": syncDataSpotifyOrigin,
             "Referer": syncDataSpotifyReferer,
-            "X-ivLyrics-Client": "android"
+            "X-ivLyrics-Client": "ios"
         ]
     }
 
@@ -2461,6 +3162,26 @@ private struct SyncDataResult {
             version = syncBody["version"] as? Int ?? 1
         }
         return version >= 2 || !sourceLineCharCounts.isEmpty
+    }
+}
+
+private struct SyncDataCandidateContext {
+    let lineCharCounts: [Int]
+    let shouldNormalizeParentheticalLines: Bool
+    let hasLrclibSource: Bool
+    let lrclibId: Int64
+    let preferredLyricsSource: String
+    let sourceLyricsFingerprint: String
+    let sourceLineCharCounts: [Int]
+
+    init(_ syncData: SyncDataResult) {
+        lineCharCounts = syncData.lineCharCounts
+        shouldNormalizeParentheticalLines = syncData.shouldNormalizeParentheticalLines
+        hasLrclibSource = syncData.hasLrclibSource
+        lrclibId = syncData.lrclibId
+        preferredLyricsSource = syncData.preferredLyricsSource
+        sourceLyricsFingerprint = syncData.sourceLyricsFingerprint
+        sourceLineCharCounts = syncData.sourceLineCharCounts
     }
 }
 

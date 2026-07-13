@@ -8,10 +8,53 @@ struct CachedLyricsProviderRemotePolicy: Codable, Equatable {
     var expiresAtMs: Int64
 }
 
+struct StandardLyricsProviderStates: Equatable, Sendable {
+    var order: [String]
+    var enabled: [String: Bool]
+    var signatureComponent: String
+}
+
 enum LyricsProviderAppContracts {
     static let providerOrderRawValues = ["musixmatch", "deezer", "unison", "bugs", "genie", "lrclib"]
     static let defaultEnabledProviderRawValues: Set<String> = ["lrclib"]
     static let unofficialProviderRawValues = ["musixmatch", "deezer", "unison", "bugs", "genie"]
+    static let standardProviderOrderRawValues = ["lrclib", "lyricsplus", "unison"]
+    static let standardDefaultEnabledProviderRawValues: Set<String> = ["lrclib"]
+
+    static func standardProviderEnabledDefault(_ providerID: String) -> Bool {
+        standardDefaultEnabledProviderRawValues.contains(providerID)
+    }
+
+    static func standardEffectiveProviderStates(
+        order storedOrder: [String],
+        enabled storedEnabled: [String: Bool],
+        remoteGlobalDisable: Bool
+    ) -> StandardLyricsProviderStates {
+        var seen = Set<String>()
+        var normalizedOrder = storedOrder.filter {
+            standardProviderOrderRawValues.contains($0) && seen.insert($0).inserted
+        }
+        normalizedOrder.append(contentsOf: standardProviderOrderRawValues.filter { seen.insert($0).inserted })
+
+        var normalizedEnabled = Dictionary(uniqueKeysWithValues: standardProviderOrderRawValues.map {
+            ($0, storedEnabled[$0] ?? standardProviderEnabledDefault($0))
+        })
+        if remoteGlobalDisable {
+            normalizedEnabled = Dictionary(uniqueKeysWithValues: standardProviderOrderRawValues.map {
+                ($0, $0 == "lrclib")
+            })
+        }
+        let effectiveOrder = normalizedOrder.filter { normalizedEnabled[$0] == true }
+        let enabledSignature = standardProviderOrderRawValues.map {
+            "\($0):\(normalizedEnabled[$0] == true ? 1 : 0)"
+        }.joined(separator: ",")
+        let signatureComponent = "standard-state-v1|kill:\(remoteGlobalDisable ? 1 : 0)|order:\(normalizedOrder.joined(separator: ","))|enabled:\(enabledSignature)"
+        return StandardLyricsProviderStates(
+            order: effectiveOrder,
+            enabled: normalizedEnabled,
+            signatureComponent: signatureComponent
+        )
+    }
 
     static func canonicalProviderOrder(_ stored: [String]) -> [String] {
         var seen = Set<String>()

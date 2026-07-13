@@ -284,10 +284,22 @@ final class SpotifyAppRemotePlaybackService: NSObject, ObservableObject, SPTAppR
             let imageId = String(value.dropFirst("spotify:image:".count)).trimmed
             return imageId.isEmpty ? nil : URL(string: "https://i.scdn.co/image/\(imageId)")
         }
-        if value.range(of: #"^[A-Za-z0-9]+$"#, options: .regularExpression) != nil {
+        if isAsciiAlphanumeric(value) {
             return URL(string: "https://i.scdn.co/image/\(value)")
         }
         return URL(string: value)
+    }
+
+    private func isAsciiAlphanumeric(_ value: String) -> Bool {
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 48...57, 65...90, 97...122:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
     }
 
     private func commandCallback(_ action: String) -> SPTAppRemoteCallback {

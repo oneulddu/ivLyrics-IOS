@@ -6,6 +6,127 @@ import WebKit
 import UIKit
 #endif
 
+private struct AndroidSlidingMetadataText: View {
+    private static let edgeHoldSeconds = 1.05
+    private static let minimumMoveSeconds = 1.8
+    private static let maximumMoveSeconds = 5.6
+    private static let pointsPerSecond: CGFloat = 46
+
+    let text: String
+    let typography: AppSettings.TypographySettings
+    let slotId: String
+    let baseSize: CGFloat
+    let color: Color
+
+    @State private var animationStart = Date()
+
+    var body: some View {
+        let font = measuredFont
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        let lineHeight = ceil(font.lineHeight)
+
+        GeometryReader { proxy in
+            let availableWidth = max(0, proxy.size.width)
+            let overflowing = textWidth > availableWidth + 0.5
+
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !overflowing)) { timeline in
+                Text(text)
+                    .font(typography.font(slotId: slotId, baseSize: baseSize))
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .offset(x: horizontalOffset(
+                        at: timeline.date,
+                        textWidth: textWidth,
+                        availableWidth: availableWidth
+                    ))
+                    .frame(width: availableWidth, alignment: .leading)
+            }
+            .frame(width: availableWidth, height: lineHeight, alignment: .leading)
+            .clipped()
+        }
+        .frame(height: lineHeight)
+        .accessibilityLabel(Text(text))
+        .onChange(of: animationKey) { _, _ in
+            animationStart = Date()
+        }
+    }
+
+    private var style: AppSettings.TypographyStyle {
+        typography.style(slotId)
+    }
+
+    private var pointSize: CGFloat {
+        typography.scaledSize(slotId: slotId, baseSize: baseSize)
+    }
+
+    private var measuredFont: UIFont {
+        if let font = UIFont(name: fontName, size: pointSize) {
+            return font
+        }
+        return UIFont.systemFont(ofSize: pointSize, weight: fallbackWeight)
+    }
+
+    private var fontName: String {
+        switch style.weight {
+        case AppSettings.typoWeightBold:
+            return "Pretendard-Bold"
+        case AppSettings.typoWeightSemibold:
+            return "Pretendard-SemiBold"
+        default:
+            return "Pretendard-Regular"
+        }
+    }
+
+    private var fallbackWeight: UIFont.Weight {
+        switch style.weight {
+        case AppSettings.typoWeightBold:
+            return .bold
+        case AppSettings.typoWeightSemibold:
+            return .semibold
+        default:
+            return .regular
+        }
+    }
+
+    private var animationKey: String {
+        "\(text)|\(pointSize)|\(style.weight)"
+    }
+
+    private func horizontalOffset(at date: Date, textWidth: CGFloat, availableWidth: CGFloat) -> CGFloat {
+        let travel = max(0, textWidth - availableWidth)
+        guard travel > 0 else { return 0 }
+
+        let moveSeconds = min(
+            Self.maximumMoveSeconds,
+            max(Self.minimumMoveSeconds, Double(travel / Self.pointsPerSecond))
+        )
+        let cycleSeconds = (Self.edgeHoldSeconds + moveSeconds) * 2
+        var elapsed = date.timeIntervalSince(animationStart).truncatingRemainder(dividingBy: cycleSeconds)
+        if elapsed < 0 {
+            elapsed += cycleSeconds
+        }
+        if elapsed < Self.edgeHoldSeconds {
+            return 0
+        }
+        elapsed -= Self.edgeHoldSeconds
+        if elapsed < moveSeconds {
+            return -travel * smoothStep(elapsed / moveSeconds)
+        }
+        elapsed -= moveSeconds
+        if elapsed < Self.edgeHoldSeconds {
+            return -travel
+        }
+        elapsed -= Self.edgeHoldSeconds
+        return -travel * (1 - smoothStep(elapsed / moveSeconds))
+    }
+
+    private func smoothStep(_ value: Double) -> CGFloat {
+        let progress = max(0, min(1, value))
+        return CGFloat(progress * progress * (3 - 2 * progress))
+    }
+}
+
 @main
 struct IvLyricsIOSApp: App {
     @StateObject private var settings = AppSettings.shared
@@ -313,15 +434,22 @@ struct ContentView: View {
                     .frame(height: artworkMetadataSpacing)
 
                 VStack(alignment: .leading, spacing: 7) {
-                    Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
-                        .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 28))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
-                    Text(model.artistText.trimmed.isEmpty ? settings.t("status.waiting_spotify") : model.artistText)
-                        .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: 18))
-                        .foregroundStyle(.white.opacity(190.0 / 255.0))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
+                    AndroidSlidingMetadataText(
+                        text: model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText,
+                        typography: typography,
+                        slotId: AppSettings.typoMainTitle,
+                        baseSize: 28,
+                        color: .white
+                    )
+                    AndroidSlidingMetadataText(
+                        text: model.artistText.trimmed.isEmpty
+                            ? settings.t("status.waiting_spotify")
+                            : model.artistText,
+                        typography: typography,
+                        slotId: AppSettings.typoMainArtist,
+                        baseSize: 18,
+                        color: .white.opacity(190.0 / 255.0)
+                    )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -687,7 +815,12 @@ private struct PortraitPlayerProgressSection: View {
 
 private func androidPlayerTime(_ milliseconds: Int64) -> String {
     let total = max(0, Int(milliseconds / 1000))
-    return String(format: "%d:%02d", total / 60, total % 60)
+    let minutes = Int32(truncatingIfNeeded: total / 60)
+    let seconds = total % 60
+    if seconds < 10 {
+        return "\(minutes):0\(seconds)"
+    }
+    return "\(minutes):\(seconds)"
 }
 
 private struct AndroidMoreIcon: View {
@@ -1352,6 +1485,9 @@ private struct LyricsPageOverlay: View {
                     centerAnchorY: 0.42
                 )
             }
+            LyricsProviderAttribution()
+                .padding(.horizontal, 24)
+                .padding(.bottom, safeAreaBottom + 12)
         }
         .clipShape(RoundedRectangle(cornerRadius: dragOffset > 1 ? 28 : 0, style: .continuous))
         .offset(y: dragOffset)
@@ -1387,13 +1523,13 @@ private struct LyricsPageOverlay: View {
                     Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
                         .font(typography.font(slotId: AppSettings.typoLyricsHeaderTitle, baseSize: 19))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.78)
+                        .truncationMode(.tail)
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(model.artistText.trimmed.isEmpty ? " " : model.artistText)
                             .font(typography.font(slotId: AppSettings.typoLyricsHeaderArtist, baseSize: 14))
                             .foregroundStyle(.white.opacity(0.74))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.78)
+                            .truncationMode(.tail)
                             .layoutPriority(1)
                         Spacer(minLength: 8)
                         if model.status == .loading {
@@ -1931,12 +2067,12 @@ private struct LandscapePlayerPane: View {
                     Text(model.titleText.trimmed.isEmpty ? settings.t("label.no_current_track") : model.titleText)
                         .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 23))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.76)
+                        .truncationMode(.tail)
                     Text(model.artistText.trimmed.isEmpty ? " " : model.artistText)
                         .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: 15))
                         .foregroundStyle(.white.opacity(0.82))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.78)
+                        .truncationMode(.tail)
                 }
                 .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
             }
@@ -2045,8 +2181,7 @@ private struct LandscapeTransportControls: View {
     }
 
     private func timeText(_ ms: Int64) -> String {
-        let total = max(0, Int(ms / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(ms)
     }
 }
 
@@ -2189,8 +2324,7 @@ private struct PlayerProgressBar: View {
     }
 
     private func timeText(_ ms: Int64) -> String {
-        let total = max(0, Int(ms / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(ms)
     }
 }
 
@@ -2221,6 +2355,11 @@ private struct LandscapeLyricsPane: View {
             centerEmptyContent: true
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
+            LyricsProviderAttribution(includesSyncContributors: true)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+        }
     }
 }
 
@@ -2633,8 +2772,7 @@ struct TransportPanel: View {
     }
 
     private func timeText(_ ms: Int64) -> String {
-        let total = max(0, Int(ms / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(ms)
     }
 }
 
@@ -2813,7 +2951,7 @@ struct MainLyricPreviewPanel: View {
         switch entry {
         case .interlude(let info):
             return [MainLyricPreviewRow.interlude(interludeLabel(info.kind))]
-        case .line(_, let line):
+        case .line(_, let line, _):
             return previewRows(for: line, previewItems: previewItems)
         }
     }
@@ -2977,8 +3115,15 @@ struct MainLyricPreviewPanel: View {
     private func previewKaraokeSyllables(for text: String, syllables: [LyricsLine.Syllable]) -> [LyricsLine.Syllable] {
         let value = text.trimmed
         guard !value.isEmpty, !syllables.isEmpty else { return [] }
-        let usable = syllables.filter { !$0.text.isEmpty }
-        guard usable.map(\.text).joined().trimmed == value else { return [] }
+        var usable: [LyricsLine.Syllable] = []
+        usable.reserveCapacity(syllables.count)
+        var combined = ""
+        combined.reserveCapacity(text.utf8.count)
+        for syllable in syllables where !syllable.text.isEmpty {
+            usable.append(syllable)
+            combined.append(contentsOf: syllable.text)
+        }
+        guard combined.trimmed == value else { return [] }
         return trimPreviewSyllables(usable)
     }
 
@@ -3006,7 +3151,14 @@ struct MainLyricPreviewPanel: View {
     }
 
     private func hasMultiplePreviewVocalParts(_ line: LyricsLine) -> Bool {
-        line.vocalParts.filter { !$0.text.trimmed.isEmpty }.count > 1
+        var count = 0
+        for part in line.vocalParts where !part.text.trimmed.isEmpty {
+            count += 1
+            if count > 1 {
+                return true
+            }
+        }
+        return false
     }
 
     private func interludeLabel(_ kind: String) -> String {
@@ -3421,8 +3573,8 @@ private struct LyricsMetaStrip: View {
     @ViewBuilder
     var body: some View {
         if inline {
-            if !visibleContributors.isEmpty {
-                contributorRow
+            if hasContributors {
+                LyricsContributorCredit(contributors: model.lyricsResult.contributors)
                     .contentShape(Rectangle())
                     .onLongPressGesture {
                         onOpenMenu()
@@ -3436,8 +3588,8 @@ private struct LyricsMetaStrip: View {
                         .foregroundStyle(.white.opacity(0.64))
                         .lineLimit(2)
                 }
-                if !visibleContributors.isEmpty {
-                    contributorRow
+                if hasContributors {
+                    LyricsContributorCredit(contributors: model.lyricsResult.contributors)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3453,7 +3605,7 @@ private struct LyricsMetaStrip: View {
     }
 
     private var hasContent: Bool {
-        !sourceStatusText.isEmpty || !visibleContributors.isEmpty
+        !sourceStatusText.isEmpty || hasContributors
     }
 
     private var sourceStatusText: String {
@@ -3465,35 +3617,59 @@ private struct LyricsMetaStrip: View {
         return detail.isEmpty ? provider : "\(provider) / \(detail)"
     }
 
-    private var visibleContributors: [LyricsResult.SyncContributor] {
-        Array(model.lyricsResult.contributors.prefix(3))
+    private var hasContributors: Bool {
+        !model.lyricsResult.contributors.isEmpty
     }
+}
 
-    private var remainingContributorCount: Int {
-        max(0, model.lyricsResult.contributors.count - visibleContributors.count)
-    }
+private struct LyricsContributorCredit: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var contributors: [LyricsResult.SyncContributor]
+    var subdued = false
+    var interactive = true
 
-    private var contributorRow: some View {
+    var body: some View {
         let parts = syncCreditFormatParts
-        return HStack(spacing: 0) {
+        HStack(spacing: 0) {
             Text(parts.prefix)
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(.white.opacity(labelOpacity))
             ForEach(Array(visibleContributors.enumerated()), id: \.offset) { index, contributor in
                 if index > 0 {
                     Text(", ")
-                        .foregroundStyle(.white.opacity(0.45))
+                        .foregroundStyle(.white.opacity(labelOpacity))
                 }
                 contributorNameView(contributor)
             }
             if remainingContributorCount > 0 {
                 Text(" +\(remainingContributorCount)")
-                    .foregroundStyle(.white.opacity(0.56))
+                    .foregroundStyle(.white.opacity(nameOpacity))
             }
             Text(parts.suffix)
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(.white.opacity(labelOpacity))
         }
         .font(.caption2)
         .lineLimit(1)
+    }
+
+    private var visibleContributors: [LyricsResult.SyncContributor] {
+        Array(contributors.prefix(3))
+    }
+
+    private var remainingContributorCount: Int {
+        max(0, contributors.count - visibleContributors.count)
+    }
+
+    private var labelOpacity: Double {
+        subdued ? 0.12 : 0.45
+    }
+
+    private var nameOpacity: Double {
+        subdued ? 0.20 : 0.56
+    }
+
+    private var linkedNameOpacity: Double {
+        subdued ? 0.20 : 0.76
     }
 
     private var syncCreditFormatParts: (prefix: String, suffix: String) {
@@ -3506,20 +3682,58 @@ private struct LyricsMetaStrip: View {
 
     @ViewBuilder
     private func contributorNameView(_ contributor: LyricsResult.SyncContributor) -> some View {
-        if contributor.profileAvailable, !contributor.userHash.trimmed.isEmpty {
+        if interactive, contributor.profileAvailable, !contributor.userHash.trimmed.isEmpty {
             Button {
                 Task {
                     await model.openSyncContributorProfile(contributor)
                 }
             } label: {
                 Text(contributor.name)
-                    .foregroundStyle(.white.opacity(0.76))
+                    .foregroundStyle(.white.opacity(linkedNameOpacity))
             }
             .buttonStyle(.plain)
         } else {
             Text(contributor.name)
-                .foregroundStyle(.white.opacity(0.56))
+                .foregroundStyle(.white.opacity(nameOpacity))
         }
+    }
+}
+
+private struct EnumeratedRandomAccessCollection<Base: RandomAccessCollection>: RandomAccessCollection {
+    typealias Index = Base.Index
+    typealias Element = (offset: Int, element: Base.Element)
+
+    private let base: Base
+
+    init(_ base: Base) {
+        self.base = base
+    }
+
+    var startIndex: Index { base.startIndex }
+    var endIndex: Index { base.endIndex }
+    var count: Int { base.count }
+
+    subscript(position: Index) -> Element {
+        (
+            offset: base.distance(from: base.startIndex, to: position),
+            element: base[position]
+        )
+    }
+
+    func index(after index: Index) -> Index {
+        base.index(after: index)
+    }
+
+    func index(before index: Index) -> Index {
+        base.index(before: index)
+    }
+
+    func index(_ index: Index, offsetBy distance: Int) -> Index {
+        base.index(index, offsetBy: distance)
+    }
+
+    func distance(from start: Index, to end: Index) -> Int {
+        base.distance(from: start, to: end)
     }
 }
 
@@ -3545,15 +3759,11 @@ struct LyricsTimelineView: View {
             trackDurationMs: model.durationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )?.id
-        let matchedActiveDisplayIndex = activeItemID.flatMap { id in
+        let activeDisplayIndex = activeItemID.flatMap { id in
             items.firstIndex { $0.id == id }
-        }
-        let fallbackActiveLineIndex = matchedActiveDisplayIndex == nil
-            ? timelineContext.activeLineIndex(at: position)
-            : -1
-        let activeDisplayIndex = matchedActiveDisplayIndex ?? max(0, items.firstIndex { item in
-            if case .line(let index, _) = item {
-                return index == fallbackActiveLineIndex
+        } ?? max(0, items.firstIndex { item in
+            if case .line(let index, _, _) = item {
+                return index == model.activeLineIndex
             }
             return false
         } ?? 0)
@@ -3572,13 +3782,17 @@ struct LyricsTimelineView: View {
                         .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
                 }
             } else {
-                ForEach(Array(items.enumerated()), id: \.element.id) { displayIndex, item in
+                let _ = settings.typographyRevision
+                let _ = settings.speakerColorRevision
+                let typography = settings.typographySettings()
+                let speakerColors = settings.speakerColorSettings()
+                ForEach(EnumeratedRandomAccessCollection(items), id: \.element.id) { displayIndex, item in
                     let itemActive = item.id == activeItemID
                     let displayDistance = abs(Double(displayIndex) - visualCenterIndex)
                     Group {
                         switch item {
-                        case .line(let index, let line):
-                            let lineActive = itemActive || (activeItemID == nil && index == fallbackActiveLineIndex)
+                        case .line(let index, let line, _):
+                            let lineActive = itemActive || (activeItemID == nil && index == model.activeLineIndex)
                             LyricsLineView(
                                 lineIndex: index,
                                 line: line,
@@ -3590,6 +3804,8 @@ struct LyricsTimelineView: View {
                                 alignment: settings.lyricsTextAlignment,
                                 pronunciationLoading: model.lyricsSupplementPronunciationLoading,
                                 translationLoading: model.lyricsSupplementTranslationLoading,
+                                typography: typography,
+                                speakerColors: speakerColors,
                                 onSeek: { model.seek(toLyricsTimeMs: $0) }
                             )
                             .equatable()
@@ -3620,6 +3836,65 @@ struct LyricsTimelineView: View {
                 animatedCenterIndex = next
             }
         }
+    }
+}
+
+private struct LyricsProviderAttribution: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    var includesSyncContributors = false
+
+    private static let visibleProviderIds: Set<String> = ["lrclib", "lyricsplus", "unison"]
+
+    @ViewBuilder
+    var body: some View {
+        if !providerName.isEmpty {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(settings.t("section.lyrics_providers"))
+                    .font(.pretendard(9, weight: .bold))
+                    .tracking(1.1)
+                    .textCase(.uppercase)
+                    .foregroundStyle(.white.opacity(0.12))
+                Text(providerName)
+                    .font(.pretendard(11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.20))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                if includesSyncContributors, !model.baseLyricsResult.contributors.isEmpty {
+                    Text("•")
+                        .font(.pretendard(9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.12))
+                    LyricsContributorCredit(
+                        contributors: model.baseLyricsResult.contributors,
+                        subdued: true,
+                        interactive: false
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 26)
+            .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var providerName: String {
+        guard model.status == .loaded,
+              !model.baseLyricsResult.lines.isEmpty else {
+            return ""
+        }
+        let providerId = model.baseLyricsResult.providerId.trimmed.lowercased()
+        if Self.visibleProviderIds.contains(providerId) {
+            return providerId
+        }
+
+        let providerTokens = model.baseLyricsResult.providerLabel
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        let legacyProviderIds = Set(providerTokens.filter(Self.visibleProviderIds.contains))
+        return legacyProviderIds.count == 1 ? legacyProviderIds.first ?? "" : ""
     }
 }
 
@@ -3813,13 +4088,13 @@ private struct LyricsTimelineEdgeFadeMask: View {
 }
 
 enum LyricsTimelineDisplayItem: Identifiable {
-    case line(index: Int, line: LyricsLine)
+    case line(index: Int, line: LyricsLine, id: String)
     case interlude(InterludeInfo)
 
     var id: String {
         switch self {
-        case .line(let index, let line):
-            return LyricsTimelineDisplayBuilder.lineID(index: index, line: line)
+        case .line(_, _, let id):
+            return id
         case .interlude(let info):
             return "interlude-\(info.kind)-\(info.startTimeMs)-\(info.endTimeMs)"
         }
@@ -3833,205 +4108,83 @@ struct InterludeInfo {
     var automatic: Bool
 }
 
-private let lyricsTimelineInterludeMinDurationMs: Int64 = 500
-
 struct LyricsTimelineContext {
     let lines: [LyricsLine]
+    let lineIDs: [String]
     let isMarker: [Bool]
-    fileprivate let nextRenderableLineStartTimes: [Int64]
-    fileprivate let lastLyricEndTimes: [Int64]
-    fileprivate let hasRenderableMarkerBeforeNextLine: [Bool]
-    fileprivate let firstRenderableLineIndex: Int?
-    fileprivate let firstUntimedRenderableLineIndex: Int?
+    let markerIndices: [Int]
+    let firstUntimedLineIndex: Int?
+    let firstRenderableLineIndex: Int?
+    let nonMarkerLineCount: Int
+    let lastLyricEndTimes: [Int64]?
+    let markerInterludeInfos: [InterludeInfo?]
+    let baseItems: [LyricsTimelineDisplayItem]
 
-    private let lineStartTimes: [Int64]
-    // Prefix maxima preserve the legacy "first overlapping line" behavior while allowing binary search.
-    private let activeLineEndTimePrefix: [Int64]
-    private let lineStartTimesAreSorted: Bool
-    private let renderableTimedLineIndices: [Int]
-    private let renderableTimedLineStartTimes: [Int64]
-    private let renderableTimedLineEndTimePrefix: [Int64]
-    private let renderableTimedLineStartTimesAreSorted: Bool
+    var cachesLyricEndTimes: Bool { lastLyricEndTimes != nil }
 
-    init(lines: [LyricsLine]) {
+    init(lines: [LyricsLine], cacheLyricEndTimes: Bool = true) {
         self.lines = lines
-        let markers = lines.map {
-            LyricsTimelineDisplayBuilder.isInterludeMarkerText(
-                LyricsTimelineDisplayBuilder.candidateText($0)
-            )
+        let lineIDs = lines.enumerated().map {
+            LyricsTimelineDisplayBuilder.lineID(index: $0.offset, line: $0.element)
         }
-        isMarker = markers
-
-        var nextStartTimes = Array(repeating: Int64(0), count: lines.count)
-        var markerBeforeNextLine = Array(repeating: false, count: lines.count)
-        var nextRenderableStart: Int64 = 0
-        var hasRenderableMarker = false
-        for index in lines.indices.reversed() {
-            nextStartTimes[index] = nextRenderableStart
-            markerBeforeNextLine[index] = hasRenderableMarker
-
+        self.lineIDs = lineIDs
+        var isMarker: [Bool] = []
+        isMarker.reserveCapacity(lines.count)
+        var markerIndices: [Int] = []
+        var firstUntimedLineIndex: Int?
+        var firstRenderableLineIndex: Int?
+        var nonMarkerLineCount = 0
+        for index in lines.indices {
             let line = lines[index]
-            guard line.isTimed else { continue }
-            if markers[index] {
-                let markerEnd = max(line.endTimeMs, nextRenderableStart)
-                if markerEnd - line.startTimeMs > lyricsTimelineInterludeMinDurationMs {
-                    hasRenderableMarker = true
-                }
+            let marker = LyricsTimelineDisplayBuilder.isInterludeMarkerText(
+                LyricsTimelineDisplayBuilder.candidateText(line)
+            )
+            isMarker.append(marker)
+            if marker {
+                markerIndices.append(index)
             } else {
-                nextRenderableStart = line.startTimeMs
-                hasRenderableMarker = false
-            }
-        }
-        nextRenderableLineStartTimes = nextStartTimes
-        hasRenderableMarkerBeforeNextLine = markerBeforeNextLine
-        lastLyricEndTimes = lines.map(LyricsTimelineDisplayBuilder.lastLyricEndTime)
-        firstRenderableLineIndex = lines.indices.first {
-            lines[$0].isTimed && !markers[$0]
-        }
-        firstUntimedRenderableLineIndex = lines.indices.first {
-            !lines[$0].isTimed && !markers[$0]
-        }
-
-        let startTimes = lines.map(\.startTimeMs)
-        lineStartTimes = startTimes
-        activeLineEndTimePrefix = Self.activeEndTimePrefix(lines)
-        lineStartTimesAreSorted = Self.isNondecreasing(startTimes)
-
-        let timedIndices = lines.indices.filter {
-            lines[$0].isTimed && !markers[$0]
-        }
-        let timedStartTimes = timedIndices.map { lines[$0].startTimeMs }
-        renderableTimedLineIndices = timedIndices
-        renderableTimedLineStartTimes = timedStartTimes
-        renderableTimedLineEndTimePrefix = Self.activeEndTimePrefix(
-            timedIndices.map { lines[$0] }
-        )
-        renderableTimedLineStartTimesAreSorted = Self.isNondecreasing(timedStartTimes)
-    }
-
-    func activeLineIndex(at positionMs: Int64) -> Int {
-        guard !lines.isEmpty else { return -1 }
-        guard lineStartTimesAreSorted else {
-            var candidate = 0
-            for index in lines.indices {
-                let line = lines[index]
-                if positionMs >= line.startTimeMs {
-                    candidate = index
-                }
-                if line.endTimeMs > line.startTimeMs,
-                   positionMs >= line.startTimeMs,
-                   positionMs < line.endTimeMs {
-                    return index
+                nonMarkerLineCount += 1
+                if line.isTimed {
+                    if firstRenderableLineIndex == nil {
+                        firstRenderableLineIndex = index
+                    }
+                } else if firstUntimedLineIndex == nil {
+                    firstUntimedLineIndex = index
                 }
             }
-            return candidate
         }
-
-        guard let candidate = Self.lastIndex(notAfter: positionMs, in: lineStartTimes) else {
-            return 0
-        }
-        guard activeLineEndTimePrefix[candidate] > positionMs else {
-            return candidate
-        }
-        return Self.firstActiveIndex(
-            at: positionMs,
-            through: candidate,
-            endTimePrefix: activeLineEndTimePrefix
+        self.isMarker = isMarker
+        self.markerIndices = markerIndices
+        self.firstUntimedLineIndex = firstUntimedLineIndex
+        self.firstRenderableLineIndex = firstRenderableLineIndex
+        self.nonMarkerLineCount = nonMarkerLineCount
+        lastLyricEndTimes = cacheLyricEndTimes
+            ? lines.map(LyricsTimelineDisplayBuilder.lastLyricEndTime)
+            : nil
+        let markerInterludeInfos = LyricsTimelineDisplayBuilder.markerInterludeInfos(
+            lines: lines,
+            isMarker: isMarker,
+            markerIndices: markerIndices
         )
-    }
-
-    fileprivate func activeRenderableLineIndex(at positionMs: Int64) -> Int? {
-        guard !renderableTimedLineIndices.isEmpty else { return nil }
-        guard renderableTimedLineStartTimesAreSorted else {
-            return renderableTimedLineIndices.first { index in
-                let line = lines[index]
-                return positionMs >= line.startTimeMs && positionMs < line.endTimeMs
-            }
+        self.markerInterludeInfos = markerInterludeInfos
+        var baseItems: [LyricsTimelineDisplayItem] = []
+        let capacity = nonMarkerLineCount
+        baseItems.reserveCapacity(capacity == Int.max ? capacity : capacity + 1)
+        for index in lines.indices where !isMarker[index] || markerInterludeInfos[index] == nil {
+            baseItems.append(.line(index: index, line: lines[index], id: lineIDs[index]))
         }
-        guard let candidate = Self.lastIndex(notAfter: positionMs, in: renderableTimedLineStartTimes),
-              renderableTimedLineEndTimePrefix[candidate] > positionMs else {
-            return nil
+        if baseItems.isEmpty, let first = lines.first {
+            baseItems.append(.line(index: 0, line: first, id: lineIDs[0]))
         }
-        let offset = Self.firstActiveIndex(
-            at: positionMs,
-            through: candidate,
-            endTimePrefix: renderableTimedLineEndTimePrefix
-        )
-        return renderableTimedLineIndices[offset]
-    }
-
-    fileprivate func latestRenderableLineIndex(at positionMs: Int64) -> Int? {
-        guard !renderableTimedLineIndices.isEmpty else { return nil }
-        if renderableTimedLineStartTimesAreSorted {
-            guard let offset = Self.lastIndex(notAfter: positionMs, in: renderableTimedLineStartTimes) else {
-                return nil
-            }
-            return renderableTimedLineIndices[offset]
-        }
-        var fallback: Int?
-        for index in renderableTimedLineIndices where positionMs >= lines[index].startTimeMs {
-            fallback = index
-        }
-        return fallback
-    }
-
-    private static func activeEndTimePrefix(_ lines: [LyricsLine]) -> [Int64] {
-        var result: [Int64] = []
-        result.reserveCapacity(lines.count)
-        var latestEnd = Int64.min
-        for line in lines {
-            if line.endTimeMs > line.startTimeMs {
-                latestEnd = max(latestEnd, line.endTimeMs)
-            }
-            result.append(latestEnd)
-        }
-        return result
-    }
-
-    private static func isNondecreasing(_ values: [Int64]) -> Bool {
-        guard values.count > 1 else { return true }
-        for index in 1..<values.count where values[index] < values[index - 1] {
-            return false
-        }
-        return true
-    }
-
-    private static func lastIndex(notAfter positionMs: Int64, in startTimes: [Int64]) -> Int? {
-        var lower = 0
-        var upper = startTimes.count
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2
-            if startTimes[middle] <= positionMs {
-                lower = middle + 1
-            } else {
-                upper = middle
-            }
-        }
-        return lower == 0 ? nil : lower - 1
-    }
-
-    private static func firstActiveIndex(
-        at positionMs: Int64,
-        through upperBound: Int,
-        endTimePrefix: [Int64]
-    ) -> Int {
-        var lower = 0
-        var upper = upperBound
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2
-            if endTimePrefix[middle] > positionMs {
-                upper = middle
-            } else {
-                lower = middle + 1
-            }
-        }
-        return lower
+        self.baseItems = baseItems
     }
 }
 
 enum LyricsTimelineDisplayBuilder {
+    private static let interludeMinDurationMs: Int64 = 500
     private static let trailingInterludeDelayMs: Int64 = 3_500
     private static let vocalPartCenterThreshold = 4
+    private static let displayWhitespace = CharacterSet.whitespacesAndNewlines
 
     static func lineID(index: Int, line: LyricsLine) -> String {
         "line-\(index)-\(line.id)"
@@ -4042,20 +4195,26 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     static func orderedVocalParts(_ parts: [LyricsLine.VocalPart]) -> [LyricsLine.VocalPart] {
-        guard parts.count > 1 else { return parts }
-        var ordered: [LyricsLine.VocalPart] = []
-        ordered.reserveCapacity(parts.count)
+        var result: [LyricsLine.VocalPart] = []
+        result.reserveCapacity(parts.count)
         for part in parts where part.role == "lead" {
-            ordered.append(part)
+            result.append(part)
         }
         for part in parts where part.role != "lead" {
-            ordered.append(part)
+            result.append(part)
         }
-        return ordered
+        return result
     }
 
     static func vocalPartDisplayText(_ part: LyricsLine.VocalPart) -> String {
-        part.text.trimmed.isEmpty ? part.syllables.map(\.text).joined() : part.text
+        for scalar in part.text.unicodeScalars where !displayWhitespace.contains(scalar) {
+            return part.text
+        }
+        var text = ""
+        for syllable in part.syllables {
+            text.append(syllable.text)
+        }
+        return text
     }
 
     static func hasDisplayableVocalPartText(_ part: LyricsLine.VocalPart) -> Bool {
@@ -4064,16 +4223,25 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     static func shouldUseVocalPartSupplements(_ line: LyricsLine) -> Bool {
-        hasVocalPartSupplements(line.vocalParts) || displayableVocalPartCount(line.vocalParts) > 1
+        let parts = orderedVocalParts(line.vocalParts)
+        return shouldUseVocalPartSupplements(orderedParts: parts)
+    }
+
+    static func shouldUseVocalPartSupplements(orderedParts parts: [LyricsLine.VocalPart]) -> Bool {
+        return hasVocalPartSupplements(parts) || displayableVocalPartCount(parts) > 1
     }
 
     static func supplementPlaceholderText(_ line: LyricsLine) -> String {
         let text = line.text.trimmed
         if !text.isEmpty { return text }
-        let parts = orderedVocalParts(line.vocalParts)
-            .map(supplementPlaceholderText)
-            .map(\.trimmed)
-            .filter { !$0.isEmpty }
+        let orderedParts = orderedVocalParts(line.vocalParts)
+        if orderedParts.isEmpty { return " " }
+        var parts: [String] = []
+        parts.reserveCapacity(orderedParts.count)
+        for part in orderedParts {
+            let value = supplementPlaceholderText(part).trimmed
+            if !value.isEmpty { parts.append(value) }
+        }
         return parts.isEmpty ? " " : parts.joined(separator: " ")
     }
 
@@ -4089,7 +4257,10 @@ enum LyricsTimelineDisplayBuilder {
         autoInstrumentalBreakEnabled: Bool
     ) -> [LyricsTimelineDisplayItem] {
         items(
-            context: LyricsTimelineContext(lines: lines),
+            context: LyricsTimelineContext(
+                lines: lines,
+                cacheLyricEndTimes: autoInstrumentalBreakEnabled
+            ),
             positionMs: positionMs,
             trackDurationMs: trackDurationMs,
             autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
@@ -4104,8 +4275,18 @@ enum LyricsTimelineDisplayBuilder {
     ) -> [LyricsTimelineDisplayItem] {
         let lines = context.lines
         guard !lines.isEmpty else { return [] }
+        guard hasActiveInterlude(
+            context: context,
+            positionMs: positionMs,
+            trackDurationMs: trackDurationMs,
+            autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
+        ) else {
+            return context.baseItems
+        }
         var result: [LyricsTimelineDisplayItem] = []
         let count = lines.count
+        let capacity = context.nonMarkerLineCount
+        result.reserveCapacity(capacity == Int.max ? capacity : capacity + 1)
         for index in lines.indices {
             let line = lines[index]
             let marker = markerInterludeInfo(context: context, line: line, index: index, count: count)
@@ -4114,7 +4295,7 @@ enum LyricsTimelineDisplayBuilder {
                !hasOverlap(result, marker) {
                 result.append(.interlude(marker))
             } else if marker == nil {
-                result.append(.line(index: index, line: line))
+                result.append(.line(index: index, line: line, id: context.lineIDs[index]))
             }
 
             if let trailing = trailingInterludeInfo(
@@ -4130,7 +4311,7 @@ enum LyricsTimelineDisplayBuilder {
             }
         }
         if result.isEmpty, let first = lines.first {
-            result.append(.line(index: 0, line: first))
+            result.append(.line(index: 0, line: first, id: context.lineIDs[0]))
         }
         return result
     }
@@ -4142,7 +4323,10 @@ enum LyricsTimelineDisplayBuilder {
         autoInstrumentalBreakEnabled: Bool
     ) -> LyricsTimelineDisplayItem? {
         previewItem(
-            context: LyricsTimelineContext(lines: lines),
+            context: LyricsTimelineContext(
+                lines: lines,
+                cacheLyricEndTimes: autoInstrumentalBreakEnabled
+            ),
             positionMs: positionMs,
             trackDurationMs: trackDurationMs,
             autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
@@ -4158,7 +4342,7 @@ enum LyricsTimelineDisplayBuilder {
         let lines = context.lines
         guard !lines.isEmpty else { return nil }
         let count = lines.count
-        for index in lines.indices {
+        for index in context.markerIndices {
             let line = lines[index]
             if let marker = markerInterludeInfo(context: context, line: line, index: index, count: count),
                contains(marker, positionMs) {
@@ -4166,12 +4350,20 @@ enum LyricsTimelineDisplayBuilder {
             }
         }
 
-        if let index = context.firstUntimedRenderableLineIndex {
-            return .line(index: index, line: lines[index])
+        if let index = context.firstUntimedLineIndex {
+            return .line(index: index, line: lines[index], id: context.lineIDs[index])
         }
 
-        if let index = context.activeRenderableLineIndex(at: positionMs) {
-            return .line(index: index, line: lines[index])
+        var fallbackIndex = -1
+        for index in lines.indices {
+            let line = lines[index]
+            guard line.isTimed, !context.isMarker[index] else { continue }
+            if positionMs >= line.startTimeMs, positionMs < line.endTimeMs {
+                return .line(index: index, line: line, id: context.lineIDs[index])
+            }
+            if positionMs >= line.startTimeMs {
+                fallbackIndex = index
+            }
         }
 
         if let prelude = previewPreludeInfo(context: context, positionMs: positionMs) {
@@ -4187,10 +4379,8 @@ enum LyricsTimelineDisplayBuilder {
             return .interlude(trailing)
         }
 
-        if let index = context.latestRenderableLineIndex(at: positionMs) {
-            return .line(index: index, line: lines[index])
-        }
-        return nil
+        guard fallbackIndex >= 0 else { return nil }
+        return .line(index: fallbackIndex, line: lines[fallbackIndex], id: context.lineIDs[fallbackIndex])
     }
 
     static func scrollTargetID(
@@ -4201,7 +4391,10 @@ enum LyricsTimelineDisplayBuilder {
         vocalPartAnchorsEnabled: Bool
     ) -> String? {
         scrollTargetID(
-            context: LyricsTimelineContext(lines: lines),
+            context: LyricsTimelineContext(
+                lines: lines,
+                cacheLyricEndTimes: autoInstrumentalBreakEnabled
+            ),
             positionMs: positionMs,
             trackDurationMs: trackDurationMs,
             autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled,
@@ -4225,7 +4418,7 @@ enum LyricsTimelineDisplayBuilder {
             return nil
         }
 
-        if case .line(let index, let line) = item,
+        if case .line(let index, let line, _) = item,
            vocalPartAnchorsEnabled,
            let partTargetID = activeVocalPartTargetID(lineIndex: index, line: line, positionMs: positionMs) {
             return partTargetID
@@ -4278,12 +4471,70 @@ enum LyricsTimelineDisplayBuilder {
         syllables.contains { $0.endTimeMs > $0.startTimeMs }
     }
 
-    private static func markerInterludeInfo(context: LyricsTimelineContext, line: LyricsLine, index: Int, count: Int) -> InterludeInfo? {
-        guard line.isTimed, context.isMarker[index] else { return nil }
-        let nextStart = context.nextRenderableLineStartTimes[index]
-        let end = max(line.endTimeMs, nextStart)
-        guard end - line.startTimeMs > lyricsTimelineInterludeMinDurationMs else { return nil }
-        return InterludeInfo(startTimeMs: line.startTimeMs, endTimeMs: end, kind: instrumentalKind(index: index, count: count), automatic: false)
+    private static func markerInterludeInfo(context: LyricsTimelineContext, line _: LyricsLine, index: Int, count _: Int) -> InterludeInfo? {
+        context.markerInterludeInfos[index]
+    }
+
+    fileprivate static func markerInterludeInfos(
+        lines: [LyricsLine],
+        isMarker: [Bool],
+        markerIndices: [Int]
+    ) -> [InterludeInfo?] {
+        var result = Array<InterludeInfo?>(repeating: nil, count: lines.count)
+        let count = lines.count
+        for index in markerIndices {
+            let line = lines[index]
+            guard line.isTimed else { continue }
+            var nextStart: Int64 = 0
+            if index + 1 < count {
+                for nextIndex in (index + 1)..<count {
+                    let candidate = lines[nextIndex]
+                    guard candidate.isTimed else { continue }
+                    if isMarker[nextIndex] { continue }
+                    nextStart = candidate.startTimeMs
+                    break
+                }
+            }
+            let end = max(line.endTimeMs, nextStart)
+            guard end - line.startTimeMs > interludeMinDurationMs else { continue }
+            result[index] = InterludeInfo(
+                startTimeMs: line.startTimeMs,
+                endTimeMs: end,
+                kind: instrumentalKind(index: index, count: count),
+                automatic: false
+            )
+        }
+        return result
+    }
+
+    private static func hasActiveInterlude(
+        context: LyricsTimelineContext,
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> Bool {
+        for index in context.markerIndices {
+            if let info = context.markerInterludeInfos[index], contains(info, positionMs) {
+                return true
+            }
+        }
+        guard autoInstrumentalBreakEnabled else { return false }
+        let lines = context.lines
+        let count = lines.count
+        for index in lines.indices {
+            if trailingInterludeInfo(
+                context: context,
+                line: lines[index],
+                index: index,
+                count: count,
+                positionMs: positionMs,
+                trackDurationMs: trackDurationMs,
+                autoInstrumentalBreakEnabled: true
+            ) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     private static func trailingInterludeInfo(
@@ -4298,25 +4549,25 @@ enum LyricsTimelineDisplayBuilder {
         guard autoInstrumentalBreakEnabled,
               line.isTimed,
               !context.isMarker[index],
-              !context.hasRenderableMarkerBeforeNextLine[index] else {
+              !hasRenderableInterludeMarkerBeforeNextRenderableLine(context: context, index: index, count: count) else {
             return nil
         }
-        let lyricEnd = context.lastLyricEndTimes[index]
+        let lyricEnd = context.lastLyricEndTimes?[index] ?? lastLyricEndTime(line)
         guard lyricEnd >= 0 else { return nil }
         let start = lyricEnd + trailingInterludeDelayMs
-        let nextStart = context.nextRenderableLineStartTimes[index]
+        let nextStart = nextRenderableLineStartAfter(context: context, index: index)
         let end = nextStart > start ? nextStart : (index >= max(0, count - 1) ? trackDurationMs : 0)
-        guard end - start > lyricsTimelineInterludeMinDurationMs else { return nil }
+        guard end - start > interludeMinDurationMs else { return nil }
         let info = InterludeInfo(startTimeMs: start, endTimeMs: end, kind: nextStart > 0 ? "break" : "postlude", automatic: true)
         return contains(info, positionMs) ? info : nil
     }
 
     private static func previewPreludeInfo(context: LyricsTimelineContext, positionMs: Int64) -> InterludeInfo? {
-        guard let firstIndex = context.firstRenderableLineIndex else { return nil }
+        guard let firstIndex = firstRenderableLineIndex(context: context) else { return nil }
         let firstLine = context.lines[firstIndex]
         guard firstLine.isTimed, positionMs < firstLine.startTimeMs else { return nil }
         let info = InterludeInfo(startTimeMs: 0, endTimeMs: firstLine.startTimeMs, kind: "prelude", automatic: false)
-        guard info.endTimeMs - info.startTimeMs > lyricsTimelineInterludeMinDurationMs else { return nil }
+        guard info.endTimeMs - info.startTimeMs > interludeMinDurationMs else { return nil }
         return info
     }
 
@@ -4332,18 +4583,44 @@ enum LyricsTimelineDisplayBuilder {
         for index in lines.indices {
             let line = lines[index]
             guard line.isTimed, !context.isMarker[index] else { continue }
-            let lyricEnd = context.lastLyricEndTimes[index]
+            let lyricEnd = context.lastLyricEndTimes?[index] ?? lastLyricEndTime(line)
             guard lyricEnd >= 0 else { continue }
             let start = lyricEnd + trailingInterludeDelayMs
-            let nextStart = context.nextRenderableLineStartTimes[index]
+            let nextStart = nextRenderableLineStartAfter(context: context, index: index)
             let end = nextStart > start ? nextStart : (index >= max(0, count - 1) ? trackDurationMs : 0)
-            guard end - start > lyricsTimelineInterludeMinDurationMs else { continue }
+            guard end - start > interludeMinDurationMs else { continue }
             let info = InterludeInfo(startTimeMs: start, endTimeMs: end, kind: nextStart > 0 ? "break" : "postlude", automatic: true)
             if contains(info, positionMs) {
                 return info
             }
         }
         return nil
+    }
+
+    private static func firstRenderableLineIndex(context: LyricsTimelineContext) -> Int? {
+        context.firstRenderableLineIndex
+    }
+
+    private static func nextRenderableLineStartAfter(context: LyricsTimelineContext, index: Int) -> Int64 {
+        for nextIndex in (index + 1)..<context.lines.count {
+            let candidate = context.lines[nextIndex]
+            guard candidate.isTimed else { continue }
+            if context.isMarker[nextIndex] { continue }
+            return candidate.startTimeMs
+        }
+        return 0
+    }
+
+    private static func hasRenderableInterludeMarkerBeforeNextRenderableLine(context: LyricsTimelineContext, index: Int, count: Int) -> Bool {
+        for nextIndex in (index + 1)..<context.lines.count {
+            let candidate = context.lines[nextIndex]
+            guard candidate.isTimed else { continue }
+            if !context.isMarker[nextIndex] { return false }
+            if markerInterludeInfo(context: context, line: candidate, index: nextIndex, count: count) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     fileprivate static func lastLyricEndTime(_ line: LyricsLine) -> Int64 {
@@ -4486,6 +4763,8 @@ struct LyricsLineView: View, Equatable {
     var alignment: String
     var pronunciationLoading: Bool
     var translationLoading: Bool
+    var typography: AppSettings.TypographySettings
+    var speakerColors: AppSettings.SpeakerColorSettings
     var onSeek: (Int64) -> Void
 
     static func == (lhs: LyricsLineView, rhs: LyricsLineView) -> Bool {
@@ -4500,15 +4779,18 @@ struct LyricsLineView: View, Equatable {
             && lhs.alignment == rhs.alignment
             && lhs.pronunciationLoading == rhs.pronunciationLoading
             && lhs.translationLoading == rhs.translationLoading
+            && lhs.typography == rhs.typography
+            && lhs.speakerColors == rhs.speakerColors
     }
 
     var body: some View {
-        let _ = settings.typographyRevision
-        let typography = settings.typographySettings()
-        let displayVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).filter(
-            LyricsTimelineDisplayBuilder.hasDisplayableVocalPartText
+        let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
+        let displayVocalParts = orderedVocalParts.filter {
+            !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
+        }
+        let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(
+            orderedParts: orderedVocalParts
         )
-        let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(line)
         VStack(alignment: stackAlignment, spacing: 4) {
             originalLyricsView(
                 displayVocalParts: displayVocalParts,
@@ -4556,16 +4838,6 @@ struct LyricsLineView: View, Equatable {
     private func seekToLine() {
         guard line.isTimed else { return }
         onSeek(line.startTimeMs)
-    }
-
-    private var speakerColors: AppSettings.SpeakerColorSettings {
-        _ = settings.speakerColorRevision
-        return settings.speakerColorSettings()
-    }
-
-    private var typography: AppSettings.TypographySettings {
-        _ = settings.typographyRevision
-        return settings.typographySettings()
     }
 
     @ViewBuilder
@@ -4792,19 +5064,21 @@ struct SyllableKaraokeText: View {
 
     @ViewBuilder
     private func karaokeBody(nowMs: Double) -> some View {
+        let segments = karaokeSegments
+        let displayKind = normalizedKind
         Group {
-            if karaokeSegments.isEmpty {
+            if segments.isEmpty {
                 Text(text.isEmpty ? " " : text)
                     .foregroundStyle(fallbackColor)
                     .multilineTextAlignment(alignment)
-                    .modifier(LyricGlyphEffectModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
-                    .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
+                    .modifier(LyricGlyphEffectModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
+                    .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
             } else {
                 KaraokeSegmentFlowLayout(alignment: alignment, wraps: !singleLine) {
-                    ForEach(karaokeSegments) { segment in
+                    ForEach(segments) { segment in
                         KaraokeSyllableSegmentView(
                             segment: segment,
-                            kind: normalizedKind,
+                            kind: displayKind,
                             active: active,
                             nowMs: nowMs,
                             textSize: bounceTextSize,
@@ -4812,7 +5086,7 @@ struct SyllableKaraokeText: View {
                         )
                     }
                 }
-                .modifier(LyricLineMotionModifier(kind: normalizedKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
+                .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
                 .accessibilityLabel(text)
             }
         }
@@ -4821,13 +5095,17 @@ struct SyllableKaraokeText: View {
     private var karaokeSegments: [KaraokeSyllableSegment] {
         let annotations = rubyAnnotations
         let displaySyllables = effectiveSyllables
+        let bounceActiveIndex = bounceEnabled && active && !displaySyllables.isEmpty
+            ? activeSegmentIndex(in: displaySyllables)
+            : nil
         var timedSegments: [KaraokeSyllableSegment] = []
+        timedSegments.reserveCapacity(displaySyllables.count)
         var sourceOffset = 0
         for (index, syllable) in displaySyllables.enumerated() {
             let sourceLength = syllable.text.count
             defer { sourceOffset += sourceLength }
             guard !syllable.text.isEmpty else { continue }
-            let bounce = karaokeBounce(for: syllable, index: index)
+            let bounce = karaokeBounce(for: syllable, index: index, activeIndex: bounceActiveIndex)
             timedSegments.append(KaraokeSyllableSegment(
                 id: index,
                 text: syllable.text,
@@ -4913,7 +5191,7 @@ struct SyllableKaraokeText: View {
     private var effectiveSyllables: [LyricsLine.Syllable] {
         let timed = syllables.filter { !$0.text.isEmpty }
         if !timed.isEmpty {
-            return timed
+            return KaraokeSyllableTimingNormalizer.expandTimedChunks(timed)
         }
         guard syntheticTimingEnabled, endTimeMs > startTimeMs else { return [] }
         let characters = text.map(String.init)
@@ -4957,11 +5235,15 @@ struct SyllableKaraokeText: View {
         return min(1, max(0, CGFloat(positionMs - syllable.startTimeMs) / CGFloat(syllable.endTimeMs - syllable.startTimeMs)))
     }
 
-    private func karaokeBounce(for syllable: LyricsLine.Syllable, index: Int) -> KaraokeBounceMetrics {
+    private func karaokeBounce(
+        for syllable: LyricsLine.Syllable,
+        index: Int,
+        activeIndex: Int?
+    ) -> KaraokeBounceMetrics {
         guard bounceEnabled,
               active,
               syllable.endTimeMs > syllable.startTimeMs,
-              let activeIndex = activeSegmentIndex else {
+              let activeIndex else {
             return .idle
         }
         let distance = abs(CGFloat(index - activeIndex))
@@ -4978,12 +5260,12 @@ struct SyllableKaraokeText: View {
         return KaraokeBounceMetrics(offsetY: offsetY, scale: scale)
     }
 
-    private var activeSegmentIndex: Int? {
+    private func activeSegmentIndex(in syllables: [LyricsLine.Syllable]) -> Int? {
         var fallbackIndex: Int?
         var fallbackEnd = Int64.min
         var nextIndex: Int?
         var nextStart = Int64.max
-        for (index, syllable) in effectiveSyllables.enumerated() {
+        for (index, syllable) in syllables.enumerated() {
             guard !syllable.text.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else {
                 continue
             }
@@ -5569,6 +5851,10 @@ private struct KaraokeDebugPreview: View {
     }
 
     var body: some View {
+        let _ = settings.typographyRevision
+        let _ = settings.speakerColorRevision
+        let typography = settings.typographySettings()
+        let speakerColors = settings.speakerColorSettings()
         VStack(alignment: .leading, spacing: 44) {
             Text("Synthetic line sync at 50%")
                 .font(.pretendard(15, weight: .semibold))
@@ -5620,6 +5906,8 @@ private struct KaraokeDebugPreview: View {
                 alignment: "left",
                 pronunciationLoading: false,
                 translationLoading: false,
+                typography: typography,
+                speakerColors: speakerColors,
                 onSeek: { _ in }
             )
             .equatable()
@@ -5634,7 +5922,7 @@ private struct KaraokeDebugPreview: View {
                 alignment: .leading,
                 frameAlignment: .leading,
                 fontSize: 32,
-                speakerColors: settings.speakerColorSettings(),
+                speakerColors: speakerColors,
                 useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
                 karaokeDataAsLineSynced: false,
                 syncedLyricsKaraokeAnimationEnabled: true,
@@ -5732,6 +6020,52 @@ private struct KaraokeDebugPreview: View {
 #endif
 
 enum LyricSpeakerPalette {
+    private struct ResolutionCacheKey: Hashable {
+        var speaker: String
+        var speakerColor: String
+        var speakerFallback: String
+        var settings: AppSettings.SpeakerColorSettings
+        var useCreatorColors: Bool
+    }
+
+    private struct SpeakerResolution {
+        var resolvedColor: Color?
+        var activeColor: Color
+        var inactiveAlpha: Double
+    }
+
+    private final class ResolutionCache: @unchecked Sendable {
+        private static let limit = 128
+        private let lock = NSLock()
+        private var values: [ResolutionCacheKey: SpeakerResolution] = [:]
+
+        func value(
+            for key: ResolutionCacheKey,
+            create: () -> SpeakerResolution
+        ) -> SpeakerResolution {
+            lock.lock()
+            if let value = values[key] {
+                lock.unlock()
+                return value
+            }
+            lock.unlock()
+
+            let value = create()
+            lock.lock()
+            defer { lock.unlock() }
+            if let existing = values[key] {
+                return existing
+            }
+            if values.count >= Self.limit {
+                values.removeAll(keepingCapacity: true)
+            }
+            values[key] = value
+            return value
+        }
+    }
+
+    private static let resolutionCache = ResolutionCache()
+
     static func activeColor(speaker: String, settings: AppSettings.SpeakerColorSettings) -> Color {
         activeColor(
             speaker: speaker,
@@ -5749,13 +6083,13 @@ enum LyricSpeakerPalette {
         settings: AppSettings.SpeakerColorSettings,
         useCreatorColors: Bool
     ) -> Color {
-        resolvedSpeakerColor(
-            key: normalizeSpeakerKey(speaker),
+        speakerResolution(
+            speaker: speaker,
             speakerColor: speakerColor,
             speakerFallback: speakerFallback,
             settings: settings,
             useCreatorColors: useCreatorColors
-        ) ?? Color(hex: settings.hex(AppSettings.speakerColorNormal))
+        ).activeColor
     }
 
     static func inactiveColor(
@@ -5766,20 +6100,19 @@ enum LyricSpeakerPalette {
         useCreatorColors: Bool,
         distance: Double
     ) -> Color {
-        let rawKey = normalizeSpeakerKey(speaker)
-        let fallbackKey = fallbackCustomSpeakerKey(rawKey, speakerFallback: speakerFallback)
-        let baseAlpha = max(54.0, min(190.0, 185.0 - min(2.6, max(0, distance)) * 46.0))
-        guard let color = resolvedSpeakerColor(
-            key: rawKey,
+        let resolution = speakerResolution(
+            speaker: speaker,
             speakerColor: speakerColor,
             speakerFallback: speakerFallback,
             settings: settings,
             useCreatorColors: useCreatorColors
-        ) else {
+        )
+        let baseAlpha = max(54.0, min(190.0, 185.0 - min(2.6, max(0, distance)) * 46.0))
+        guard let color = resolution.resolvedColor else {
             return Color(red: 174 / 255, green: 181 / 255, blue: 195 / 255).opacity(baseAlpha / 255.0)
         }
         let distanceFactor = baseAlpha / 185.0
-        let alpha = max(40.0, min(150.0, (255.0 * speakerInactiveAlpha(fallbackKey) * distanceFactor).rounded()))
+        let alpha = max(40.0, min(150.0, (255.0 * resolution.inactiveAlpha * distanceFactor).rounded()))
         return color.opacity(alpha / 255.0)
     }
 
@@ -5792,32 +6125,47 @@ enum LyricSpeakerPalette {
         distance: Double
     ) -> Color {
         let alpha = max(34.0, (105.0 - min(2.8, max(0, distance)) * 24.0).rounded()) / 255.0
-        guard let color = resolvedSpeakerColor(
-            key: normalizeSpeakerKey(speaker),
+        guard let color = speakerResolution(
+            speaker: speaker,
             speakerColor: speakerColor,
             speakerFallback: speakerFallback,
             settings: settings,
             useCreatorColors: useCreatorColors
-        ) else {
+        ).resolvedColor else {
             return Color(red: 210 / 255, green: 216 / 255, blue: 226 / 255).opacity(alpha)
         }
         return color.opacity(alpha)
     }
 
-    private static func resolvedSpeakerColor(
-        key: String,
+    private static func speakerResolution(
+        speaker: String,
         speakerColor: String,
         speakerFallback: String,
         settings: AppSettings.SpeakerColorSettings,
         useCreatorColors: Bool
-    ) -> Color? {
-        if isCustomSpeakerKey(key), useCreatorColors, AppSettings.isHexColor(speakerColor) {
-            return Color(hex: AppSettings.normalizeHexColor(speakerColor, fallback: "#ffffff"))
-        }
-        return speakerActiveColor(
-            key: fallbackCustomSpeakerKey(key, speakerFallback: speakerFallback),
-            settings: settings
+    ) -> SpeakerResolution {
+        let cacheKey = ResolutionCacheKey(
+            speaker: speaker,
+            speakerColor: speakerColor,
+            speakerFallback: speakerFallback,
+            settings: settings,
+            useCreatorColors: useCreatorColors
         )
+        return resolutionCache.value(for: cacheKey) {
+            let key = normalizeSpeakerKey(speaker)
+            let fallbackKey = fallbackCustomSpeakerKey(key, speakerFallback: speakerFallback)
+            let resolvedColor: Color?
+            if isCustomSpeakerKey(key), useCreatorColors, AppSettings.isHexColor(speakerColor) {
+                resolvedColor = Color(hex: AppSettings.normalizeHexColor(speakerColor, fallback: "#ffffff"))
+            } else {
+                resolvedColor = speakerActiveColor(key: fallbackKey, settings: settings)
+            }
+            return SpeakerResolution(
+                resolvedColor: resolvedColor,
+                activeColor: resolvedColor ?? Color(hex: settings.hex(AppSettings.speakerColorNormal)),
+                inactiveAlpha: speakerInactiveAlpha(fallbackKey)
+            )
+        }
     }
 
     private static func speakerActiveColor(key: String, settings: AppSettings.SpeakerColorSettings) -> Color? {
@@ -6039,8 +6387,7 @@ struct LogsView: View {
     }
 
     private func debugTime(_ milliseconds: Int64) -> String {
-        let total = max(0, Int(milliseconds / 1000))
-        return String(format: "%d:%02d", total / 60, total % 60)
+        androidPlayerTime(milliseconds)
     }
 }
 
@@ -6533,7 +6880,28 @@ struct SettingsView: View {
 
     private var lyricsSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
-            lyricsProviderSettingsSection
+            settingsSection(
+                settings.t("section.standard_lyrics_providers"),
+                description: settings.t("section.standard_lyrics_providers_desc")
+            ) {
+                settingsToggleCard(
+                    settings.t("setting.lyrics_type_priority"),
+                    description: settings.t("setting.lyrics_type_priority_desc"),
+                    binding: standardLyricsTypePriorityBinding
+                )
+                settingsToggleCard(
+                    settings.t("setting.sync_data_provider_priority"),
+                    description: settings.t("setting.sync_data_provider_priority_desc"),
+                    binding: standardSyncDataProviderPriorityBinding
+                )
+                ForEach(Array(settings.standardLyricsProviderOrder.enumerated()), id: \.element) { index, providerId in
+                    if let provider = AppSettings.standardLyricsProviderById(providerId) {
+                        standardLyricsProviderSettingsCard(provider, index: index)
+                    }
+                }
+            }
+
+            multiProviderSettingsSection
 
             settingsSection(settings.t("section.language"), description: settings.t("section.language_desc")) {
                 settingsCard(settings.t("setting.ui_language"), description: settings.t("setting.ui_language_desc")) {
@@ -6587,7 +6955,7 @@ struct SettingsView: View {
         }
     }
 
-    private var lyricsProviderSettingsSection: some View {
+    private var multiProviderSettingsSection: some View {
         settingsSection(
             settings.t("section.lyrics_providers"),
             description: settings.t("section.lyrics_providers_desc")
@@ -6608,24 +6976,24 @@ struct SettingsView: View {
 
             ForEach(LyricsProviderAppContracts.unofficialProviderRawValues, id: \.self) { provider in
                 settingsToggleCard(
-                    settings.tf("lyrics_provider.enable_format", lyricsProviderName(provider)),
+                    settings.tf("lyrics_provider.enable_format", multiProviderName(provider)),
                     description: settings.t("lyrics_provider.unofficial_provider_desc"),
-                    binding: lyricsProviderEnabledBinding(provider)
+                    binding: multiProviderEnabledBinding(provider)
                 )
                 .disabled(provider == "deezer" && !settings.deezerConfigured)
             }
 
             settingsCard(settings.t("lyrics_provider.order"), description: settings.t("lyrics_provider.order_desc")) {
                 VStack(spacing: 8) {
-                    ForEach(Array(normalizedLyricsProviderOrder.enumerated()), id: \.element) { index, provider in
+                    ForEach(Array(normalizedMultiProviderOrder.enumerated()), id: \.element) { index, provider in
                         HStack {
-                            Text(lyricsProviderName(provider))
+                            Text(multiProviderName(provider))
                                 .foregroundStyle(.white.opacity(0.82))
                             Spacer()
-                            Button("↑") { moveLyricsProvider(at: index, offset: -1) }
+                            Button("↑") { moveMultiProvider(at: index, offset: -1) }
                                 .disabled(index == 0)
-                            Button("↓") { moveLyricsProvider(at: index, offset: 1) }
-                                .disabled(index == normalizedLyricsProviderOrder.count - 1)
+                            Button("↓") { moveMultiProvider(at: index, offset: 1) }
+                                .disabled(index == normalizedMultiProviderOrder.count - 1)
                         }
                     }
                 }
@@ -6685,31 +7053,105 @@ struct SettingsView: View {
         }
     }
 
-    private var normalizedLyricsProviderOrder: [String] {
+    private var normalizedMultiProviderOrder: [String] {
         LyricsProviderAppContracts.canonicalProviderOrder(settings.lyricsProviderOrder)
     }
 
-    private func lyricsProviderEnabledBinding(_ provider: String) -> Binding<Bool> {
+    private func multiProviderEnabledBinding(_ provider: String) -> Binding<Bool> {
         Binding(get: {
             settings.lyricsProviderEnabled.contains(provider)
         }, set: { enabled in
             if enabled { settings.lyricsProviderEnabled.insert(provider) }
             else { settings.lyricsProviderEnabled.remove(provider) }
-            settings.lyricsProviderOrder = normalizedLyricsProviderOrder
+            settings.lyricsProviderOrder = normalizedMultiProviderOrder
             model.showSavedToast(settings.t("toast.settings_saved"))
         })
     }
 
-    private func moveLyricsProvider(at index: Int, offset: Int) {
-        var order = normalizedLyricsProviderOrder
+    private func moveMultiProvider(at index: Int, offset: Int) {
+        var order = normalizedMultiProviderOrder
         let destination = index + offset
         guard order.indices.contains(index), order.indices.contains(destination) else { return }
         order.swapAt(index, destination)
         settings.lyricsProviderOrder = order
     }
 
-    private func lyricsProviderName(_ rawValue: String) -> String {
+    private func multiProviderName(_ rawValue: String) -> String {
         LyricsProviderAppContracts.providerDisplayName(rawValue)
+    }
+
+    @ViewBuilder
+    private func standardLyricsProviderSettingsCard(_ provider: AppSettings.StandardLyricsProvider, index: Int) -> some View {
+        settingsCard(
+            provider.name,
+            description: settings.t("lyrics.provider.author_default")
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Toggle(
+                        settings.t("lyrics.provider.enabled"),
+                        isOn: standardLyricsProviderEnabledBinding(provider.id)
+                    )
+                    .font(.pretendard(14, weight: .semibold))
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        settings.moveStandardLyricsProvider(provider.id, offset: -1)
+                        model.reloadLyrics(bypassCache: true)
+                    } label: {
+                        Image(systemName: "chevron.up")
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(index == 0)
+
+                    Button {
+                        settings.moveStandardLyricsProvider(provider.id, offset: 1)
+                        model.reloadLyrics(bypassCache: true)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(index == settings.standardLyricsProviderOrder.count - 1)
+                }
+
+                Divider().overlay(.white.opacity(0.12))
+
+                VStack(alignment: .leading, spacing: 9) {
+                    Text(settings.t("lyrics.provider.allowed_types"))
+                        .font(.pretendard(13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.64))
+                    Toggle(
+                        provider.supportsNativeKaraoke
+                            ? settings.t("lyrics.provider.type_karaoke")
+                            : settings.t("lyrics.provider.type_karaoke_sync_data"),
+                        isOn: standardLyricsProviderTypeBinding(provider.id, type: AppSettings.standardLyricsTypeKaraoke)
+                    )
+                    if provider.supportsSynced {
+                        Toggle(
+                            settings.t("lyrics.provider.type_synced"),
+                            isOn: standardLyricsProviderTypeBinding(provider.id, type: AppSettings.standardLyricsTypeSynced)
+                        )
+                    }
+                    if provider.supportsPlain {
+                        Toggle(
+                            settings.t("lyrics.provider.type_plain"),
+                            isOn: standardLyricsProviderTypeBinding(provider.id, type: AppSettings.standardLyricsTypePlain)
+                        )
+                    }
+                }
+                .font(.pretendard(14))
+
+                if provider.id == "lyricsplus", let url = URL(string: LyricsPlusProvider.projectURL) {
+                    Link(destination: url) {
+                        Label(settings.t("lyrics.provider.open_project"), systemImage: "arrow.up.right.square")
+                            .font(.pretendard(13, weight: .semibold))
+                    }
+                }
+            }
+        }
     }
 
     private var displaySettingsPage: some View {
@@ -7273,6 +7715,49 @@ struct SettingsView: View {
             \.autoInstrumentalBreakEnabled,
             onToastKey: "toast.auto_interlude_on",
             offToastKey: "toast.auto_interlude_off"
+        )
+    }
+
+    private var standardLyricsTypePriorityBinding: Binding<Bool> {
+        Binding(
+            get: { settings.standardPreferLyricsTypeOverProviderOrder },
+            set: { value in
+                settings.standardPreferLyricsTypeOverProviderOrder = value
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    private var standardSyncDataProviderPriorityBinding: Binding<Bool> {
+        Binding(
+            get: { settings.standardPreferSyncDataProvider },
+            set: { value in
+                settings.standardPreferSyncDataProvider = value
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    private func standardLyricsProviderEnabledBinding(_ providerId: String) -> Binding<Bool> {
+        Binding(
+            get: {
+                settings.standardLyricsProviderEnabled[providerId]
+                    ?? LyricsProviderAppContracts.standardProviderEnabledDefault(providerId)
+            },
+            set: { value in
+                settings.setStandardLyricsProviderEnabled(providerId, enabled: value)
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    private func standardLyricsProviderTypeBinding(_ providerId: String, type: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.standardLyricsProviderTypes[providerId]?[type] ?? true },
+            set: { value in
+                settings.setStandardLyricsProviderTypeEnabled(providerId, type: type, enabled: value)
+                model.reloadLyrics(bypassCache: true)
+            }
         )
     }
 

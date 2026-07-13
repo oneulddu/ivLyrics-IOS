@@ -1,6 +1,16 @@
 import Foundation
 
 actor AiLyricsRepository {
+    private static let taggedOutputLinePattern = #"^\s*(?:[-*]\s*)?(?:\[?L(\d{1,4})\]?|(?:row|line)\s*(\d{1,4})|#?(\d{1,4}))\s*(?:\t|[:：|\-]|\.\s+|\s+)\s*(.*)$"#
+    private static let taggedOutputLineRegex = try? NSRegularExpression(
+        pattern: taggedOutputLinePattern,
+        options: [.caseInsensitive]
+    )
+    private static let supplementOutputPrefixPattern = #"(?i)^\s*(translation|translated text|pronunciation|pronunciation text|romanization|furigana|ruby|reading|번역|발음|후리가나|후라가나)\s*[:：\-]\s*"#
+    private static let supplementOutputPrefixRegex = try? NSRegularExpression(
+        pattern: supplementOutputPrefixPattern
+    )
+
     private let supplementPromptVersion = "v4-id-aligned-ai-only"
     private let supplementTaskPronunciation = "pronunciation"
     private let supplementTaskTranslation = "translation"
@@ -1115,7 +1125,9 @@ actor AiLyricsRepository {
             karaoke: result.karaoke,
             isrc: result.isrc,
             spotifyTrackId: result.spotifyTrackId,
-            contributors: baseResult.contributors
+            contributors: baseResult.contributors,
+            providerId: baseResult.providerId,
+            selectionPolicyKey: baseResult.selectionPolicyKey
         )
     }
 
@@ -1167,7 +1179,9 @@ actor AiLyricsRepository {
             karaoke: baseResult.karaoke,
             isrc: baseResult.isrc,
             spotifyTrackId: baseResult.spotifyTrackId,
-            contributors: baseResult.contributors
+            contributors: baseResult.contributors,
+            providerId: baseResult.providerId,
+            selectionPolicyKey: baseResult.selectionPolicyKey
         )
     }
 
@@ -1226,7 +1240,9 @@ actor AiLyricsRepository {
             karaoke: baseResult.karaoke,
             isrc: baseResult.isrc,
             spotifyTrackId: baseResult.spotifyTrackId,
-            contributors: baseResult.contributors
+            contributors: baseResult.contributors,
+            providerId: baseResult.providerId,
+            selectionPolicyKey: baseResult.selectionPolicyKey
         )
     }
 
@@ -1362,9 +1378,19 @@ actor AiLyricsRepository {
     }
 
     nonisolated private func parseTaggedOutputLine(_ value: String) -> TaggedOutputLine? {
-        let pattern = #"^\s*(?:[-*]\s*)?(?:\[?L(\d{1,4})\]?|(?:row|line)\s*(\d{1,4})|#?(\d{1,4}))\s*(?:\t|[:：|\-]|\.\s+|\s+)\s*(.*)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else {
+        let regex: NSRegularExpression
+        if let cached = Self.taggedOutputLineRegex {
+            regex = cached
+        } else {
+            guard let fallback = try? NSRegularExpression(
+                pattern: Self.taggedOutputLinePattern,
+                options: [.caseInsensitive]
+            ) else {
+                return nil
+            }
+            regex = fallback
+        }
+        guard let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else {
             return nil
         }
         let rawNumber = [1, 2, 3].compactMap { group(match, $0, value) }.first(where: { !$0.isEmpty }) ?? ""
@@ -1381,7 +1407,17 @@ actor AiLyricsRepository {
     }
 
     nonisolated private func cleanSupplementOutput(_ value: String) -> String {
-        var cleaned = value.trimmed.regexReplacing(#"(?i)^\s*(translation|translated text|pronunciation|pronunciation text|romanization|furigana|ruby|reading|번역|발음|후리가나|후라가나)\s*[:：\-]\s*"#, with: "")
+        let trimmed = value.trimmed
+        var cleaned: String
+        if let regex = Self.supplementOutputPrefixRegex {
+            cleaned = regex.stringByReplacingMatches(
+                in: trimmed,
+                range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed),
+                withTemplate: ""
+            )
+        } else {
+            cleaned = trimmed.regexReplacing(Self.supplementOutputPrefixPattern, with: "")
+        }
         if (cleaned.hasPrefix("\"") && cleaned.hasSuffix("\"")) || (cleaned.hasPrefix("'") && cleaned.hasSuffix("'")) {
             cleaned = String(cleaned.dropFirst().dropLast()).trimmed
         }

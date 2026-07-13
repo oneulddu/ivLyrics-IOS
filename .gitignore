@@ -25,3 +25,9 @@ LyricsProviderCore/.build*
 # Python release tooling
 __pycache__/
 *.pyc
+
+# Local test harnesses
+**/test/
+**/tests/
+!/LyricsProviderCore/Tests/
+!/LyricsProviderCore/Tests/**

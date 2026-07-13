@@ -2,16 +2,18 @@ import Foundation
 
 enum LrcParser {
     private static let linePattern = #"^\[(\d+):(\d+)(?:[\.,](\d+))?\](.*)$"#
+    private static let lineRegex = try? NSRegularExpression(pattern: linePattern)
 
     static func parseSynced(_ lrc: String?, durationMs: Int64) -> [LyricsLine] {
         guard let lrc, !lrc.trimmed.isEmpty else {
             return []
         }
 
+        guard let lineRegex else { return [] }
+
         var starts: [LyricsLine] = []
         for rawLine in lrc.components(separatedBy: .newlines) {
-            guard let regex = try? NSRegularExpression(pattern: linePattern),
-                  let match = regex.firstMatch(in: rawLine, range: NSRange(rawLine.startIndex..., in: rawLine)),
+            guard let match = lineRegex.firstMatch(in: rawLine, range: NSRange(rawLine.startIndex..., in: rawLine)),
                   match.numberOfRanges >= 5 else {
                 continue
             }
@@ -23,25 +25,23 @@ enum LrcParser {
             starts.append(LyricsLine(startTimeMs: startMs, endTimeMs: startMs, text: text))
         }
 
-        var result: [LyricsLine] = []
         for index in starts.indices {
             let current = starts[index]
             let nextStart = index + 1 < starts.count ? starts[index + 1].startTimeMs : 0
             let fallbackEnd = durationMs > current.startTimeMs ? durationMs : current.startTimeMs + 4_000
-            let end = nextStart > current.startTimeMs ? nextStart : fallbackEnd
-            result.append(LyricsLine(startTimeMs: current.startTimeMs, endTimeMs: end, text: current.text))
+            starts[index].endTimeMs = nextStart > current.startTimeMs ? nextStart : fallbackEnd
         }
-        return result
+        return starts
     }
 
     static func parsePlain(_ plainLyrics: String?) -> [LyricsLine] {
         guard let plainLyrics, !plainLyrics.trimmed.isEmpty else {
             return []
         }
-        return plainLyrics.components(separatedBy: .newlines)
-            .map { $0.trimmed }
-            .filter { !$0.isEmpty }
-            .map { LyricsLine(startTimeMs: 0, endTimeMs: 0, text: $0) }
+        return plainLyrics.components(separatedBy: .newlines).compactMap { rawLine in
+            let text = rawLine.trimmed
+            return text.isEmpty ? nil : LyricsLine(startTimeMs: 0, endTimeMs: 0, text: text)
+        }
     }
 
     private static func stringGroup(_ match: NSTextCheckingResult, _ index: Int, _ source: String) -> String {

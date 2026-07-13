@@ -68,6 +68,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private var lastRenderUptime: TimeInterval = 0
     private var lastRenderedPositionMs: Int64?
     private var lastRenderIdentityValue: String?
+    private var lastRenderIdentityInput: RenderIdentityInput?
     private var audioSessionActive = false
     private nonisolated let playbackInfo = PictureInPicturePlaybackInfo()
     private var lastPublishedPlaybackState: PlaybackState?
@@ -130,7 +131,6 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     func update(
         track: TrackSnapshot?,
         lyrics: LyricsResult,
-        activeLineIndex: Int,
         positionMs: Int64,
         title: String,
         artist: String,
@@ -140,7 +140,6 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let nextState = RenderState(
             track: track,
             lines: lyrics.lines,
-            activeLineIndex: activeLineIndex,
             positionMs: positionMs,
             title: title,
             artist: artist,
@@ -159,7 +158,19 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             typography: settings.typography,
             speakerColors: settings.speakerColors
         )
-        let nextRenderIdentity = nextState.renderIdentity
+        let nextRenderIdentityInput = RenderIdentityInput(
+            state: nextState,
+            activeLine: nextState.activeLine
+        )
+        let nextRenderIdentity: String
+        if let lastRenderIdentityInput,
+           let lastRenderIdentityValue,
+           lastRenderIdentityInput.definitelyMatches(nextRenderIdentityInput) {
+            nextRenderIdentity = lastRenderIdentityValue
+        } else {
+            nextRenderIdentity = nextState.renderIdentity(for: nextRenderIdentityInput.activeLine)
+            lastRenderIdentityInput = nextRenderIdentityInput
+        }
         let forceRender = nextRenderIdentity != lastRenderIdentityValue
         state = nextState
         lastRenderIdentityValue = nextRenderIdentity
@@ -464,12 +475,14 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let previousBlurredArtwork = blurredArtwork
         let previousRenderedPositionMs = lastRenderedPositionMs
         let previousRenderIdentityValue = lastRenderIdentityValue
+        let previousRenderIdentityInput = lastRenderIdentityInput
         defer {
             state = previousState
             artwork = previousArtwork
             blurredArtwork = previousBlurredArtwork
             lastRenderedPositionMs = previousRenderedPositionMs
             lastRenderIdentityValue = previousRenderIdentityValue
+            lastRenderIdentityInput = previousRenderIdentityInput
         }
 
         let firstPart = LyricsLine.VocalPart(
@@ -503,7 +516,6 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             vocalParts: [firstPart, secondPart],
             translationText: "Android PiP visual parity"
         )]
-        state.activeLineIndex = 0
         state.positionMs = 4_800
         state.title = "Midnight Signal"
         state.artist = "ivLyrics"
@@ -516,6 +528,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         state.translationSizePercent = 100
         lastRenderedPositionMs = nil
         lastRenderIdentityValue = nil
+        lastRenderIdentityInput = nil
         artwork = Self.debugSampleArtwork()
         blurredArtwork = artwork.flatMap { Self.makeBlurredArtwork(from: $0) }
 
@@ -1002,7 +1015,6 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private struct RenderState {
         var track: TrackSnapshot?
         var lines: [LyricsLine]
-        var activeLineIndex: Int
         var positionMs: Int64
         var title: String
         var artist: String
@@ -1024,7 +1036,6 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         static let empty = RenderState(
             track: nil,
             lines: [],
-            activeLineIndex: -1,
             positionMs: 0,
             title: "ivLyrics",
             artist: "",
@@ -1080,7 +1091,18 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         }
 
         var activeLine: ActiveLine? {
-            guard lines.indices.contains(activeLineIndex) else { return nil }
+            guard !lines.isEmpty else { return nil }
+            var activeLineIndex = 0
+            for candidate in lines.indices {
+                let line = lines[candidate]
+                if positionMs >= line.startTimeMs { activeLineIndex = candidate }
+                if line.endTimeMs > line.startTimeMs,
+                   positionMs >= line.startTimeMs,
+                   positionMs < line.endTimeMs {
+                    activeLineIndex = candidate
+                    break
+                }
+            }
             let line = lines[activeLineIndex]
             let duration = max(1, line.endTimeMs - line.startTimeMs)
             let progress = max(0, min(1, CGFloat(positionMs - line.startTimeMs) / CGFloat(duration)))
@@ -1095,32 +1117,64 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             return value.isEmpty ? nil : value
         }
 
-        var renderIdentity: String {
-            let line = activeLine
-            return [
-                track?.stableKey ?? "",
-                String(line?.index ?? -1),
-                title,
-                artist,
-                statusText,
-                String(showArtwork),
-                orientation,
-                backgroundMode,
-                alignment,
-                String(lyricsSizePercent),
-                String(translationSizePercent),
-                solidColor,
-                String(syncedLyricsKaraokeAnimationEnabled),
-                String(karaokeBounceEffectEnabled),
-                String(karaokeDataAsLineSynced),
-                String(useSyncCreatorSpeakerColors),
-                line?.line.furiganaText ?? "",
-                line?.line.pronunciationText ?? "",
-                line?.line.translationText ?? "",
-                line?.line.vocalParts.map { [$0.furiganaText, $0.pronunciationText, $0.translationText].joined(separator: "\u{1f}") }.joined(separator: "\u{1e}") ?? "",
-                String(typography.hashValue),
-                String(speakerColors.hashValue)
-            ].joined(separator: "|")
+        func renderIdentity(for line: ActiveLine?) -> String {
+            var identity = track?.stableKey ?? ""
+            identity.reserveCapacity(256)
+            identity.append("|")
+            identity.append(String(line?.index ?? -1))
+            identity.append("|")
+            identity.append(title)
+            identity.append("|")
+            identity.append(artist)
+            identity.append("|")
+            identity.append(statusText)
+            identity.append("|")
+            identity.append(String(showArtwork))
+            identity.append("|")
+            identity.append(orientation)
+            identity.append("|")
+            identity.append(backgroundMode)
+            identity.append("|")
+            identity.append(alignment)
+            identity.append("|")
+            identity.append(String(lyricsSizePercent))
+            identity.append("|")
+            identity.append(String(translationSizePercent))
+            identity.append("|")
+            identity.append(solidColor)
+            identity.append("|")
+            identity.append(String(syncedLyricsKaraokeAnimationEnabled))
+            identity.append("|")
+            identity.append(String(karaokeBounceEffectEnabled))
+            identity.append("|")
+            identity.append(String(karaokeDataAsLineSynced))
+            identity.append("|")
+            identity.append(String(useSyncCreatorSpeakerColors))
+            identity.append("|")
+            identity.append(line?.line.furiganaText ?? "")
+            identity.append("|")
+            identity.append(line?.line.pronunciationText ?? "")
+            identity.append("|")
+            identity.append(line?.line.translationText ?? "")
+            identity.append("|")
+            if let vocalParts = line?.line.vocalParts {
+                for index in vocalParts.indices {
+                    if index > vocalParts.startIndex {
+                        identity.append("\u{1e}")
+                    }
+                    let part = vocalParts[index]
+                    identity.append(part.furiganaText)
+                    identity.append("\u{1f}")
+                    identity.append(part.pronunciationText)
+                    identity.append("\u{1f}")
+                    identity.append(part.translationText)
+                }
+            }
+            identity.append("|")
+            identity.append(String(typography.hashValue))
+            identity.append("|")
+            identity.append(String(speakerColors.hashValue))
+            return identity
         }
     }
 
@@ -1130,9 +1184,72 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         var progress: CGFloat
 
         var supplementLines: [String] {
-            [line.pronunciationText, line.translationText]
-                .map(\.trimmed)
-                .filter { !$0.isEmpty }
+            let pronunciation = line.pronunciationText.trimmed
+            let translation = line.translationText.trimmed
+            if pronunciation.isEmpty {
+                return translation.isEmpty ? [] : [translation]
+            }
+            return translation.isEmpty ? [pronunciation] : [pronunciation, translation]
+        }
+    }
+
+    private struct RenderIdentityInput {
+        let state: RenderState
+        let activeLine: ActiveLine?
+
+        init(state: RenderState, activeLine: ActiveLine?) {
+            var identityState = state
+            identityState.lines = []
+            self.state = identityState
+            self.activeLine = activeLine
+        }
+
+        func definitelyMatches(_ other: RenderIdentityInput) -> Bool {
+            guard state.track == other.state.track,
+                  activeLine?.index == other.activeLine?.index,
+                  state.title == other.state.title,
+                  state.artist == other.state.artist,
+                  state.statusText == other.state.statusText,
+                  state.showArtwork == other.state.showArtwork,
+                  state.orientation == other.state.orientation,
+                  state.backgroundMode == other.state.backgroundMode,
+                  state.alignment == other.state.alignment,
+                  state.lyricsSizePercent == other.state.lyricsSizePercent,
+                  state.translationSizePercent == other.state.translationSizePercent,
+                  state.solidColor == other.state.solidColor,
+                  state.syncedLyricsKaraokeAnimationEnabled == other.state.syncedLyricsKaraokeAnimationEnabled,
+                  state.karaokeBounceEffectEnabled == other.state.karaokeBounceEffectEnabled,
+                  state.karaokeDataAsLineSynced == other.state.karaokeDataAsLineSynced,
+                  state.useSyncCreatorSpeakerColors == other.state.useSyncCreatorSpeakerColors,
+                  state.typography == other.state.typography,
+                  state.speakerColors == other.state.speakerColors else {
+                return false
+            }
+            return definitelyMatchesActiveLine(other.activeLine)
+        }
+
+        private func definitelyMatchesActiveLine(_ other: ActiveLine?) -> Bool {
+            guard let activeLine, let other else {
+                return activeLine == nil && other == nil
+            }
+            let line = activeLine.line
+            let otherLine = other.line
+            guard line.furiganaText == otherLine.furiganaText,
+                  line.pronunciationText == otherLine.pronunciationText,
+                  line.translationText == otherLine.translationText,
+                  line.vocalParts.count == otherLine.vocalParts.count else {
+                return false
+            }
+            for index in line.vocalParts.indices {
+                let part = line.vocalParts[index]
+                let otherPart = otherLine.vocalParts[index]
+                if part.furiganaText != otherPart.furiganaText
+                    || part.pronunciationText != otherPart.pronunciationText
+                    || part.translationText != otherPart.translationText {
+                    return false
+                }
+            }
+            return true
         }
     }
 
@@ -1161,11 +1278,9 @@ struct PictureInPictureKaraokeContent: View {
     var typography: AppSettings.TypographySettings = .defaults
 
     var body: some View {
-        let displayParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts).filter(
-            LyricsTimelineDisplayBuilder.hasDisplayableVocalPartText
-        )
+        let visibleParts = displayParts
         Group {
-            if displayParts.isEmpty {
+            if visibleParts.isEmpty {
                 karaokeText(
                     text: line.text.trimmed.isEmpty ? " " : line.text,
                     rubyText: line.furiganaText,
@@ -1181,8 +1296,7 @@ struct PictureInPictureKaraokeContent: View {
                 )
             } else {
                 VStack(alignment: horizontalAlignment, spacing: 0) {
-                    ForEach(displayParts.indices, id: \.self) { index in
-                        let part = displayParts[index]
+                    ForEach(Array(visibleParts.enumerated()), id: \.offset) { index, part in
                         let partActive = positionMs >= part.startTimeMs
                         karaokeText(
                             text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
@@ -1198,13 +1312,18 @@ struct PictureInPictureKaraokeContent: View {
                             inactiveDistance: partActive ? 0 : 0.45,
                             effectRowSeed: index
                         )
-                        .padding(.top, vocalPartTopSpacing(index: index, parts: displayParts))
+                        .padding(.top, vocalPartTopSpacing(index: index, parts: visibleParts))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: frameAlignment)
             }
         }
         .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: fontSize))
+    }
+
+    private var displayParts: [LyricsLine.VocalPart] {
+        LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
+            .filter { !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty }
     }
 
     private var horizontalAlignment: HorizontalAlignment {
