@@ -6903,28 +6903,7 @@ struct SettingsView: View {
 
     private var lyricsSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
-            settingsSection(
-                settings.t("section.standard_lyrics_providers"),
-                description: settings.t("section.standard_lyrics_providers_desc")
-            ) {
-                settingsToggleCard(
-                    settings.t("setting.lyrics_type_priority"),
-                    description: settings.t("setting.lyrics_type_priority_desc"),
-                    binding: standardLyricsTypePriorityBinding
-                )
-                settingsToggleCard(
-                    settings.t("setting.sync_data_provider_priority"),
-                    description: settings.t("setting.sync_data_provider_priority_desc"),
-                    binding: standardSyncDataProviderPriorityBinding
-                )
-                ForEach(Array(settings.standardLyricsProviderOrder.enumerated()), id: \.element) { index, providerId in
-                    if let provider = AppSettings.standardLyricsProviderById(providerId) {
-                        standardLyricsProviderSettingsCard(provider, index: index)
-                    }
-                }
-            }
-
-            multiProviderSettingsSection
+            lyricsProviderSettingsSection
 
             settingsSection(settings.t("section.language"), description: settings.t("section.language_desc")) {
                 settingsCard(settings.t("setting.ui_language"), description: settings.t("setting.ui_language_desc")) {
@@ -6978,18 +6957,17 @@ struct SettingsView: View {
         }
     }
 
-    private var multiProviderSettingsSection: some View {
+    private var lyricsProviderSettingsSection: some View {
         settingsSection(
             settings.t("section.lyrics_providers"),
-            description: settings.t("section.lyrics_providers_desc")
+            description: settings.t(
+                usesMultiProviderSettings
+                    ? "section.lyrics_providers_desc"
+                    : "section.standard_lyrics_providers_desc"
+            )
         ) {
             settingsCard(settings.t("setting.lyrics_provider_mode"), description: settings.t("setting.lyrics_provider_mode_desc")) {
-                Picker("", selection: Binding(get: {
-                    settings.lyricsProviderModeRaw
-                }, set: { value in
-                    settings.lyricsProviderModeRaw = value
-                    model.showSavedToast(settings.t("toast.settings_saved"))
-                })) {
+                Picker("", selection: lyricsProviderModeBinding) {
                     Text(settings.t("lyrics_provider.mode.legacy")).tag("legacy")
                     Text(settings.t("lyrics_provider.mode.multi")).tag("multiProvider")
                 }
@@ -6997,81 +6975,109 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
             }
 
-            ForEach(LyricsProviderAppContracts.unofficialProviderRawValues, id: \.self) { provider in
-                settingsToggleCard(
-                    settings.tf("lyrics_provider.enable_format", multiProviderName(provider)),
-                    description: settings.t("lyrics_provider.unofficial_provider_desc"),
-                    binding: multiProviderEnabledBinding(provider)
-                )
-                .disabled(provider == "deezer" && !settings.deezerConfigured)
+            if usesMultiProviderSettings {
+                multiProviderSettingsContent
+            } else {
+                standardLyricsProviderSettingsContent
             }
+        }
+    }
 
-            settingsCard(settings.t("lyrics_provider.order"), description: settings.t("lyrics_provider.order_desc")) {
-                VStack(spacing: 8) {
-                    ForEach(Array(normalizedMultiProviderOrder.enumerated()), id: \.element) { index, provider in
-                        HStack {
-                            Text(multiProviderName(provider))
-                                .foregroundStyle(.white.opacity(0.82))
-                            Spacer()
-                            Button("↑") { moveMultiProvider(at: index, offset: -1) }
-                                .disabled(index == 0)
-                            Button("↓") { moveMultiProvider(at: index, offset: 1) }
-                                .disabled(index == normalizedMultiProviderOrder.count - 1)
-                        }
+    @ViewBuilder
+    private var standardLyricsProviderSettingsContent: some View {
+        settingsToggleCard(
+            settings.t("setting.lyrics_type_priority"),
+            description: settings.t("setting.lyrics_type_priority_desc"),
+            binding: standardLyricsTypePriorityBinding
+        )
+        settingsToggleCard(
+            settings.t("setting.sync_data_provider_priority"),
+            description: settings.t("setting.sync_data_provider_priority_desc"),
+            binding: standardSyncDataProviderPriorityBinding
+        )
+        ForEach(Array(settings.standardLyricsProviderOrder.enumerated()), id: \.element) { index, providerId in
+            if let provider = AppSettings.standardLyricsProviderById(providerId) {
+                standardLyricsProviderSettingsCard(provider, index: index)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var multiProviderSettingsContent: some View {
+        ForEach(LyricsProviderAppContracts.unofficialProviderRawValues, id: \.self) { provider in
+            settingsToggleCard(
+                settings.tf("lyrics_provider.enable_format", multiProviderName(provider)),
+                description: settings.t("lyrics_provider.unofficial_provider_desc"),
+                binding: multiProviderEnabledBinding(provider)
+            )
+            .disabled(provider == "deezer" && !settings.deezerConfigured)
+        }
+
+        settingsCard(settings.t("lyrics_provider.order"), description: settings.t("lyrics_provider.order_desc")) {
+            VStack(spacing: 8) {
+                ForEach(Array(normalizedMultiProviderOrder.enumerated()), id: \.element) { index, provider in
+                    HStack {
+                        Text(multiProviderName(provider))
+                            .foregroundStyle(.white.opacity(0.82))
+                        Spacer()
+                        Button("↑") { moveMultiProvider(at: index, offset: -1) }
+                            .disabled(index == 0)
+                        Button("↓") { moveMultiProvider(at: index, offset: 1) }
+                            .disabled(index == normalizedMultiProviderOrder.count - 1)
                     }
                 }
             }
+        }
 
-            settingsCard(settings.t("lyrics_provider.deezer_arl"), description: settings.t("lyrics_provider.deezer_arl_desc")) {
-                SecureField(settings.deezerConfigured ? "••••••••••••" : settings.t("lyrics_provider.deezer_arl_placeholder"), text: $deezerARLInput)
-                    .textFieldStyle(PlayerTextFieldStyle())
-                    .textContentType(.password)
-                Text(settings.deezerConfigured
-                     ? settings.t("lyrics_provider.deezer_configured")
-                     : settings.t("lyrics_provider.deezer_not_configured"))
+        settingsCard(settings.t("lyrics_provider.deezer_arl"), description: settings.t("lyrics_provider.deezer_arl_desc")) {
+            SecureField(settings.deezerConfigured ? "••••••••••••" : settings.t("lyrics_provider.deezer_arl_placeholder"), text: $deezerARLInput)
+                .textFieldStyle(PlayerTextFieldStyle())
+                .textContentType(.password)
+            Text(settings.deezerConfigured
+                 ? settings.t("lyrics_provider.deezer_configured")
+                 : settings.t("lyrics_provider.deezer_not_configured"))
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.62))
+            if !deezerCredentialStatus.isEmpty {
+                Text(deezerCredentialStatus)
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.62))
-                if !deezerCredentialStatus.isEmpty {
-                    Text(deezerCredentialStatus)
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.62))
-                }
-                settingsActionButton(settings.t("lyrics_provider.deezer_save")) {
-                    let value = deezerARLInput
-                    Task { @MainActor in
-                        do {
-                            try await settings.saveDeezerARL(value)
-                            deezerARLInput = ""
-                            deezerCredentialStatus = settings.t("lyrics_provider.deezer_saved")
-                        } catch {
-                            deezerCredentialStatus = settings.t("lyrics_provider.credential_failed")
-                        }
-                    }
-                }
-                .disabled(deezerARLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                settingsActionButton(settings.t("lyrics_provider.deezer_remove"), role: .destructive) {
-                    Task { @MainActor in
-                        do {
-                            try await settings.removeDeezerARL()
-                            deezerARLInput = ""
-                            deezerCredentialStatus = settings.t("lyrics_provider.deezer_removed")
-                        } catch {
-                            deezerCredentialStatus = settings.t("lyrics_provider.credential_failed")
-                        }
-                    }
-                }
-                .disabled(!settings.deezerConfigured)
             }
-
-            settingsCard(settings.t("lyrics_provider.legal_title")) {
-                Text(settings.t("lyrics_provider.legal_notice"))
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.64))
-                if settings.lyricsProviderRemoteGlobalDisable {
-                    Text(settings.t("lyrics_provider.remote_disabled"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
+            settingsActionButton(settings.t("lyrics_provider.deezer_save")) {
+                let value = deezerARLInput
+                Task { @MainActor in
+                    do {
+                        try await settings.saveDeezerARL(value)
+                        deezerARLInput = ""
+                        deezerCredentialStatus = settings.t("lyrics_provider.deezer_saved")
+                    } catch {
+                        deezerCredentialStatus = settings.t("lyrics_provider.credential_failed")
+                    }
                 }
+            }
+            .disabled(deezerARLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            settingsActionButton(settings.t("lyrics_provider.deezer_remove"), role: .destructive) {
+                Task { @MainActor in
+                    do {
+                        try await settings.removeDeezerARL()
+                        deezerARLInput = ""
+                        deezerCredentialStatus = settings.t("lyrics_provider.deezer_removed")
+                    } catch {
+                        deezerCredentialStatus = settings.t("lyrics_provider.credential_failed")
+                    }
+                }
+            }
+            .disabled(!settings.deezerConfigured)
+        }
+
+        settingsCard(settings.t("lyrics_provider.legal_title")) {
+            Text(settings.t("lyrics_provider.legal_notice"))
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.64))
+            if settings.lyricsProviderRemoteGlobalDisable {
+                Text(settings.t("lyrics_provider.remote_disabled"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -7087,6 +7093,7 @@ struct SettingsView: View {
             if enabled { settings.lyricsProviderEnabled.insert(provider) }
             else { settings.lyricsProviderEnabled.remove(provider) }
             settings.lyricsProviderOrder = normalizedMultiProviderOrder
+            model.reloadLyrics(bypassCache: true)
             model.showSavedToast(settings.t("toast.settings_saved"))
         })
     }
@@ -7097,6 +7104,7 @@ struct SettingsView: View {
         guard order.indices.contains(index), order.indices.contains(destination) else { return }
         order.swapAt(index, destination)
         settings.lyricsProviderOrder = order
+        model.reloadLyrics(bypassCache: true)
     }
 
     private func multiProviderName(_ rawValue: String) -> String {
@@ -7175,6 +7183,23 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var usesMultiProviderSettings: Bool {
+        settings.lyricsProviderModeRaw == "multiProvider" || settings.lyricsProviderRemoteCohortAllowed
+    }
+
+    private var lyricsProviderModeBinding: Binding<String> {
+        Binding(
+            get: { settings.lyricsProviderModeRaw },
+            set: { value in
+                withAnimation(.easeOut(duration: 0.16)) {
+                    settings.lyricsProviderModeRaw = value
+                }
+                model.reloadLyrics(bypassCache: true)
+                model.showSavedToast(settings.t("toast.settings_saved"))
+            }
+        )
     }
 
     private var displaySettingsPage: some View {

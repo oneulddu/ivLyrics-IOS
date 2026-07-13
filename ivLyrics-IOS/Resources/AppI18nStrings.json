@@ -434,7 +434,7 @@
     "tmi.error_fetch": "TMI를 불러오는 중 오류가 발생했습니다.",
     "tmi.require_key": "AI 제공자 API 키가 필요합니다.",
     "tmi.confidence_format": "신뢰도: %s",
-    "section.lyrics_providers": "가사 공급자",
+    "section.lyrics_providers": "가사 제공자",
     "section.lyrics_providers_desc": "기존 LRCLIB 흐름은 기본으로 유지됩니다. 비공식 공급자는 사용자가 명시적으로 켜거나 서명 검증된 원격 cohort에 포함될 때만 사용됩니다.",
     "setting.lyrics_type_priority": "노래방 → 싱크 → 일반 우선 조회",
     "setting.lyrics_type_priority_desc": "모든 제공자의 노래방 가사를 먼저 찾은 뒤 싱크 가사, 일반 가사 순서로 조회합니다. 같은 유형 안에서는 설정한 제공자 순서를 따릅니다.",

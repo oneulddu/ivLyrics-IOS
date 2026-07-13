@@ -85,7 +85,7 @@ enum AppI18n {
             "section.speaker_colors": "파트 색상",
             "section.ai_lyrics": "가사 AI",
             "section.provider": "제공자",
-            "section.lyrics_providers": "가사 공급자",
+            "section.lyrics_providers": "가사 제공자",
             "section.lyrics_providers_desc": "기존 LRCLIB 흐름은 기본으로 유지됩니다. 비공식 공급자는 사용자가 명시적으로 켜거나 서명 검증된 원격 cohort에 포함될 때만 사용됩니다.",
             "section.standard_lyrics_providers": "기본 가사 제공자",
             "section.standard_lyrics_providers_desc": "가사 제공자를 켜거나 끄고 우선순위와 허용할 가사 유형을 설정합니다.",
