@@ -4104,8 +4104,10 @@ struct InterludeInfo {
 struct LyricsTimelineContext {
     let lines: [LyricsLine]
     let lineIDs: [String]
-    let candidateTexts: [String]
     let isMarker: [Bool]
+    let markerIndices: [Int]
+    let firstUntimedLineIndex: Int?
+    let firstRenderableLineIndex: Int?
     let nonMarkerLineCount: Int
     let lastLyricEndTimes: [Int64]?
 
@@ -4116,13 +4118,36 @@ struct LyricsTimelineContext {
         lineIDs = lines.enumerated().map {
             LyricsTimelineDisplayBuilder.lineID(index: $0.offset, line: $0.element)
         }
-        let candidateTexts = lines.map(LyricsTimelineDisplayBuilder.candidateText)
-        self.candidateTexts = candidateTexts
-        let isMarker = candidateTexts.map(LyricsTimelineDisplayBuilder.isInterludeMarkerText)
-        self.isMarker = isMarker
-        nonMarkerLineCount = isMarker.reduce(into: 0) { count, marker in
-            if !marker { count += 1 }
+        var isMarker: [Bool] = []
+        isMarker.reserveCapacity(lines.count)
+        var markerIndices: [Int] = []
+        var firstUntimedLineIndex: Int?
+        var firstRenderableLineIndex: Int?
+        var nonMarkerLineCount = 0
+        for index in lines.indices {
+            let line = lines[index]
+            let marker = LyricsTimelineDisplayBuilder.isInterludeMarkerText(
+                LyricsTimelineDisplayBuilder.candidateText(line)
+            )
+            isMarker.append(marker)
+            if marker {
+                markerIndices.append(index)
+            } else {
+                nonMarkerLineCount += 1
+                if line.isTimed {
+                    if firstRenderableLineIndex == nil {
+                        firstRenderableLineIndex = index
+                    }
+                } else if firstUntimedLineIndex == nil {
+                    firstUntimedLineIndex = index
+                }
+            }
         }
+        self.isMarker = isMarker
+        self.markerIndices = markerIndices
+        self.firstUntimedLineIndex = firstUntimedLineIndex
+        self.firstRenderableLineIndex = firstRenderableLineIndex
+        self.nonMarkerLineCount = nonMarkerLineCount
         lastLyricEndTimes = cacheLyricEndTimes
             ? lines.map(LyricsTimelineDisplayBuilder.lastLyricEndTime)
             : nil
@@ -4266,7 +4291,7 @@ enum LyricsTimelineDisplayBuilder {
         let lines = context.lines
         guard !lines.isEmpty else { return nil }
         let count = lines.count
-        for index in lines.indices {
+        for index in context.markerIndices {
             let line = lines[index]
             if let marker = markerInterludeInfo(context: context, line: line, index: index, count: count),
                contains(marker, positionMs) {
@@ -4274,18 +4299,19 @@ enum LyricsTimelineDisplayBuilder {
             }
         }
 
-        for index in lines.indices {
-            let line = lines[index]
-            if !line.isTimed, !context.isMarker[index] {
-                return .line(index: index, line: line, id: context.lineIDs[index])
-            }
+        if let index = context.firstUntimedLineIndex {
+            return .line(index: index, line: lines[index], id: context.lineIDs[index])
         }
 
+        var fallbackIndex = -1
         for index in lines.indices {
             let line = lines[index]
             guard line.isTimed, !context.isMarker[index] else { continue }
             if positionMs >= line.startTimeMs, positionMs < line.endTimeMs {
                 return .line(index: index, line: line, id: context.lineIDs[index])
+            }
+            if positionMs >= line.startTimeMs {
+                fallbackIndex = index
             }
         }
 
@@ -4302,15 +4328,8 @@ enum LyricsTimelineDisplayBuilder {
             return .interlude(trailing)
         }
 
-        var fallback: LyricsTimelineDisplayItem?
-        for index in lines.indices {
-            let line = lines[index]
-            guard line.isTimed, !context.isMarker[index] else { continue }
-            if positionMs >= line.startTimeMs {
-                fallback = .line(index: index, line: line, id: context.lineIDs[index])
-            }
-        }
-        return fallback
+        guard fallbackIndex >= 0 else { return nil }
+        return .line(index: fallbackIndex, line: lines[fallbackIndex], id: context.lineIDs[fallbackIndex])
     }
 
     static func scrollTargetID(
@@ -4470,14 +4489,7 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     private static func firstRenderableLineIndex(context: LyricsTimelineContext) -> Int? {
-        for index in context.lines.indices {
-            let line = context.lines[index]
-            guard line.isTimed else { continue }
-            if !context.isMarker[index] {
-                return index
-            }
-        }
-        return nil
+        context.firstRenderableLineIndex
     }
 
     private static func nextRenderableLineStartAfter(context: LyricsTimelineContext, index: Int) -> Int64 {
