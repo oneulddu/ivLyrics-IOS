@@ -570,17 +570,18 @@ actor LyricsRepository {
     ) async throws -> ProviderVariants? {
         var candidate: LrclibCandidate?
         var loadedFromSyncSource = false
-        let sourceId = syncData?.lrclibId ?? 0
+        let syncDataContext = syncData.map(SyncDataCandidateContext.init)
+        let sourceId = syncDataContext?.lrclibId ?? 0
         if sourceId > 0 {
             log("sync-data source: lrclibId=\(sourceId), direct loading LRCLIB")
             candidate = await fetchLrclibCandidateById(sourceId, log: log)
             if let candidate {
-                decorateCandidateForSyncData(candidate, syncData: syncData)
+                decorateCandidateForSyncData(candidate, syncData: syncDataContext)
                 loadedFromSyncSource = true
             }
         }
         if candidate == nil {
-            candidate = try await searchBestCandidate(track: track, spotifyMatch: spotifyMatch, syncData: syncData, log: log)
+            candidate = try await searchBestCandidate(track: track, spotifyMatch: spotifyMatch, syncData: syncDataContext, log: log)
         }
         guard let candidate else {
             log("lrclib: no candidate selected")
@@ -721,7 +722,7 @@ actor LyricsRepository {
         var candidates = try await searchManualLrclibCandidates(title: queryTitle, artist: queryArtist, log: log)
         let scoringTrack = manualScoringTrack(track: track, title: queryTitle, artist: queryArtist)
         for candidate in candidates {
-            candidate.score = scoringTrack == nil ? 0 : scoreCandidate(track: scoringTrack!, candidate: candidate, syncData: nil)
+            candidate.score = scoringTrack == nil ? 0 : scoreCandidate(track: scoringTrack!, candidate: candidate, hasSyncData: false)
         }
         candidates.sort(by: compareLrclibCandidates)
         return candidates.prefix(14).map { ManualLrclibCandidate(candidate: $0) }
@@ -811,7 +812,7 @@ actor LyricsRepository {
         return SpotifyCredentialValidation(expiresInSeconds: response.expiresInSeconds, logs: logs)
     }
 
-    private func searchBestCandidate(track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, syncData: SyncDataResult?, log: @escaping (String) -> Void) async throws -> LrclibCandidate? {
+    private func searchBestCandidate(track: TrackSnapshot, spotifyMatch: SpotifyTrackMatch?, syncData: SyncDataCandidateContext?, log: @escaping (String) -> Void) async throws -> LrclibCandidate? {
         var candidates: [LrclibCandidate] = []
         let spotifySearchTrack = buildSpotifyLrclibSearchTrack(track: track, spotifyMatch: spotifyMatch, log: log)
         let spotifySearchLabelPrefix = spotifyMatch?.hasEnglishMetadata == true ? "spotify-en" : "spotify"
@@ -849,9 +850,9 @@ actor LyricsRepository {
         for candidate in candidates {
             decorateCandidateForSyncData(candidate, syncData: syncData)
             candidate.albumMatchScore = 0
-            candidate.score = scoreCandidate(track: track, candidate: candidate, syncData: syncData)
+            candidate.score = scoreCandidate(track: track, candidate: candidate, hasSyncData: syncData != nil)
             if let spotifySearchTrack {
-                candidate.score = max(candidate.score, scoreCandidate(track: spotifySearchTrack, candidate: candidate, syncData: syncData))
+                candidate.score = max(candidate.score, scoreCandidate(track: spotifySearchTrack, candidate: candidate, hasSyncData: syncData != nil))
             }
         }
         candidates.sort(by: compareLrclibCandidates)
@@ -1678,7 +1679,7 @@ actor LyricsRepository {
         error.statusCode == 401 || error.statusCode == 403
     }
 
-    private func scoreCandidate(track: TrackSnapshot, candidate: LrclibCandidate, syncData: SyncDataResult?) -> Double {
+    private func scoreCandidate(track: TrackSnapshot, candidate: LrclibCandidate, hasSyncData: Bool) -> Double {
         let titleScore = IvLyricsUtilities.titleScore(track.title, candidate.trackName)
         let artistScore = IvLyricsUtilities.bestArtistScore(track.artist, candidate.artistName)
         let albumScore = IvLyricsUtilities.albumScore(track.album, candidate.albumName)
@@ -1692,13 +1693,13 @@ actor LyricsRepository {
                 score -= min(2.5, (diff - durationToleranceSeconds) / 15.0)
             }
         }
-        if syncData != nil, candidate.syncLineExactMatch {
+        if hasSyncData, candidate.syncLineExactMatch {
             score += 2.5
         }
         return score
     }
 
-    private func decorateCandidateForSyncData(_ candidate: LrclibCandidate, syncData: SyncDataResult?) {
+    private func decorateCandidateForSyncData(_ candidate: LrclibCandidate, syncData: SyncDataCandidateContext?) {
         candidate.preferredLyricsSource = ""
         candidate.syncLineExactMatch = false
         candidate.exactSyncedLineMatch = false
@@ -1726,7 +1727,9 @@ actor LyricsRepository {
         candidate.exactPlainLineMatch = hasExactLineShape(syncLineCounts, plainLineCharCounts)
         candidate.syncLineExactMatch = candidate.exactSyncedLineMatch || candidate.exactPlainLineMatch
         candidate.preferredLyricsSource = candidate.exactSyncedLineMatch ? "synced" : (candidate.exactPlainLineMatch ? "plain" : syncData.preferredLyricsSource)
-        candidate.hasOriginalLyricsScript = IvLyricsUtilities.hasOriginalLyricsScript(candidateComparableText(candidate, preferredSource: candidate.preferredLyricsSource, normalizeParentheticalLines: normalizeParentheticalLines))
+        let initialPreferredSource = candidate.preferredLyricsSource
+        let initialCandidateText = candidateComparableText(candidate, preferredSource: initialPreferredSource, normalizeParentheticalLines: normalizeParentheticalLines)
+        candidate.hasOriginalLyricsScript = IvLyricsUtilities.hasOriginalLyricsScript(initialCandidateText)
 
         guard syncData.hasLrclibSource else { return }
         let sourceId = syncData.lrclibId
@@ -1739,7 +1742,9 @@ actor LyricsRepository {
         }
 
         let preferredSource = IvLyricsUtilities.firstNonEmpty(candidate.preferredLyricsSource, syncData.preferredLyricsSource)
-        let candidateText = candidateComparableText(candidate, preferredSource: preferredSource, normalizeParentheticalLines: normalizeParentheticalLines)
+        let candidateText = preferredSource == initialPreferredSource
+            ? initialCandidateText
+            : candidateComparableText(candidate, preferredSource: preferredSource, normalizeParentheticalLines: normalizeParentheticalLines)
         let sourceFingerprint = syncData.sourceLyricsFingerprint
         candidate.syncSourceTextMatch = !sourceFingerprint.isEmpty && sourceFingerprint == IvLyricsUtilities.lyricsFingerprint(candidateText)
         candidate.syncSourceLineCountMatch = hasExactLineShape(sourceLineCounts, IvLyricsUtilities.lineCharCounts(IvLyricsUtilities.comparableLyricsLines(candidateText, stripTimestamps: false)))
@@ -1770,16 +1775,16 @@ actor LyricsRepository {
         !expectedCounts.isEmpty && expectedCounts == actualCounts
     }
 
-    private func needsLegacySyncLineShapeMatch(_ syncData: SyncDataResult?, _ candidates: [LrclibCandidate]) -> Bool {
+    private func needsLegacySyncLineShapeMatch(_ syncData: SyncDataCandidateContext?, _ candidates: [LrclibCandidate]) -> Bool {
         shouldPreferLegacyExactSyncLineShape(syncData) && !hasSyncLineExactCandidate(candidates, syncData: syncData)
     }
 
-    private func shouldPreferLegacyExactSyncLineShape(_ syncData: SyncDataResult?) -> Bool {
+    private func shouldPreferLegacyExactSyncLineShape(_ syncData: SyncDataCandidateContext?) -> Bool {
         guard let syncData else { return false }
         return !syncData.lineCharCounts.isEmpty && syncData.lrclibId <= 0 && syncData.sourceLineCharCounts.isEmpty
     }
 
-    private func hasSyncLineExactCandidate(_ candidates: [LrclibCandidate], syncData: SyncDataResult?) -> Bool {
+    private func hasSyncLineExactCandidate(_ candidates: [LrclibCandidate], syncData: SyncDataCandidateContext?) -> Bool {
         guard let syncData else { return false }
         for candidate in candidates {
             decorateCandidateForSyncData(candidate, syncData: syncData)
@@ -1820,7 +1825,7 @@ actor LyricsRepository {
         return candidate.exactPlainLineMatch ? 1 : 0
     }
 
-    private func selectSyncedFallbackCandidate(track: TrackSnapshot, spotifySearchTrack: TrackSnapshot?, syncData: SyncDataResult?, candidates: [LrclibCandidate], best: LrclibCandidate, log: (String) -> Void) -> LrclibCandidate {
+    private func selectSyncedFallbackCandidate(track: TrackSnapshot, spotifySearchTrack: TrackSnapshot?, syncData: SyncDataCandidateContext?, candidates: [LrclibCandidate], best: LrclibCandidate, log: (String) -> Void) -> LrclibCandidate {
         guard shouldPreferSyncedLrclibFallback(syncData), !best.useSyncedLyrics() else { return best }
         if hasSyncedLyricsPayload(best), isReasonableSyncedFallbackMatch(track: track, spotifySearchTrack: spotifySearchTrack, candidate: best) {
             best.preferredLyricsSource = "synced"
@@ -1839,7 +1844,7 @@ actor LyricsRepository {
         return best
     }
 
-    private func shouldPreferSyncedLrclibFallback(_ syncData: SyncDataResult?) -> Bool {
+    private func shouldPreferSyncedLrclibFallback(_ syncData: SyncDataCandidateContext?) -> Bool {
         syncData == nil || (syncData!.lrclibId <= 0 && syncData!.lineCharCounts.isEmpty)
     }
 
@@ -2282,6 +2287,26 @@ private struct SyncDataResult {
             version = syncBody["version"] as? Int ?? 1
         }
         return version >= 2 || !sourceLineCharCounts.isEmpty
+    }
+}
+
+private struct SyncDataCandidateContext {
+    let lineCharCounts: [Int]
+    let shouldNormalizeParentheticalLines: Bool
+    let hasLrclibSource: Bool
+    let lrclibId: Int64
+    let preferredLyricsSource: String
+    let sourceLyricsFingerprint: String
+    let sourceLineCharCounts: [Int]
+
+    init(_ syncData: SyncDataResult) {
+        lineCharCounts = syncData.lineCharCounts
+        shouldNormalizeParentheticalLines = syncData.shouldNormalizeParentheticalLines
+        hasLrclibSource = syncData.hasLrclibSource
+        lrclibId = syncData.lrclibId
+        preferredLyricsSource = syncData.preferredLyricsSource
+        sourceLyricsFingerprint = syncData.sourceLyricsFingerprint
+        sourceLineCharCounts = syncData.sourceLineCharCounts
     }
 }
 
