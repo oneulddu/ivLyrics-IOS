@@ -16,16 +16,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-REPOSITORY = "ivLis-Studio/ivLyrics-IOS"
+REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip() or "ivLis-Studio/ivLyrics-IOS"
 BUNDLE_IDENTIFIER = "kr.ivlis.ivlyrics.ios"
 SOURCE_PATH = Path("altstore-source.json")
 TEMPLATE_PATH = Path(".github/release-notes-template.md")
 ICON_URL = (
-    "https://raw.githubusercontent.com/ivLis-Studio/ivLyrics-IOS/main/"
+    f"https://raw.githubusercontent.com/{REPOSITORY}/main/"
     "ivLyrics-IOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
 )
 ALTSTORE_SOURCE_URL = (
-    "https://raw.githubusercontent.com/ivLis-Studio/ivLyrics-IOS/main/"
+    f"https://raw.githubusercontent.com/{REPOSITORY}/main/"
     "altstore-source.json"
 )
 
@@ -439,6 +439,8 @@ def build_altstore_source(current_tag, ipa, content):
     for key, value in defaults.items():
         if key not in source:
             source[key] = value
+    source["website"] = f"https://github.com/{REPOSITORY}"
+    source["iconURL"] = ICON_URL
 
     apps = source.get("apps") if isinstance(source.get("apps"), list) else []
     app = next(
@@ -454,6 +456,7 @@ def build_altstore_source(current_tag, ipa, content):
     for key, value in app_defaults.items():
         if key not in app:
             app[key] = value
+    app["iconURL"] = ICON_URL
 
     encoded_tag = urllib.parse.quote(current_tag, safe="")
     encoded_name = urllib.parse.quote(ipa["name"], safe="")
