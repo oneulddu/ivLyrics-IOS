@@ -1102,30 +1102,63 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
 
         var renderIdentity: String {
             let line = activeLine
-            return [
-                track?.stableKey ?? "",
-                String(line?.index ?? -1),
-                title,
-                artist,
-                statusText,
-                String(showArtwork),
-                orientation,
-                backgroundMode,
-                alignment,
-                String(lyricsSizePercent),
-                String(translationSizePercent),
-                solidColor,
-                String(syncedLyricsKaraokeAnimationEnabled),
-                String(karaokeBounceEffectEnabled),
-                String(karaokeDataAsLineSynced),
-                String(useSyncCreatorSpeakerColors),
-                line?.line.furiganaText ?? "",
-                line?.line.pronunciationText ?? "",
-                line?.line.translationText ?? "",
-                line?.line.vocalParts.map { [$0.furiganaText, $0.pronunciationText, $0.translationText].joined(separator: "\u{1f}") }.joined(separator: "\u{1e}") ?? "",
-                String(typography.hashValue),
-                String(speakerColors.hashValue)
-            ].joined(separator: "|")
+            var identity = track?.stableKey ?? ""
+            identity.reserveCapacity(256)
+            identity.append("|")
+            identity.append(String(line?.index ?? -1))
+            identity.append("|")
+            identity.append(title)
+            identity.append("|")
+            identity.append(artist)
+            identity.append("|")
+            identity.append(statusText)
+            identity.append("|")
+            identity.append(String(showArtwork))
+            identity.append("|")
+            identity.append(orientation)
+            identity.append("|")
+            identity.append(backgroundMode)
+            identity.append("|")
+            identity.append(alignment)
+            identity.append("|")
+            identity.append(String(lyricsSizePercent))
+            identity.append("|")
+            identity.append(String(translationSizePercent))
+            identity.append("|")
+            identity.append(solidColor)
+            identity.append("|")
+            identity.append(String(syncedLyricsKaraokeAnimationEnabled))
+            identity.append("|")
+            identity.append(String(karaokeBounceEffectEnabled))
+            identity.append("|")
+            identity.append(String(karaokeDataAsLineSynced))
+            identity.append("|")
+            identity.append(String(useSyncCreatorSpeakerColors))
+            identity.append("|")
+            identity.append(line?.line.furiganaText ?? "")
+            identity.append("|")
+            identity.append(line?.line.pronunciationText ?? "")
+            identity.append("|")
+            identity.append(line?.line.translationText ?? "")
+            identity.append("|")
+            if let vocalParts = line?.line.vocalParts {
+                for index in vocalParts.indices {
+                    if index > vocalParts.startIndex {
+                        identity.append("\u{1e}")
+                    }
+                    let part = vocalParts[index]
+                    identity.append(part.furiganaText)
+                    identity.append("\u{1f}")
+                    identity.append(part.pronunciationText)
+                    identity.append("\u{1f}")
+                    identity.append(part.translationText)
+                }
+            }
+            identity.append("|")
+            identity.append(String(typography.hashValue))
+            identity.append("|")
+            identity.append(String(speakerColors.hashValue))
+            return identity
         }
     }
 
