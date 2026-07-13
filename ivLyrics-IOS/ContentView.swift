@@ -6,6 +6,127 @@ import WebKit
 import UIKit
 #endif
 
+private struct AndroidSlidingMetadataText: View {
+    private static let edgeHoldSeconds = 1.05
+    private static let minimumMoveSeconds = 1.8
+    private static let maximumMoveSeconds = 5.6
+    private static let pointsPerSecond: CGFloat = 46
+
+    let text: String
+    let typography: AppSettings.TypographySettings
+    let slotId: String
+    let baseSize: CGFloat
+    let color: Color
+
+    @State private var animationStart = Date()
+
+    var body: some View {
+        let font = measuredFont
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        let lineHeight = ceil(font.lineHeight)
+
+        GeometryReader { proxy in
+            let availableWidth = max(0, proxy.size.width)
+            let overflowing = textWidth > availableWidth + 0.5
+
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !overflowing)) { timeline in
+                Text(text)
+                    .font(typography.font(slotId: slotId, baseSize: baseSize))
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .offset(x: horizontalOffset(
+                        at: timeline.date,
+                        textWidth: textWidth,
+                        availableWidth: availableWidth
+                    ))
+                    .frame(width: availableWidth, alignment: .leading)
+            }
+            .frame(width: availableWidth, height: lineHeight, alignment: .leading)
+            .clipped()
+        }
+        .frame(height: lineHeight)
+        .accessibilityLabel(Text(text))
+        .onChange(of: animationKey) { _, _ in
+            animationStart = Date()
+        }
+    }
+
+    private var style: AppSettings.TypographyStyle {
+        typography.style(slotId)
+    }
+
+    private var pointSize: CGFloat {
+        typography.scaledSize(slotId: slotId, baseSize: baseSize)
+    }
+
+    private var measuredFont: UIFont {
+        if let font = UIFont(name: fontName, size: pointSize) {
+            return font
+        }
+        return UIFont.systemFont(ofSize: pointSize, weight: fallbackWeight)
+    }
+
+    private var fontName: String {
+        switch style.weight {
+        case AppSettings.typoWeightBold:
+            return "Pretendard-Bold"
+        case AppSettings.typoWeightSemibold:
+            return "Pretendard-SemiBold"
+        default:
+            return "Pretendard-Regular"
+        }
+    }
+
+    private var fallbackWeight: UIFont.Weight {
+        switch style.weight {
+        case AppSettings.typoWeightBold:
+            return .bold
+        case AppSettings.typoWeightSemibold:
+            return .semibold
+        default:
+            return .regular
+        }
+    }
+
+    private var animationKey: String {
+        "\(text)|\(pointSize)|\(style.weight)"
+    }
+
+    private func horizontalOffset(at date: Date, textWidth: CGFloat, availableWidth: CGFloat) -> CGFloat {
+        let travel = max(0, textWidth - availableWidth)
+        guard travel > 0 else { return 0 }
+
+        let moveSeconds = min(
+            Self.maximumMoveSeconds,
+            max(Self.minimumMoveSeconds, Double(travel / Self.pointsPerSecond))
+        )
+        let cycleSeconds = (Self.edgeHoldSeconds + moveSeconds) * 2
+        var elapsed = date.timeIntervalSince(animationStart).truncatingRemainder(dividingBy: cycleSeconds)
+        if elapsed < 0 {
+            elapsed += cycleSeconds
+        }
+        if elapsed < Self.edgeHoldSeconds {
+            return 0
+        }
+        elapsed -= Self.edgeHoldSeconds
+        if elapsed < moveSeconds {
+            return -travel * smoothStep(elapsed / moveSeconds)
+        }
+        elapsed -= moveSeconds
+        if elapsed < Self.edgeHoldSeconds {
+            return -travel
+        }
+        elapsed -= Self.edgeHoldSeconds
+        return -travel * (1 - smoothStep(elapsed / moveSeconds))
+    }
+
+    private func smoothStep(_ value: Double) -> CGFloat {
+        let progress = max(0, min(1, value))
+        return CGFloat(progress * progress * (3 - 2 * progress))
+    }
+}
+
 @main
 struct IvLyricsIOSApp: App {
     @StateObject private var settings = AppSettings.shared
@@ -313,15 +434,22 @@ struct ContentView: View {
                     .frame(height: artworkMetadataSpacing)
 
                 VStack(alignment: .leading, spacing: 7) {
-                    Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
-                        .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 28))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
-                    Text(model.artistText.trimmed.isEmpty ? settings.t("status.waiting_spotify") : model.artistText)
-                        .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: 18))
-                        .foregroundStyle(.white.opacity(190.0 / 255.0))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
+                    AndroidSlidingMetadataText(
+                        text: model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText,
+                        typography: typography,
+                        slotId: AppSettings.typoMainTitle,
+                        baseSize: 28,
+                        color: .white
+                    )
+                    AndroidSlidingMetadataText(
+                        text: model.artistText.trimmed.isEmpty
+                            ? settings.t("status.waiting_spotify")
+                            : model.artistText,
+                        typography: typography,
+                        slotId: AppSettings.typoMainArtist,
+                        baseSize: 18,
+                        color: .white.opacity(190.0 / 255.0)
+                    )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -1395,13 +1523,13 @@ private struct LyricsPageOverlay: View {
                     Text(model.titleText.trimmed.isEmpty ? "ivLyrics" : model.titleText)
                         .font(typography.font(slotId: AppSettings.typoLyricsHeaderTitle, baseSize: 19))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.78)
+                        .truncationMode(.tail)
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(model.artistText.trimmed.isEmpty ? " " : model.artistText)
                             .font(typography.font(slotId: AppSettings.typoLyricsHeaderArtist, baseSize: 14))
                             .foregroundStyle(.white.opacity(0.74))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.78)
+                            .truncationMode(.tail)
                             .layoutPriority(1)
                         Spacer(minLength: 8)
                         if model.status == .loading {
@@ -1939,12 +2067,12 @@ private struct LandscapePlayerPane: View {
                     Text(model.titleText.trimmed.isEmpty ? settings.t("label.no_current_track") : model.titleText)
                         .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 23))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.76)
+                        .truncationMode(.tail)
                     Text(model.artistText.trimmed.isEmpty ? " " : model.artistText)
                         .font(typography.font(slotId: AppSettings.typoMainArtist, baseSize: 15))
                         .foregroundStyle(.white.opacity(0.82))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.78)
+                        .truncationMode(.tail)
                 }
                 .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
             }
