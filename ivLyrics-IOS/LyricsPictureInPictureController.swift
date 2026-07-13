@@ -1296,7 +1296,8 @@ struct PictureInPictureKaraokeContent: View {
                 )
             } else {
                 VStack(alignment: horizontalAlignment, spacing: 0) {
-                    ForEach(Array(visibleParts.enumerated()), id: \.offset) { index, part in
+                    ForEach(visibleParts.indices, id: \.self) { index in
+                        let part = visibleParts[index]
                         let partActive = positionMs >= part.startTimeMs
                         karaokeText(
                             text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
@@ -1322,8 +1323,9 @@ struct PictureInPictureKaraokeContent: View {
     }
 
     private var displayParts: [LyricsLine.VocalPart] {
-        LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
-            .filter { !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty }
+        LyricsTimelineDisplayBuilder.displayableVocalParts(
+            LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
+        )
     }
 
     private var horizontalAlignment: HorizontalAlignment {

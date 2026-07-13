@@ -4195,15 +4195,25 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     static func orderedVocalParts(_ parts: [LyricsLine.VocalPart]) -> [LyricsLine.VocalPart] {
-        var result: [LyricsLine.VocalPart] = []
-        result.reserveCapacity(parts.count)
-        for part in parts where part.role == "lead" {
-            result.append(part)
+        var sawNonLead = false
+        for part in parts {
+            if part.role == "lead" {
+                if !sawNonLead { continue }
+
+                var result: [LyricsLine.VocalPart] = []
+                result.reserveCapacity(parts.count)
+                for part in parts where part.role == "lead" {
+                    result.append(part)
+                }
+                for part in parts where part.role != "lead" {
+                    result.append(part)
+                }
+                return result
+            }
+            sawNonLead = true
         }
-        for part in parts where part.role != "lead" {
-            result.append(part)
-        }
-        return result
+
+        return parts
     }
 
     static func vocalPartDisplayText(_ part: LyricsLine.VocalPart) -> String {
@@ -4220,6 +4230,13 @@ enum LyricsTimelineDisplayBuilder {
     static func hasDisplayableVocalPartText(_ part: LyricsLine.VocalPart) -> Bool {
         if !part.text.trimmed.isEmpty { return true }
         return part.syllables.contains { !$0.text.trimmed.isEmpty }
+    }
+
+    static func displayableVocalParts(_ parts: [LyricsLine.VocalPart]) -> [LyricsLine.VocalPart] {
+        for part in parts where vocalPartDisplayText(part).trimmed.isEmpty {
+            return parts.filter { !vocalPartDisplayText($0).trimmed.isEmpty }
+        }
+        return parts
     }
 
     static func shouldUseVocalPartSupplements(_ line: LyricsLine) -> Bool {
@@ -4785,9 +4802,7 @@ struct LyricsLineView: View, Equatable {
 
     var body: some View {
         let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
-        let displayVocalParts = orderedVocalParts.filter {
-            !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
-        }
+        let displayVocalParts = LyricsTimelineDisplayBuilder.displayableVocalParts(orderedVocalParts)
         let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(
             orderedParts: orderedVocalParts
         )
@@ -5057,15 +5072,18 @@ struct SyllableKaraokeText: View {
     var singleLine: Bool = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !requiresContinuousEffect)) { timeline in
-            karaokeBody(nowMs: timeline.date.timeIntervalSinceReferenceDate * 1_000)
+        let displayKind = normalizedKind
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !requiresContinuousEffect(displayKind))) { timeline in
+            karaokeBody(
+                nowMs: timeline.date.timeIntervalSinceReferenceDate * 1_000,
+                displayKind: displayKind
+            )
         }
     }
 
     @ViewBuilder
-    private func karaokeBody(nowMs: Double) -> some View {
+    private func karaokeBody(nowMs: Double, displayKind: String) -> some View {
         let segments = karaokeSegments
-        let displayKind = normalizedKind
         Group {
             if segments.isEmpty {
                 Text(text.isEmpty ? " " : text)
@@ -5189,7 +5207,12 @@ struct SyllableKaraokeText: View {
     }
 
     private var effectiveSyllables: [LyricsLine.Syllable] {
-        let timed = syllables.filter { !$0.text.isEmpty }
+        let timed: [LyricsLine.Syllable]
+        if syllables.contains(where: { $0.text.isEmpty }) {
+            timed = syllables.filter { !$0.text.isEmpty }
+        } else {
+            timed = syllables
+        }
         if !timed.isEmpty {
             return KaraokeSyllableTimingNormalizer.expandTimedChunks(timed)
         }
@@ -5217,11 +5240,11 @@ struct SyllableKaraokeText: View {
         return value.isEmpty ? "vocal" : value
     }
 
-    private var requiresContinuousEffect: Bool {
+    private func requiresContinuousEffect(_ displayKind: String) -> Bool {
         active && [
             "effect", "adlib", "pulse", "bounce", "sway", "float", "pop", "glitch",
             "wave", "sparkle", "echo", "whisper", "glow", "blur", "flicker"
-        ].contains(normalizedKind)
+        ].contains(displayKind)
     }
 
     private func fillFraction(for syllable: LyricsLine.Syllable) -> CGFloat {
