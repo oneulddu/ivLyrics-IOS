@@ -1357,6 +1357,9 @@ private struct LyricsPageOverlay: View {
                     centerAnchorY: 0.42
                 )
             }
+            LyricsProviderAttribution()
+                .padding(.horizontal, 24)
+                .padding(.bottom, safeAreaBottom + 12)
         }
         .clipShape(RoundedRectangle(cornerRadius: dragOffset > 1 ? 28 : 0, style: .continuous))
         .offset(y: dragOffset)
@@ -2224,6 +2227,11 @@ private struct LandscapeLyricsPane: View {
             centerEmptyContent: true
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
+            LyricsProviderAttribution()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+        }
     }
 }
 
@@ -3631,6 +3639,47 @@ struct LyricsTimelineView: View {
                 animatedCenterIndex = next
             }
         }
+    }
+}
+
+private struct LyricsProviderAttribution: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+
+    @ViewBuilder
+    var body: some View {
+        if !providerName.isEmpty {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(settings.t("section.lyrics_providers"))
+                    .font(.pretendard(9, weight: .bold))
+                    .tracking(1.1)
+                    .textCase(.uppercase)
+                    .foregroundStyle(.white.opacity(0.25))
+                Text(providerName)
+                    .font(.pretendard(11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.40))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 26)
+            .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var providerName: String {
+        guard model.status == .loaded,
+              !model.baseLyricsResult.lines.isEmpty else {
+            return ""
+        }
+        let providerId = model.baseLyricsResult.providerId.trimmed.lowercased()
+        if !providerId.isEmpty {
+            return AppSettings.lyricsProviderById(providerId)?.name ?? providerId
+        }
+        return model.baseLyricsResult.providerLabel.trimmed
     }
 }
 
