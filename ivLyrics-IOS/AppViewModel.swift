@@ -1793,8 +1793,9 @@ final class AppViewModel: ObservableObject {
             uptime: ProcessInfo.processInfo.systemUptime
         )
         let incoming = playback.track
+        let incomingKey = incoming.stableKey
         let previousKey = currentTrack?.stableKey ?? ""
-        let changedTrack = previousKey != incoming.stableKey
+        let changedTrack = previousKey != incomingKey
         inputTitle = incoming.title
         inputArtist = incoming.artist
         inputAlbum = incoming.album
@@ -1803,11 +1804,11 @@ final class AppViewModel: ObservableObject {
         inputDuration = formatDurationInput(incoming.durationMs)
         currentTrack = incoming
         nowPositionMs = playback.progressMs
-        let nextTrackOffsetMs = settings.trackSyncOffsetMs(incoming.stableKey)
+        let nextTrackOffsetMs = settings.trackSyncOffsetMs(incomingKey)
         if trackOffsetMs != nextTrackOffsetMs {
             trackOffsetMs = nextTrackOffsetMs
         }
-        let nextVideoOffsetMs = settings.trackVideoSyncOffsetMs(incoming.stableKey)
+        let nextVideoOffsetMs = settings.trackVideoSyncOffsetMs(incomingKey)
         if videoOffsetMs != nextVideoOffsetMs {
             videoOffsetMs = nextVideoOffsetMs
         }
