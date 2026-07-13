@@ -3684,6 +3684,8 @@ private struct LyricsProviderAttribution: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
 
+    private static let visibleProviderIds: Set<String> = ["lrclib", "lyricsplus", "unison"]
+
     @ViewBuilder
     var body: some View {
         if !providerName.isEmpty {
@@ -3692,10 +3694,10 @@ private struct LyricsProviderAttribution: View {
                     .font(.pretendard(9, weight: .bold))
                     .tracking(1.1)
                     .textCase(.uppercase)
-                    .foregroundStyle(.white.opacity(0.25))
+                    .foregroundStyle(.white.opacity(0.12))
                 Text(providerName)
                     .font(.pretendard(11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.40))
+                    .foregroundStyle(.white.opacity(0.20))
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
             }
@@ -3714,10 +3716,15 @@ private struct LyricsProviderAttribution: View {
             return ""
         }
         let providerId = model.baseLyricsResult.providerId.trimmed.lowercased()
-        if !providerId.isEmpty {
-            return AppSettings.lyricsProviderById(providerId)?.name ?? providerId
+        if Self.visibleProviderIds.contains(providerId) {
+            return providerId
         }
-        return model.baseLyricsResult.providerLabel.trimmed
+
+        let providerTokens = model.baseLyricsResult.providerLabel
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        let legacyProviderIds = Set(providerTokens.filter(Self.visibleProviderIds.contains))
+        return legacyProviderIds.count == 1 ? legacyProviderIds.first ?? "" : ""
     }
 }
 
