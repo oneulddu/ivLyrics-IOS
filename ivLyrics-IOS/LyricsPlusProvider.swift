@@ -27,6 +27,25 @@ enum LyricsPlusProvider {
         assert(safeBoundary(syllable("한국", 0, 100), syllable("어", 100, 200)) == nil)
         assert(safeBoundary(syllable("한국어 ", 0, 100), syllable("가사", 100, 200)) != nil)
         assert(safeBoundary(syllable("ドラ", 0, 100), syllable("マ", 100, 200)) != nil)
+
+        let parenthesized = LyricsLine.VocalPart(
+            id: "background-parentheses-regression",
+            role: "lead",
+            speaker: "vocal2",
+            kind: "vocal",
+            text: "（(Back) vocal）",
+            syllables: [
+                syllable("（", 0, 10),
+                syllable("(Back)", 10, 100),
+                syllable(" vocal）", 100, 200)
+            ]
+        )
+        let background = withVocalRole(parenthesized, role: "background")
+        assert(background.text == "Back vocal")
+        assert(background.syllables.map(\.text) == ["Back", " vocal"])
+        let lead = withVocalRole(parenthesized, role: "lead")
+        assert(lead.text == parenthesized.text)
+        assert(lead.syllables == parenthesized.syllables)
     }()
 #endif
     private static let speakerPalette: [(String, String)] = [
@@ -242,15 +261,9 @@ enum LyricsPlusProvider {
             let rawSyllables = item["syllabus"] as? [[String: Any]] ?? []
             let parsedSyllables = rawSyllables.compactMap(parseSyllable)
             let leadSyllables = parsedSyllables.filter { !$0.isBackground }.map(\.value)
-            let backgroundSyllables = parsedSyllables.filter(\.isBackground).compactMap { raw -> LyricsLine.Syllable? in
-                let stripped = raw.value.text.replacingOccurrences(of: "[()（）]", with: "", options: .regularExpression)
-                guard !stripped.isEmpty else { return nil }
-                return LyricsLine.Syllable(
-                    text: stripped,
-                    startTimeMs: raw.value.startTimeMs,
-                    endTimeMs: raw.value.endTimeMs
-                )
-            }
+            let backgroundSyllables = stripBackgroundSyllableParentheses(
+                parsedSyllables.filter(\.isBackground).map(\.value)
+            )
             let leadText = leadSyllables.map(\.text).joined().trimmed
             let backgroundText = backgroundSyllables.map(\.text).joined().trimmed
             let sourceText = string(item["text"]).trimmed
@@ -672,19 +685,38 @@ enum LyricsPlusProvider {
         role: String,
         idSuffix: String = ""
     ) -> LyricsLine.VocalPart {
-        LyricsLine.VocalPart(
+        let isBackground = role == "background"
+        return LyricsLine.VocalPart(
             id: idSuffix.isEmpty ? part.id : "\(part.id)-\(idSuffix)",
             role: role,
             speaker: part.speaker,
             speakerColor: part.speakerColor,
             speakerFallback: part.speakerFallback,
             kind: part.kind,
-            text: part.text,
-            syllables: part.syllables,
+            text: isBackground ? stripBackgroundParentheses(part.text).trimmed : part.text,
+            syllables: isBackground ? stripBackgroundSyllableParentheses(part.syllables) : part.syllables,
             pronunciationText: part.pronunciationText,
             translationText: part.translationText,
             furiganaText: part.furiganaText
         )
+    }
+
+    private static func stripBackgroundSyllableParentheses(
+        _ syllables: [LyricsLine.Syllable]
+    ) -> [LyricsLine.Syllable] {
+        syllables.compactMap { syllable in
+            let text = stripBackgroundParentheses(syllable.text)
+            guard !text.isEmpty else { return nil }
+            return LyricsLine.Syllable(
+                text: text,
+                startTimeMs: syllable.startTimeMs,
+                endTimeMs: syllable.endTimeMs
+            )
+        }
+    }
+
+    private static func stripBackgroundParentheses(_ text: String) -> String {
+        text.replacingOccurrences(of: "[()（）]", with: "", options: .regularExpression)
     }
 
     private static func sourceSyllables(_ raw: RawLine) -> [LyricsLine.Syllable] {
@@ -859,7 +891,7 @@ enum LyricsPlusProvider {
         }
         guard !syllables.isEmpty else { return nil }
         let keys = lines.map(\.key).joined(separator: "+")
-        return LyricsLine.VocalPart(
+        let part = LyricsLine.VocalPart(
             id: "lyricsplus-\(keys)-\(idSuffix)-\(role)",
             role: role,
             speaker: first.line.speaker,
@@ -869,6 +901,7 @@ enum LyricsPlusProvider {
             text: lines.map(\.line.text).joined(separator: " / "),
             syllables: syllables
         )
+        return withVocalRole(part, role: role)
     }
 
     private static func splitLongSoloLines(_ lines: [LyricsLine]) -> [LyricsLine] {
