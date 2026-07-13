@@ -10,12 +10,14 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
         public let providerPolicyVersion: Int
         public let enabledProviderSetCanonical: String
         public let preferredProviderOrderCanonical: String
+        public let allowedProviderTypesCanonical: String
         public let credentialGeneration: UInt64
 
         public init(schemaVersion: Int, effectiveMode: LyricsProviderMode,
                     normalizedTrackIdentity: String, providerPolicyVersion: Int,
                     enabledProviderSetCanonical: String,
                     preferredProviderOrderCanonical: String,
+                    allowedProviderTypesCanonical: String = "",
                     credentialGeneration: UInt64) {
             self.schemaVersion = schemaVersion
             self.effectiveMode = effectiveMode
@@ -23,6 +25,7 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
             self.providerPolicyVersion = providerPolicyVersion
             self.enabledProviderSetCanonical = enabledProviderSetCanonical
             self.preferredProviderOrderCanonical = preferredProviderOrderCanonical
+            self.allowedProviderTypesCanonical = allowedProviderTypesCanonical
             self.credentialGeneration = credentialGeneration
         }
     }
@@ -33,20 +36,22 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
         [String(components.schemaVersion), components.effectiveMode.rawValue,
          components.normalizedTrackIdentity, String(components.providerPolicyVersion),
          components.enabledProviderSetCanonical, components.preferredProviderOrderCanonical,
+         components.allowedProviderTypesCanonical,
          String(components.credentialGeneration)].map(Self.escape).joined(separator: String(Self.separator))
     }
 
     public init(components: Components) { self.components = components }
 
     public init?(encoded: String) {
-        guard let values = Self.splitEscaped(encoded), values.count == 7,
+        guard let values = Self.splitEscaped(encoded), values.count == 8,
               let schema = Int(values[0]),
               let mode = LyricsProviderMode(rawValue: values[1]),
-              let policy = Int(values[3]), let generation = UInt64(values[6]) else { return nil }
+              let policy = Int(values[3]), let generation = UInt64(values[7]) else { return nil }
         components = Components(schemaVersion: schema, effectiveMode: mode,
                                 normalizedTrackIdentity: values[2], providerPolicyVersion: policy,
                                 enabledProviderSetCanonical: values[4],
                                 preferredProviderOrderCanonical: values[5],
+                                allowedProviderTypesCanonical: values[6],
                                 credentialGeneration: generation)
     }
 
@@ -65,6 +70,16 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
                                                        enabled: Set<LyricsProviderID>) -> String {
         LyricsProviderPolicyEvaluator.canonicalProviderOrder(order, enabled: enabled)
             .map(\.rawValue).joined(separator: ",")
+    }
+
+    public static func allowedProviderTypesCanonical(
+        _ types: [LyricsProviderID: ProviderAllowedLyricsTypes]
+    ) -> String {
+        LyricsProviderID.defaultOrder.map { provider in
+            let allowed = types[provider] ?? .allowAll
+            let bits = "\(allowed.karaoke ? 1 : 0)\(allowed.synced ? 1 : 0)\(allowed.plain ? 1 : 0)"
+            return "\(provider.rawValue):\(bits)"
+        }.joined(separator: ",")
     }
 
     private static func escape(_ value: String) -> String {

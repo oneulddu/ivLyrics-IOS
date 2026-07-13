@@ -200,6 +200,9 @@ final class AppSettings: ObservableObject {
             recordLyricsProviderPolicyChange()
         }
     }
+    @Published private(set) var lyricsMultiProviderTypes: [String: [String: Bool]] {
+        didSet { saveMultiLyricsProviderTypesIfNeeded() }
+    }
     @Published private(set) var deezerConfigured: Bool
     @Published private(set) var lyricsProviderCredentialGeneration: UInt64
     @Published private(set) var lyricsProviderRemoteGlobalDisable = false
@@ -282,6 +285,7 @@ final class AppSettings: ObservableObject {
         )
         lyricsProviderOrder = normalizedLyricsProviderOrder
         defaults.set(normalizedLyricsProviderOrder, forKey: "lyrics_provider_order")
+        lyricsMultiProviderTypes = Self.loadMultiLyricsProviderTypes(defaults: defaults)
         deezerConfigured = defaults.bool(forKey: "lyrics_provider_deezer_configured")
         lyricsProviderCredentialGeneration = (defaults.object(forKey: "lyrics_provider_credential_generation") as? NSNumber)?.uint64Value ?? 0
         lyricsProviderPolicyGeneration = (defaults.object(forKey: "lyrics_provider_policy_generation") as? NSNumber)?.uint64Value ?? 0
@@ -395,6 +399,15 @@ final class AppSettings: ObservableObject {
         ) ? .multiProvider : .legacy
         let enabled = Set(lyricsProviderEnabled.compactMap(LyricsProviderID.init(rawValue:))).union([.lrclib])
         let order = lyricsProviderOrder.compactMap(LyricsProviderID.init(rawValue:))
+        let allowedTypes = Dictionary(uniqueKeysWithValues: lyricsMultiProviderTypes.compactMap {
+            key, values -> (LyricsProviderID, ProviderAllowedLyricsTypes)? in
+            guard let provider = LyricsProviderID(rawValue: key) else { return nil }
+            return (provider, ProviderAllowedLyricsTypes(
+                karaoke: values[Self.standardLyricsTypeKaraoke] ?? true,
+                synced: values[Self.standardLyricsTypeSynced] ?? true,
+                plain: values[Self.standardLyricsTypePlain] ?? true
+            ))
+        })
         return LyricsProviderSettingsSnapshot(
             mode: requestedMode,
             enabledProviders: enabled,
@@ -403,7 +416,8 @@ final class AppSettings: ObservableObject {
             remoteDisabledProviders: Set(lyricsProviderRemoteDisabled.compactMap(LyricsProviderID.init(rawValue:))),
             globalRemoteDisable: lyricsProviderRemoteGlobalDisable,
             policyVersion: lyricsProviderPolicyVersion,
-            credentialGeneration: lyricsProviderCredentialGeneration
+            credentialGeneration: lyricsProviderCredentialGeneration,
+            allowedTypesByProvider: allowedTypes
         )
     }
 
@@ -555,6 +569,16 @@ final class AppSettings: ObservableObject {
         let target = index + offset
         guard standardLyricsProviderOrder.indices.contains(target) else { return }
         standardLyricsProviderOrder.swapAt(index, target)
+    }
+
+    func setMultiLyricsProviderTypeEnabled(_ providerId: String, type: String, enabled: Bool) {
+        guard LyricsProviderAppContracts.providerOrderRawValues.contains(providerId),
+              [Self.standardLyricsTypeKaraoke, Self.standardLyricsTypeSynced, Self.standardLyricsTypePlain].contains(type) else {
+            return
+        }
+        var values = lyricsMultiProviderTypes[providerId] ?? Self.defaultMultiLyricsProviderTypes()
+        values[type] = enabled
+        lyricsMultiProviderTypes[providerId] = values
     }
 
     func languageRule(for sourceLang: String) -> LanguageRule {
@@ -890,6 +914,17 @@ final class AppSettings: ObservableObject {
         cachedSnapshot = nil
     }
 
+    private func saveMultiLyricsProviderTypesIfNeeded() {
+        guard !isBootstrapping else { return }
+        let types = Self.normalizedMultiLyricsProviderTypes(lyricsMultiProviderTypes)
+        if let data = try? JSONSerialization.data(withJSONObject: types),
+           let raw = String(data: data, encoding: .utf8) {
+            defaults.set(raw, forKey: "lyrics_multi_provider_types_v1")
+        }
+        cachedSnapshot = nil
+        recordLyricsProviderPolicyChange()
+    }
+
     private func bumpBackgroundRevisionIfNeeded() {
         guard !isBootstrapping else { return }
         backgroundSettingsRevision += 1
@@ -966,6 +1001,33 @@ final class AppSettings: ObservableObject {
             return normalizedStandardLyricsProviderTypes([:])
         }
         return normalizedStandardLyricsProviderTypes(values)
+    }
+
+    private static func loadMultiLyricsProviderTypes(defaults: UserDefaults) -> [String: [String: Bool]] {
+        guard let raw = defaults.string(forKey: "lyrics_multi_provider_types_v1"),
+              let data = raw.data(using: .utf8),
+              let values = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Bool]] else {
+            return normalizedMultiLyricsProviderTypes([:])
+        }
+        return normalizedMultiLyricsProviderTypes(values)
+    }
+
+    static func normalizedMultiLyricsProviderTypes(_ values: [String: [String: Bool]]) -> [String: [String: Bool]] {
+        Dictionary(uniqueKeysWithValues: LyricsProviderAppContracts.providerOrderRawValues.map { providerId in
+            let stored = values[providerId] ?? [:]
+            return (
+                providerId,
+                [
+                    standardLyricsTypeKaraoke: stored[standardLyricsTypeKaraoke] ?? true,
+                    standardLyricsTypeSynced: stored[standardLyricsTypeSynced] ?? true,
+                    standardLyricsTypePlain: stored[standardLyricsTypePlain] ?? true
+                ]
+            )
+        })
+    }
+
+    private static func defaultMultiLyricsProviderTypes() -> [String: Bool] {
+        [standardLyricsTypeKaraoke: true, standardLyricsTypeSynced: true, standardLyricsTypePlain: true]
     }
 
     static func normalizedStandardLyricsProviderOrder(_ values: [String]) -> [String] {

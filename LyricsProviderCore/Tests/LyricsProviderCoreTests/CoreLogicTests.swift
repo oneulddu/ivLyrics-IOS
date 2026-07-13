@@ -31,6 +31,23 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertFalse(value.orderedProviders.contains(.deezer))
     }
 
+    func testPolicyExcludesProvidersWithoutAllowedBaseTypes() {
+        let snapshot = LyricsProviderSettingsSnapshot(
+            mode: .multiProvider,
+            enabledProviders: [.bugs, .unison, .lrclib],
+            providerOrder: [.bugs, .unison, .lrclib],
+            deezerConfigured: false,
+            allowedTypesByProvider: [
+                .bugs: .init(karaoke: true, synced: false, plain: false),
+                .unison: .init(karaoke: true, synced: false, plain: false),
+                .lrclib: .init(karaoke: false, synced: false, plain: false)
+            ]
+        )
+        let value = LyricsProviderPolicyEvaluator.evaluate(snapshot, multiProviderAuthorized: true)
+        XCTAssertEqual(value.orderedProviders, [.unison])
+        XCTAssertTrue(value.allowedTypes(for: .genie).synced)
+    }
+
     func testRemotePolicySignatureAndExpiry() throws {
         let key = Curve25519.Signing.PrivateKey()
         let policy = LyricsProviderRemotePolicy(schemaVersion: 1, globalDisable: false,
@@ -98,6 +115,33 @@ final class CoreLogicTests: XCTestCase {
         let key = LyricsCacheKey(components: components)
         XCTAssertEqual(LyricsCacheKey(encoded: key.encoded)?.components, components)
         XCTAssertEqual(LyricsCacheKey.preferredProviderOrderCanonical([.genie, .genie], enabled: [.genie, .bugs]), "genie,bugs")
+    }
+
+    func testCacheKeyAllowedTypesCanonicalSeparatesPolicies() {
+        let allOn = LyricsCacheKey.allowedProviderTypesCanonical([:])
+        let restricted = LyricsCacheKey.allowedProviderTypesCanonical([
+            .musixmatch: .init(karaoke: true, synced: false, plain: true)
+        ])
+        XCTAssertNotEqual(allOn, restricted)
+        XCTAssertTrue(allOn.hasPrefix("musixmatch:111,"))
+        XCTAssertTrue(restricted.hasPrefix("musixmatch:101,"))
+        let components = LyricsCacheKey.Components(schemaVersion: 3, effectiveMode: .multiProvider,
+            normalizedTrackIdentity: "t", providerPolicyVersion: 1,
+            enabledProviderSetCanonical: "lrclib",
+            preferredProviderOrderCanonical: "lrclib",
+            allowedProviderTypesCanonical: restricted,
+            credentialGeneration: 0)
+        let key = LyricsCacheKey(components: components)
+        XCTAssertEqual(LyricsCacheKey(encoded: key.encoded)?.components, components)
+        XCTAssertNotEqual(
+            key.encoded,
+            LyricsCacheKey(components: .init(schemaVersion: 3, effectiveMode: .multiProvider,
+                normalizedTrackIdentity: "t", providerPolicyVersion: 1,
+                enabledProviderSetCanonical: "lrclib",
+                preferredProviderOrderCanonical: "lrclib",
+                allowedProviderTypesCanonical: allOn,
+                credentialGeneration: 0)).encoded
+        )
     }
 
     func testCacheEnvelopeCodableRoundTrip() throws {

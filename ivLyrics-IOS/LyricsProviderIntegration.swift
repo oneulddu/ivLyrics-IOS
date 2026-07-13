@@ -94,7 +94,7 @@ actor LyricsProviderCredentialManager {
 }
 
 nonisolated final class ProviderLyricsDiskCache: @unchecked Sendable {
-    static let schemaVersion = 2
+    static let schemaVersion = 3
     static let parserVersion = 1
 
     private let directory: URL
@@ -104,7 +104,7 @@ nonisolated final class ProviderLyricsDiskCache: @unchecked Sendable {
     init() {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        directory = root.appendingPathComponent("lyrics_cache/provider_lyrics_v2", isDirectory: true)
+        directory = root.appendingPathComponent("lyrics_cache/provider_lyrics_v3", isDirectory: true)
     }
 
     func get(_ key: LyricsCacheKey) -> LyricsCacheEnvelope<LyricsResult>? {

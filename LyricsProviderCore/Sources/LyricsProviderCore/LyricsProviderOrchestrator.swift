@@ -76,8 +76,11 @@ public actor LyricsProviderOrchestrator {
             diagnostics.append(attempt.diagnostic)
             try Task.checkCancellation()
             if let lyrics = attempt.lyrics {
-                diagnostics.append(selectedDiagnostic(lyrics, elapsed: 0))
-                return .init(chosen: lyrics, diagnostics: diagnostics)
+                if let admittedLyrics = Self.admitted(lyrics, allowedTypes: policy.allowedTypes(for: .lrclib)) {
+                    diagnostics.append(selectedDiagnostic(admittedLyrics, elapsed: 0))
+                    return .init(chosen: admittedLyrics, diagnostics: diagnostics)
+                }
+                diagnostics.append(.init(provider: .lrclib, outcome: .policyDisabled, elapsedMs: 0))
             }
         }
 
@@ -88,18 +91,23 @@ public actor LyricsProviderOrchestrator {
             diagnostics.append(attempt.diagnostic)
             try Task.checkCancellation()
             if let lyrics = attempt.lyrics {
-                if lyrics.timing == .lineSynced {
-                    diagnostics.append(selectedDiagnostic(lyrics, elapsed: 0))
-                    return .init(chosen: lyrics, diagnostics: diagnostics)
+                if let admittedLyrics = Self.admitted(lyrics, allowedTypes: policy.allowedTypes(for: .musixmatch)) {
+                    if admittedLyrics.timing == .lineSynced {
+                        diagnostics.append(selectedDiagnostic(admittedLyrics, elapsed: 0))
+                        return .init(chosen: admittedLyrics, diagnostics: diagnostics)
+                    }
+                    heldPlain = admittedLyrics
+                } else {
+                    diagnostics.append(.init(provider: .musixmatch, outcome: .policyDisabled, elapsedMs: 0))
                 }
-                heldPlain = lyrics
             }
         }
 
         let fallbackIDs = policy.orderedProviders.filter {
             $0 != .musixmatch && policy.allows($0) && providers[$0] != nil
         }
-        let fallback = await collectFallback(ids: fallbackIDs, request: request, budgetStart: started)
+        let fallback = await collectFallback(ids: fallbackIDs, request: request,
+                                             policy: policy, budgetStart: started)
         diagnostics.append(contentsOf: fallback.diagnostics)
         var candidates = fallback.lyrics
         if let heldPlain { candidates.append(heldPlain) }
@@ -129,6 +137,45 @@ public actor LyricsProviderOrchestrator {
 
     private func stableSort(_ candidates: [ProviderLyrics], order: [LyricsProviderID]) -> [ProviderLyrics] {
         Self.ranked(candidates, providerOrder: order)
+    }
+
+    /// Applies the per-provider allowed lyric types to a fetched result before it can
+    /// short-circuit, be held, or enter ranking. Synced results demote to plain when
+    /// only plain is allowed; Unison rich timing survives on karaoke permission alone.
+    nonisolated static func admitted(_ lyrics: ProviderLyrics,
+                                     allowedTypes: ProviderAllowedLyricsTypes) -> ProviderLyrics? {
+        switch lyrics.timing {
+        case .lineSynced:
+            if allowedTypes.synced { return lyrics }
+            if lyrics.provider == .unison, allowedTypes.karaoke, hasRichTiming(lyrics) { return lyrics }
+            return allowedTypes.plain ? demotedToPlain(lyrics) : nil
+        case .plain:
+            return allowedTypes.plain ? lyrics : nil
+        }
+    }
+
+    nonisolated static func hasRichTiming(_ lyrics: ProviderLyrics) -> Bool {
+        lyrics.lines.contains { line in
+            line.syllables.contains { $0.endMs > $0.startMs }
+                || line.vocalParts.contains { part in
+                    part.syllables.contains { $0.endMs > $0.startMs }
+                }
+        }
+    }
+
+    nonisolated static func demotedToPlain(_ lyrics: ProviderLyrics) -> ProviderLyrics {
+        ProviderLyrics(
+            provider: lyrics.provider,
+            providerTrackID: lyrics.providerTrackID,
+            lines: lyrics.lines.map {
+                ProviderLyricLine(startMs: 0, endMs: nil, text: $0.text,
+                                  syllables: [], speaker: $0.speaker, vocalParts: [])
+            },
+            timing: .plain,
+            rawCopyright: lyrics.rawCopyright,
+            matchedCandidate: lyrics.matchedCandidate,
+            fetchedAt: lyrics.fetchedAt
+        )
     }
 
     private struct Attempt: Sendable {
@@ -176,6 +223,7 @@ public actor LyricsProviderOrchestrator {
     }
 
     private func collectFallback(ids: [LyricsProviderID], request: LyricsProviderRequest,
+                                 policy: EffectiveProviderPolicy,
                                  budgetStart: Date) async -> (lyrics: [ProviderLyrics], diagnostics: [ProviderOutcomeDiagnostic]) {
         var lyrics: [ProviderLyrics] = [], diagnostics: [ProviderOutcomeDiagnostic] = []
         await withTaskGroup(of: Attempt.self) { group in
@@ -197,7 +245,13 @@ public actor LyricsProviderOrchestrator {
             while let attempt = await group.next() {
                 pending.remove(attempt.diagnostic.provider)
                 diagnostics.append(attempt.diagnostic)
-                if let result = attempt.lyrics { lyrics.append(result) }
+                if let result = attempt.lyrics {
+                    if let admittedResult = Self.admitted(result, allowedTypes: policy.allowedTypes(for: result.provider)) {
+                        lyrics.append(admittedResult)
+                    } else {
+                        diagnostics.append(.init(provider: result.provider, outcome: .policyDisabled, elapsedMs: 0))
+                    }
+                }
                 if let bestSynced = lyrics.filter({ $0.timing == .lineSynced }).min(by: {
                     (ids.firstIndex(of: $0.provider) ?? .max) < (ids.firstIndex(of: $1.provider) ?? .max)
                 }), let bestIndex = ids.firstIndex(of: bestSynced.provider) {

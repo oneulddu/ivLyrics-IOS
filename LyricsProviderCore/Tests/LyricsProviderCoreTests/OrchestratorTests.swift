@@ -30,6 +30,57 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(result.chosen.provider, .bugs)
     }
 
+    func testSyncedDisallowedMusixmatchDemotesAndHoldsForSyncedFallback() async throws {
+        let musix = FakeProvider(id: .musixmatch) { _ in self.lyrics(.musixmatch, "m", .lineSynced) }
+        let bugs = FakeProvider(id: .bugs) { _ in self.lyrics(.bugs, "b", .lineSynced) }
+        let types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [
+            .musixmatch: .init(karaoke: true, synced: false, plain: true)
+        ]
+        let result = try await orchestrator([musix, bugs]).fetch(
+            request(), policy: policy([.musixmatch, .bugs], types: types))
+        XCTAssertEqual(result.chosen.provider, .bugs)
+        XCTAssertEqual(result.chosen.timing, .lineSynced)
+    }
+
+    func testDemotedMusixmatchPlainWinsWhenNoSyncedRemains() async throws {
+        let musix = FakeProvider(id: .musixmatch) { _ in self.lyrics(.musixmatch, "m", .lineSynced) }
+        let genie = FakeProvider(id: .genie) { _ in self.lyrics(.genie, "g", .plain) }
+        let types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [
+            .musixmatch: .init(karaoke: true, synced: false, plain: true)
+        ]
+        let result = try await orchestrator([musix, genie]).fetch(
+            request(), policy: policy([.musixmatch, .genie], types: types))
+        XCTAssertEqual(result.chosen.provider, .musixmatch)
+        XCTAssertEqual(result.chosen.timing, .plain)
+        XCTAssertTrue(result.chosen.lines.allSatisfy {
+            $0.startMs == 0 && $0.endMs == nil && $0.syllables.isEmpty && $0.vocalParts.isEmpty
+        })
+    }
+
+    func testUnisonKaraokeOnlyPreservesRichTiming() async throws {
+        let unison = FakeProvider(id: .unison) { _ in self.richLyrics(.unison, "u") }
+        let types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [
+            .unison: .init(karaoke: true, synced: false, plain: false)
+        ]
+        let result = try await orchestrator([unison]).fetch(
+            request(), policy: policy([.unison], types: types))
+        XCTAssertEqual(result.chosen.provider, .unison)
+        XCTAssertEqual(result.chosen.timing, .lineSynced)
+        XCTAssertFalse(result.chosen.lines.flatMap(\.syllables).isEmpty)
+    }
+
+    func testProviderResultRejectedWhenNoBaseTypeAllowed() async throws {
+        let bugs = FakeProvider(id: .bugs) { _ in self.lyrics(.bugs, "b", .lineSynced) }
+        let genie = FakeProvider(id: .genie) { _ in self.lyrics(.genie, "g", .plain) }
+        let types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [
+            .bugs: .init(karaoke: true, synced: false, plain: false)
+        ]
+        let result = try await orchestrator([bugs, genie]).fetch(
+            request(), policy: policy([.bugs, .genie], types: types))
+        XCTAssertEqual(result.chosen.provider, .genie)
+        XCTAssertTrue(result.diagnostics.contains { $0.provider == .bugs && $0.outcome == .policyDisabled })
+    }
+
     func testArrivalPermutationsSelectSameWinner() async throws {
         var winners: [LyricsProviderID] = []
         for delays in [[80, 10], [10, 80], [30, 30]] {
@@ -126,9 +177,10 @@ final class OrchestratorTests: XCTestCase {
         LyricsProviderOrchestrator(providers: providers,
             configuration: .init(defaultProviderTimeout: 1, totalBudget: 3, fallbackConcurrencyLimit: 2))
     }
-    private func policy(_ ids: [LyricsProviderID]) -> EffectiveProviderPolicy {
+    private func policy(_ ids: [LyricsProviderID],
+                        types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [:]) -> EffectiveProviderPolicy {
         .init(effectiveMode: .multiProvider, deniedProviders: [], orderedProviders: ids,
-              policyVersion: 1, credentialGeneration: 0)
+              policyVersion: 1, credentialGeneration: 0, allowedTypesByProvider: types)
     }
     private func request(contextID: Int64 = 0) -> LyricsProviderRequest {
         LyricsProviderRequest(trackKey: "t", title: "Signal", artist: "Alpha", durationMs: 180_000,
@@ -142,6 +194,16 @@ final class OrchestratorTests: XCTestCase {
             durationMs: 180_000, availableTiming: [timing], matchEvidence: evidence)
         return ProviderLyrics(provider: provider, providerTrackID: id,
             lines: [ProviderLyricLine(startMs: 0, text: "A")], timing: timing, matchedCandidate: candidate)
+    }
+    private func richLyrics(_ provider: LyricsProviderID, _ id: String) -> ProviderLyrics {
+        let evidence = MatchEvidence(titleScore: 1, artistScore: 1, durationScore: 1, durationDeltaMs: 0,
+            versionPenalty: 0, directIdentifier: .none, totalScore: 0.9, policyVersion: 1)
+        let candidate = LyricsCandidate(provider: provider, providerTrackID: id, title: "Signal", artist: "Alpha",
+            durationMs: 180_000, availableTiming: [.lineSynced], matchEvidence: evidence)
+        return ProviderLyrics(provider: provider, providerTrackID: id,
+            lines: [ProviderLyricLine(startMs: 0, endMs: 900, text: "A",
+                                      syllables: [ProviderLyricSyllable(text: "A", startMs: 0, endMs: 450)])],
+            timing: .lineSynced, matchedCandidate: candidate)
     }
 }
 

@@ -481,6 +481,7 @@ actor LyricsRepository {
                 cachedBase,
                 baseProvider: cachedBaseProvider,
                 syncData: syncData,
+                allowKaraoke: providerPolicy.allowedTypes(for: cachedBaseProvider).karaoke,
                 track: track,
                 isrc: isrc,
                 spotifyTrackId: spotifyTrackId,
@@ -525,6 +526,7 @@ actor LyricsRepository {
         _ cachedBase: LyricsResult,
         baseProvider: LyricsProviderID,
         syncData: SyncDataResult?,
+        allowKaraoke: Bool,
         track: TrackSnapshot,
         isrc: String,
         spotifyTrackId: String,
@@ -533,7 +535,7 @@ actor LyricsRepository {
     ) -> LyricsResult {
         let baseLines = cachedBase.lines
         log("lyrics base: lines=\(baseLines.count) / source=cache")
-        if let syncData {
+        if let syncData, allowKaraoke {
             let applied = SyncDataApplier.applyWithDiagnostics(baseLyrics: baseLines, syncBody: syncData.syncBody, track: track)
             for diagnostic in applied.diagnostics {
                 log("sync-data apply: \(diagnostic)")
@@ -555,7 +557,9 @@ actor LyricsRepository {
 
         let detail = isrc.isEmpty
             ? ui("repo.detail.no_spotify_isrc", settings: settings)
-            : (syncData == nil ? cachedBase.detail : ui("repo.detail.sync_apply_failed", settings: settings))
+            : (syncData == nil || !allowKaraoke
+                ? cachedBase.detail
+                : ui("repo.detail.sync_apply_failed", settings: settings))
         return LyricsResult(
             lines: baseLines,
             providerLabel: cachedBase.providerLabel,
@@ -2626,6 +2630,9 @@ actor LyricsRepository {
                 policy.orderedProviders,
                 enabled: enabled
             ),
+            allowedProviderTypesCanonical: LyricsCacheKey.allowedProviderTypesCanonical(
+                policy.allowedTypesByProvider
+            ),
             credentialGeneration: policy.credentialGeneration
         ))
     }
@@ -2787,9 +2794,13 @@ actor LyricsRepository {
                 }
                 throw CancellationError()
             }
-            let baseLines = appLines(from: selected, fallbackDurationMs: track.durationMs)
+            let allowedTypes = policy.allowedTypes(for: selected.provider)
+            var baseLines = appLines(from: selected, fallbackDurationMs: track.durationMs)
             guard !baseLines.isEmpty else { throw LyricsProviderError.miss }
-            let preserveProviderKaraoke = LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
+            if !allowedTypes.karaoke {
+                baseLines = baseLines.map(strippedKaraokeLine)
+            }
+            let preserveProviderKaraoke = allowedTypes.karaoke && LyricsProviderAppContracts.shouldPreserveProviderKaraoke(
                 providerID: selected.provider.rawValue,
                 lineSyllableDurationsMs: selected.lines.map { line in
                     line.syllables.map { $0.endMs - $0.startMs }
@@ -2804,7 +2815,7 @@ actor LyricsRepository {
             var syncApplied = false
             if preserveProviderKaraoke {
                 diagnostics.append("provider unison: rich timing preserved; sync-data apply skipped")
-            } else if let syncData {
+            } else if let syncData, allowedTypes.karaoke {
                 let applied = SyncDataApplier.applyWithDiagnostics(
                     baseLyrics: baseLines,
                     syncBody: syncData.syncBody,
@@ -2826,7 +2837,9 @@ actor LyricsRepository {
                 providerLabel: label,
                 detail: ui(preserveProviderKaraoke ? "repo.detail.provider_rich_timing" :
                     (syncApplied ? "repo.detail.sync_applied_search" :
-                        (syncData == nil ? "repo.detail.no_sync_data" : "repo.detail.sync_apply_failed")), settings: settings),
+                        (syncData == nil || !allowedTypes.karaoke
+                            ? "repo.detail.no_sync_data"
+                            : "repo.detail.sync_apply_failed")), settings: settings),
                 karaoke: preserveProviderKaraoke || syncApplied,
                 isrc: isrc,
                 spotifyTrackId: spotifyTrackId,
@@ -2939,6 +2952,20 @@ actor LyricsRepository {
             text: syllable.text,
             startTimeMs: syllable.startMs,
             endTimeMs: syllable.endMs
+        )
+    }
+
+    private func strippedKaraokeLine(_ line: LyricsLine) -> LyricsLine {
+        LyricsLine(
+            startTimeMs: line.startTimeMs,
+            endTimeMs: line.endTimeMs,
+            text: line.text,
+            syllables: [],
+            speaker: line.speaker,
+            speakerColor: line.speakerColor,
+            speakerFallback: line.speakerFallback,
+            kind: line.kind,
+            vocalParts: []
         )
     }
 

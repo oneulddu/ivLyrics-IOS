@@ -7004,29 +7004,8 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var multiProviderSettingsContent: some View {
-        ForEach(LyricsProviderAppContracts.unofficialProviderRawValues, id: \.self) { provider in
-            settingsToggleCard(
-                settings.tf("lyrics_provider.enable_format", multiProviderName(provider)),
-                description: settings.t("lyrics_provider.unofficial_provider_desc"),
-                binding: multiProviderEnabledBinding(provider)
-            )
-            .disabled(provider == "deezer" && !settings.deezerConfigured)
-        }
-
-        settingsCard(settings.t("lyrics_provider.order"), description: settings.t("lyrics_provider.order_desc")) {
-            VStack(spacing: 8) {
-                ForEach(Array(normalizedMultiProviderOrder.enumerated()), id: \.element) { index, provider in
-                    HStack {
-                        Text(multiProviderName(provider))
-                            .foregroundStyle(.white.opacity(0.82))
-                        Spacer()
-                        Button("↑") { moveMultiProvider(at: index, offset: -1) }
-                            .disabled(index == 0)
-                        Button("↓") { moveMultiProvider(at: index, offset: 1) }
-                            .disabled(index == normalizedMultiProviderOrder.count - 1)
-                    }
-                }
-            }
+        ForEach(Array(normalizedMultiProviderOrder.enumerated()), id: \.element) { index, provider in
+            multiLyricsProviderSettingsCard(provider, index: index)
         }
 
         settingsCard(settings.t("lyrics_provider.deezer_arl"), description: settings.t("lyrics_provider.deezer_arl_desc")) {
@@ -7109,6 +7088,81 @@ struct SettingsView: View {
 
     private func multiProviderName(_ rawValue: String) -> String {
         LyricsProviderAppContracts.providerDisplayName(rawValue)
+    }
+
+    private func multiProviderTypeBinding(_ provider: String, type: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.lyricsMultiProviderTypes[provider]?[type] ?? true },
+            set: { value in
+                settings.setMultiLyricsProviderTypeEnabled(provider, type: type, enabled: value)
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func multiLyricsProviderSettingsCard(_ provider: String, index: Int) -> some View {
+        let isLrclib = provider == "lrclib"
+        let deezerLocked = provider == "deezer" && !settings.deezerConfigured
+        settingsCard(
+            multiProviderName(provider),
+            description: isLrclib ? "" : settings.t("lyrics_provider.unofficial_provider_desc")
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Toggle(
+                        settings.t("lyrics.provider.enabled"),
+                        isOn: isLrclib ? .constant(true) : multiProviderEnabledBinding(provider)
+                    )
+                    .font(.pretendard(14, weight: .semibold))
+                    .disabled(isLrclib || deezerLocked)
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        moveMultiProvider(at: index, offset: -1)
+                    } label: {
+                        Image(systemName: "chevron.up")
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(index == 0)
+
+                    Button {
+                        moveMultiProvider(at: index, offset: 1)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(index == normalizedMultiProviderOrder.count - 1)
+                }
+
+                Divider().overlay(.white.opacity(0.12))
+
+                VStack(alignment: .leading, spacing: 9) {
+                    Text(settings.t("lyrics.provider.allowed_types"))
+                        .font(.pretendard(13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.64))
+                    Toggle(
+                        provider == "unison"
+                            ? settings.t("lyrics.provider.type_karaoke")
+                            : settings.t("lyrics.provider.type_karaoke_sync_data"),
+                        isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypeKaraoke)
+                    )
+                    Toggle(
+                        settings.t("lyrics.provider.type_synced"),
+                        isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypeSynced)
+                    )
+                    Toggle(
+                        settings.t("lyrics.provider.type_plain"),
+                        isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypePlain)
+                    )
+                }
+                .font(.pretendard(14))
+                .disabled(deezerLocked)
+            }
+        }
     }
 
     @ViewBuilder
