@@ -4195,15 +4195,25 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     static func orderedVocalParts(_ parts: [LyricsLine.VocalPart]) -> [LyricsLine.VocalPart] {
-        var result: [LyricsLine.VocalPart] = []
-        result.reserveCapacity(parts.count)
-        for part in parts where part.role == "lead" {
-            result.append(part)
+        var sawNonLead = false
+        for part in parts {
+            if part.role == "lead" {
+                if !sawNonLead { continue }
+
+                var result: [LyricsLine.VocalPart] = []
+                result.reserveCapacity(parts.count)
+                for part in parts where part.role == "lead" {
+                    result.append(part)
+                }
+                for part in parts where part.role != "lead" {
+                    result.append(part)
+                }
+                return result
+            }
+            sawNonLead = true
         }
-        for part in parts where part.role != "lead" {
-            result.append(part)
-        }
-        return result
+
+        return parts
     }
 
     static func vocalPartDisplayText(_ part: LyricsLine.VocalPart) -> String {
