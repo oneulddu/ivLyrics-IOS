@@ -4227,6 +4227,13 @@ enum LyricsTimelineDisplayBuilder {
         return text
     }
 
+    static func displayableVocalParts(_ parts: [LyricsLine.VocalPart]) -> [LyricsLine.VocalPart] {
+        for part in parts where vocalPartDisplayText(part).trimmed.isEmpty {
+            return parts.filter { !vocalPartDisplayText($0).trimmed.isEmpty }
+        }
+        return parts
+    }
+
     static func shouldUseVocalPartSupplements(_ line: LyricsLine) -> Bool {
         let parts = orderedVocalParts(line.vocalParts)
         return shouldUseVocalPartSupplements(orderedParts: parts)
@@ -4790,9 +4797,7 @@ struct LyricsLineView: View, Equatable {
 
     var body: some View {
         let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
-        let displayVocalParts = orderedVocalParts.filter {
-            !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty
-        }
+        let displayVocalParts = LyricsTimelineDisplayBuilder.displayableVocalParts(orderedVocalParts)
         let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(
             orderedParts: orderedVocalParts
         )

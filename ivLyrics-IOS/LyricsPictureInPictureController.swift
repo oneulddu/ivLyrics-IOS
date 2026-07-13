@@ -1322,8 +1322,9 @@ struct PictureInPictureKaraokeContent: View {
     }
 
     private var displayParts: [LyricsLine.VocalPart] {
-        LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
-            .filter { !LyricsTimelineDisplayBuilder.vocalPartDisplayText($0).trimmed.isEmpty }
+        LyricsTimelineDisplayBuilder.displayableVocalParts(
+            LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
+        )
     }
 
     private var horizontalAlignment: HorizontalAlignment {
