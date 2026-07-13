@@ -67,6 +67,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private var lastRenderUptime: TimeInterval = 0
     private var lastRenderedPositionMs: Int64?
     private var lastRenderIdentityValue: String?
+    private var lastRenderIdentityInput: RenderIdentityInput?
     private var audioSessionActive = false
     private nonisolated let playbackInfo = PictureInPicturePlaybackInfo()
     private var lastPublishedPlaybackState: PlaybackState?
@@ -156,7 +157,19 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             typography: settings.typography,
             speakerColors: settings.speakerColors
         )
-        let nextRenderIdentity = nextState.renderIdentity
+        let nextRenderIdentityInput = RenderIdentityInput(
+            state: nextState,
+            activeLine: nextState.activeLine
+        )
+        let nextRenderIdentity: String
+        if let lastRenderIdentityInput,
+           let lastRenderIdentityValue,
+           lastRenderIdentityInput.definitelyMatches(nextRenderIdentityInput) {
+            nextRenderIdentity = lastRenderIdentityValue
+        } else {
+            nextRenderIdentity = nextState.renderIdentity(for: nextRenderIdentityInput.activeLine)
+            lastRenderIdentityInput = nextRenderIdentityInput
+        }
         let forceRender = nextRenderIdentity != lastRenderIdentityValue
         state = nextState
         lastRenderIdentityValue = nextRenderIdentity
@@ -461,12 +474,14 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let previousBlurredArtwork = blurredArtwork
         let previousRenderedPositionMs = lastRenderedPositionMs
         let previousRenderIdentityValue = lastRenderIdentityValue
+        let previousRenderIdentityInput = lastRenderIdentityInput
         defer {
             state = previousState
             artwork = previousArtwork
             blurredArtwork = previousBlurredArtwork
             lastRenderedPositionMs = previousRenderedPositionMs
             lastRenderIdentityValue = previousRenderIdentityValue
+            lastRenderIdentityInput = previousRenderIdentityInput
         }
 
         let firstPart = LyricsLine.VocalPart(
@@ -512,6 +527,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         state.translationSizePercent = 100
         lastRenderedPositionMs = nil
         lastRenderIdentityValue = nil
+        lastRenderIdentityInput = nil
         artwork = Self.debugSampleArtwork()
         blurredArtwork = artwork.flatMap { Self.makeBlurredArtwork(from: $0) }
 
@@ -1100,8 +1116,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             return value.isEmpty ? nil : value
         }
 
-        var renderIdentity: String {
-            let line = activeLine
+        func renderIdentity(for line: ActiveLine?) -> String {
             var identity = track?.stableKey ?? ""
             identity.reserveCapacity(256)
             identity.append("|")
@@ -1174,6 +1189,66 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 return translation.isEmpty ? [] : [translation]
             }
             return translation.isEmpty ? [pronunciation] : [pronunciation, translation]
+        }
+    }
+
+    private struct RenderIdentityInput {
+        let state: RenderState
+        let activeLine: ActiveLine?
+
+        init(state: RenderState, activeLine: ActiveLine?) {
+            var identityState = state
+            identityState.lines = []
+            self.state = identityState
+            self.activeLine = activeLine
+        }
+
+        func definitelyMatches(_ other: RenderIdentityInput) -> Bool {
+            guard state.track == other.state.track,
+                  activeLine?.index == other.activeLine?.index,
+                  state.title == other.state.title,
+                  state.artist == other.state.artist,
+                  state.statusText == other.state.statusText,
+                  state.showArtwork == other.state.showArtwork,
+                  state.orientation == other.state.orientation,
+                  state.backgroundMode == other.state.backgroundMode,
+                  state.alignment == other.state.alignment,
+                  state.lyricsSizePercent == other.state.lyricsSizePercent,
+                  state.translationSizePercent == other.state.translationSizePercent,
+                  state.solidColor == other.state.solidColor,
+                  state.syncedLyricsKaraokeAnimationEnabled == other.state.syncedLyricsKaraokeAnimationEnabled,
+                  state.karaokeBounceEffectEnabled == other.state.karaokeBounceEffectEnabled,
+                  state.karaokeDataAsLineSynced == other.state.karaokeDataAsLineSynced,
+                  state.useSyncCreatorSpeakerColors == other.state.useSyncCreatorSpeakerColors,
+                  state.typography == other.state.typography,
+                  state.speakerColors == other.state.speakerColors else {
+                return false
+            }
+            return definitelyMatchesActiveLine(other.activeLine)
+        }
+
+        private func definitelyMatchesActiveLine(_ other: ActiveLine?) -> Bool {
+            guard let activeLine, let other else {
+                return activeLine == nil && other == nil
+            }
+            let line = activeLine.line
+            let otherLine = other.line
+            guard line.furiganaText == otherLine.furiganaText,
+                  line.pronunciationText == otherLine.pronunciationText,
+                  line.translationText == otherLine.translationText,
+                  line.vocalParts.count == otherLine.vocalParts.count else {
+                return false
+            }
+            for index in line.vocalParts.indices {
+                let part = line.vocalParts[index]
+                let otherPart = otherLine.vocalParts[index]
+                if part.furiganaText != otherPart.furiganaText
+                    || part.pronunciationText != otherPart.pronunciationText
+                    || part.translationText != otherPart.translationText {
+                    return false
+                }
+            }
+            return true
         }
     }
 
