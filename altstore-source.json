@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.6",
+          "buildVersion": "11",
+          "date": "2026-07-13",
+          "localizedDescription": "v1.0.6은 가사 줄 분할과 재생 동기화 처리, 가사 표시 성능을 개선한 업데이트입니다.\n\nv1.0.6 improves lyric line splitting, playback synchronization handling, and lyric presentation performance.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.6/ivLyrics-IOS-v1.0.6-unsigned.ipa",
+          "size": 6408084,
+          "sha256": "2fc336545bc6743551e32b3c09650160daba6a8584382752b342fbbf30bbb880",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.5",
           "buildVersion": "10",
           "date": "2026-07-12",
