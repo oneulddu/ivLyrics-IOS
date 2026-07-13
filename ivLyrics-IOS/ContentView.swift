@@ -3115,8 +3115,15 @@ struct MainLyricPreviewPanel: View {
     private func previewKaraokeSyllables(for text: String, syllables: [LyricsLine.Syllable]) -> [LyricsLine.Syllable] {
         let value = text.trimmed
         guard !value.isEmpty, !syllables.isEmpty else { return [] }
-        let usable = syllables.filter { !$0.text.isEmpty }
-        guard usable.map(\.text).joined().trimmed == value else { return [] }
+        var usable: [LyricsLine.Syllable] = []
+        usable.reserveCapacity(syllables.count)
+        var combined = ""
+        combined.reserveCapacity(text.utf8.count)
+        for syllable in syllables where !syllable.text.isEmpty {
+            usable.append(syllable)
+            combined.append(contentsOf: syllable.text)
+        }
+        guard combined.trimmed == value else { return [] }
         return trimPreviewSyllables(usable)
     }
 
