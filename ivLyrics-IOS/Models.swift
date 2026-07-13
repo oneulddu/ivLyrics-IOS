@@ -430,6 +430,80 @@ struct LyricsLine: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+enum KaraokeSyllableTimingNormalizer {
+    static func expandTimedChunks(_ syllables: [LyricsLine.Syllable]) -> [LyricsLine.Syllable] {
+#if DEBUG
+        _ = regressionChecks
+#endif
+        return expandTimedChunksUnchecked(syllables)
+    }
+
+    private static func expandTimedChunksUnchecked(
+        _ syllables: [LyricsLine.Syllable]
+    ) -> [LyricsLine.Syllable] {
+        guard syllables.contains(where: {
+            $0.text.count > 1 && $0.endTimeMs > $0.startTimeMs
+        }) else {
+            return syllables
+        }
+        return syllables.flatMap { syllable in
+            let characters = syllable.text.map(String.init)
+            guard characters.count > 1,
+                  syllable.endTimeMs > syllable.startTimeMs else {
+                return [syllable]
+            }
+
+            let duration = syllable.endTimeMs - syllable.startTimeMs
+            let characterCount = Int64(characters.count)
+            let step = duration / characterCount
+            let remainder = duration % characterCount
+
+            func boundary(_ index: Int64) -> Int64 {
+                syllable.startTimeMs
+                    + step * index
+                    + min(index, remainder)
+            }
+
+            return characters.enumerated().map { index, character in
+                let start = boundary(Int64(index))
+                let end = boundary(Int64(index + 1))
+                return LyricsLine.Syllable(
+                    text: character,
+                    startTimeMs: start,
+                    endTimeMs: max(start, end)
+                )
+            }
+        }
+    }
+
+#if DEBUG
+    private static let regressionChecks: Void = {
+        let oneCharacter = LyricsLine.Syllable(text: "한", startTimeMs: 100, endTimeMs: 400)
+        assert(expandTimedChunksUnchecked([oneCharacter]) == [oneCharacter])
+
+        let word = expandTimedChunksUnchecked([
+            LyricsLine.Syllable(text: "Back", startTimeMs: 100, endTimeMs: 500)
+        ])
+        assert(word.map(\.text) == ["B", "a", "c", "k"])
+        assert(word.map(\.startTimeMs) == [100, 200, 300, 400])
+        assert(word.map(\.endTimeMs) == [200, 300, 400, 500])
+
+        let complexText = "A e\u{301}👩🏽‍🚀!"
+        let complex = expandTimedChunksUnchecked([
+            LyricsLine.Syllable(text: complexText, startTimeMs: 0, endTimeMs: 500)
+        ])
+        assert(complex.map(\.text) == complexText.map(String.init))
+        assert(complex.map(\.text).joined() == complexText)
+        assert(complex.first?.startTimeMs == 0)
+        assert(complex.last?.endTimeMs == 500)
+        assert(zip(complex, complex.dropFirst()).allSatisfy { $0.endTimeMs == $1.startTimeMs })
+
+        let untimed = LyricsLine.Syllable(text: "word", startTimeMs: 800, endTimeMs: 800)
+        assert(expandTimedChunksUnchecked([untimed]) == [untimed])
+    }()
+#endif
+}
+
 struct LyricsResult: Codable, Equatable, Sendable {
     var lines: [LyricsLine]
     var providerLabel: String

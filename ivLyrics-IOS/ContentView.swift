@@ -4861,7 +4861,7 @@ struct SyllableKaraokeText: View {
     private var effectiveSyllables: [LyricsLine.Syllable] {
         let timed = syllables.filter { !$0.text.isEmpty }
         if !timed.isEmpty {
-            return timed
+            return KaraokeSyllableTimingNormalizer.expandTimedChunks(timed)
         }
         guard syntheticTimingEnabled, endTimeMs > startTimeMs else { return [] }
         let characters = text.map(String.init)
