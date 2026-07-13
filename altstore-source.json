@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.10",
+          "buildVersion": "15",
+          "date": "2026-07-13",
+          "localizedDescription": "v1.0.10은 가사 타임라인 탐색과 메타데이터 스크롤을 개선한 업데이트입니다.\n\nv1.0.10 improves lyrics timeline lookups and metadata scrolling.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.10/ivLyrics-IOS-v1.0.10-unsigned.ipa",
+          "size": 6422066,
+          "sha256": "76a937220bf82a3089ab55a43e04e4e9480591d81ed2ca8b51b0d22f05362c7b",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.9",
           "buildVersion": "14",
           "date": "2026-07-13",
