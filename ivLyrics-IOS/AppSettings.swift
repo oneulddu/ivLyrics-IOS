@@ -196,6 +196,9 @@ final class AppSettings: ObservableObject {
     private var isApplyingRuleState = false
     private var cachedSnapshot: Snapshot?
     private var snapshotInvalidationCancellable: AnyCancellable?
+    private let visualSettingsCacheLock = NSLock()
+    private var cachedTypographySettings: (raw: String?, value: TypographySettings)?
+    private var cachedSpeakerColorSettings: (raw: String?, value: SpeakerColorSettings)?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -398,8 +401,15 @@ final class AppSettings: ObservableObject {
     }
 
     func typographySettings() -> TypographySettings {
+        visualSettingsCacheLock.lock()
+        defer { visualSettingsCacheLock.unlock() }
+        let raw = defaults.string(forKey: "typography_settings_v1")
+        if let cachedTypographySettings,
+           cachedTypographySettings.raw == raw {
+            return cachedTypographySettings.value
+        }
         var storedObject: [String: Any] = [:]
-        if let raw = defaults.string(forKey: "typography_settings_v1"),
+        if let raw,
            let data = raw.data(using: .utf8),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             storedObject = object
@@ -416,7 +426,9 @@ final class AppSettings: ObservableObject {
                 styles[slot.id] = slot.defaultStyle
             }
         }
-        return TypographySettings(styles: styles)
+        let settings = TypographySettings(styles: styles)
+        cachedTypographySettings = (raw, settings)
+        return settings
     }
 
     func setTypographyStyle(slotId: String, sizePercent: Int, weight: String) {
@@ -428,8 +440,15 @@ final class AppSettings: ObservableObject {
     }
 
     func speakerColorSettings() -> SpeakerColorSettings {
+        visualSettingsCacheLock.lock()
+        defer { visualSettingsCacheLock.unlock() }
+        let raw = defaults.string(forKey: "speaker_color_settings_v1")
+        if let cachedSpeakerColorSettings,
+           cachedSpeakerColorSettings.raw == raw {
+            return cachedSpeakerColorSettings.value
+        }
         var storedObject: [String: Any] = [:]
-        if let raw = defaults.string(forKey: "speaker_color_settings_v1"),
+        if let raw,
            let data = raw.data(using: .utf8),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             storedObject = object
@@ -438,7 +457,9 @@ final class AppSettings: ObservableObject {
         for slot in Self.speakerColorSlots {
             colors[slot.id] = Self.normalizeHexColor(storedObject[slot.id] as? String ?? "", fallback: slot.defaultColor)
         }
-        return SpeakerColorSettings(colors: colors)
+        let settings = SpeakerColorSettings(colors: colors)
+        cachedSpeakerColorSettings = (raw, settings)
+        return settings
     }
 
     func setSpeakerColor(slotId: String, color: String) {
