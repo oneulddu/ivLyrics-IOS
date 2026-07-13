@@ -446,17 +446,20 @@ enum KaraokeSyllableTimingNormalizer {
         }) else {
             return syllables
         }
-        return syllables.flatMap { syllable in
-            let characters = syllable.text.map(String.init)
-            guard characters.count > 1,
+        var result: [LyricsLine.Syllable] = []
+        result.reserveCapacity(syllables.count)
+        for syllable in syllables {
+            let characterCount = syllable.text.count
+            guard characterCount > 1,
                   syllable.endTimeMs > syllable.startTimeMs else {
-                return [syllable]
+                result.append(syllable)
+                continue
             }
 
             let duration = syllable.endTimeMs - syllable.startTimeMs
-            let characterCount = Int64(characters.count)
-            let step = duration / characterCount
-            let remainder = duration % characterCount
+            let characterCount64 = Int64(characterCount)
+            let step = duration / characterCount64
+            let remainder = duration % characterCount64
 
             func boundary(_ index: Int64) -> Int64 {
                 syllable.startTimeMs
@@ -464,16 +467,17 @@ enum KaraokeSyllableTimingNormalizer {
                     + min(index, remainder)
             }
 
-            return characters.enumerated().map { index, character in
+            for (index, character) in syllable.text.enumerated() {
                 let start = boundary(Int64(index))
                 let end = boundary(Int64(index + 1))
-                return LyricsLine.Syllable(
-                    text: character,
+                result.append(LyricsLine.Syllable(
+                    text: String(character),
                     startTimeMs: start,
                     endTimeMs: max(start, end)
-                )
+                ))
             }
         }
+        return result
     }
 
 #if DEBUG
