@@ -382,7 +382,8 @@ enum UnisonLyricsProvider {
                 vocalParts: karaoke ? line.vocalParts : []
             )
         }
-        return ParsedLyrics(lines: lines, karaoke: karaoke, synced: !lines.isEmpty)
+        let normalizedLines = karaoke ? CrossLineVocalNormalizer.normalize(lines) : lines
+        return ParsedLyrics(lines: normalizedLines, karaoke: karaoke, synced: !normalizedLines.isEmpty)
     }
 
     private static func parseTimedNodes(

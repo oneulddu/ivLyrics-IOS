@@ -345,7 +345,7 @@ enum LyricsPlusProvider {
            sourceType == "word",
            timedRaw.allSatisfy(\.hasWordTiming) {
             let grouped = groupParallelVocals(timedRaw)
-            karaoke = splitLongSoloLines(grouped)
+            karaoke = CrossLineVocalNormalizer.normalize(splitLongSoloLines(grouped))
         }
         let typeLabel = sourceType == "word" ? "Word" : (sourceType == "line" ? "Line" : "Plain")
         return FetchOutcome(
