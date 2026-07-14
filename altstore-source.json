@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.11",
+          "buildVersion": "16",
+          "date": "2026-07-14",
+          "localizedDescription": "v1.0.11은 가사·보컬 표시와 PiP 렌더링을 최적화해 더 안정적이고 효율적인 재생 경험을 제공합니다.\n\nv1.0.11 optimizes lyric, vocal, and PiP rendering for a more stable and efficient playback experience.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.11/ivLyrics-IOS-v1.0.11-unsigned.ipa",
+          "size": 6458298,
+          "sha256": "833804f66bc973624340e2aec16e8dc4f51fc192c9d48c144beaa45aecce6cfa",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.10",
           "buildVersion": "15",
           "date": "2026-07-13",
