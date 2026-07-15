@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.15",
+          "buildVersion": "20",
+          "date": "2026-07-15",
+          "localizedDescription": "v1.0.15에서는 캐시된 크리에이터 식별자 갱신을 개선하고 AltStore용 서명되지 않은 IPA를 제공합니다.\n\nv1.0.15 improves refresh handling for cached creator identities and provides an unsigned IPA for AltStore.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.15/ivLyrics-IOS-v1.0.15-unsigned.ipa",
+          "size": 6590308,
+          "sha256": "fec81234d0c01a57a976e066cc5f27111da2621a9cef4dda7de300c2d94de811",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.14",
           "buildVersion": "19",
           "date": "2026-07-15",
