@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.14",
+          "buildVersion": "19",
+          "date": "2026-07-15",
+          "localizedDescription": "ivLyrics iOS 1.0.14에서는 비공개 Sync Creator 프로필 기능을 추가했습니다.\n\nivLyrics iOS 1.0.14 adds support for private Sync Creator profiles.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.14/ivLyrics-IOS-v1.0.14-unsigned.ipa",
+          "size": 6576190,
+          "sha256": "4a59738375cdfa69bb2cad1e0934a62c68635d2e166ad80a5098ef566d970fd7",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.13",
           "buildVersion": "18",
           "date": "2026-07-15",
