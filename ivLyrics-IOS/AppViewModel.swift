@@ -11,6 +11,14 @@ final class PlaybackClock: ObservableObject {
     @Published fileprivate(set) var nowPositionMs: Int64 = 0
 }
 
+enum CreatorPrivacyState: Equatable {
+    case signedOut
+    case loading
+    case notLoaded
+    case publicProfile
+    case privateProfile
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     private static let spotifyPlaybackRefreshBurstDelays: [UInt64] = [
@@ -64,6 +72,10 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var updateStatus = ""
     @Published private(set) var toastMessage = ""
     @Published private(set) var updateCheckInFlight = false
+    @Published private(set) var creatorAccountConnected = false
+    @Published private(set) var creatorPrivacyState: CreatorPrivacyState = .signedOut
+    @Published private(set) var creatorPrivacyRequestInFlight = false
+    @Published private(set) var creatorPrivacyLoginInProgress = false
     @Published private(set) var aiLyricsGenerating = false
     @Published private(set) var lyricsSupplementPronunciationLoading = false
     @Published private(set) var lyricsSupplementTranslationLoading = false
@@ -126,6 +138,7 @@ final class AppViewModel: ObservableObject {
     private let spotifyAppRemotePlaybackService = SpotifyAppRemotePlaybackService()
     let pictureInPictureController = LyricsPictureInPictureController()
     private let pollinationsAuthClient = PollinationsAuthClient()
+    private let creatorAccountClient = CreatorAccountClient()
     private let updateChecker = UpdateChecker()
     private let creatorProfileEndpoint = "https://lyrics.api.ivl.is/user/creator-profile"
     private let syncDataSpotifyOrigin = "https://xpui.app.spotify.com"
@@ -137,6 +150,7 @@ final class AppViewModel: ObservableObject {
     private var tmiTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
     private var pollinationsAuthTask: Task<Void, Never>?
+    private var creatorPrivacyTask: Task<Void, Never>?
     private var spotifyPollTask: Task<Void, Never>?
     private var pipActiveCancellable: AnyCancellable?
     private var spotifyMetadataHydrationTask: Task<Void, Never>?
@@ -146,7 +160,6 @@ final class AppViewModel: ObservableObject {
     private var timer: Timer?
     private var cachedTimelineContext: LyricsTimelineContext?
     private var audioRouteObserver: NSObjectProtocol?
-    private var creatorProfileUrlCache: [String: URL] = [:]
     private var spotifyMetadataHydrationTrackId = ""
     private var spotifyHydratedTrackIds: Set<String> = []
     private var currentYouTubeBackgroundRequestKey = ""
@@ -191,6 +204,8 @@ final class AppViewModel: ObservableObject {
         inputSpotifyId = defaults.string(forKey: "manual_track_spotify_id") ?? ""
         inputIsrc = defaults.string(forKey: "manual_track_isrc") ?? ""
         spotifyUserConnected = spotifyUserPlaybackService.connected
+        creatorAccountConnected = creatorAccountClient.currentSession() != nil
+        creatorPrivacyState = creatorAccountConnected ? .notLoaded : .signedOut
         spotifyAppRemotePlaybackService.onPlaybackSnapshot = { [weak self] playback in
             guard let self else { return }
             spotifyAppRemoteConnected = true
@@ -261,6 +276,7 @@ final class AppViewModel: ObservableObject {
         tmiTask?.cancel()
         toastTask?.cancel()
         pollinationsAuthTask?.cancel()
+        creatorPrivacyTask?.cancel()
         spotifyPollTask?.cancel()
         spotifyMetadataHydrationTask?.cancel()
         updateTask?.cancel()
@@ -285,6 +301,34 @@ final class AppViewModel: ObservableObject {
             return settings.tf("pollinations.status_connected_format", maskAccessToken(settings.pollinationsAccessToken))
         }
         return settings.t("pollinations.status_disconnected")
+    }
+
+    var creatorPrivacyIsPrivate: Bool {
+        creatorPrivacyState == .privateProfile
+    }
+
+    var creatorPrivacyCanEdit: Bool {
+        creatorAccountConnected
+            && !creatorPrivacyRequestInFlight
+            && (creatorPrivacyState == .publicProfile || creatorPrivacyState == .privateProfile)
+    }
+
+    var creatorPrivacyStatusText: String {
+        if creatorPrivacyRequestInFlight {
+            return settings.t("creator_privacy.status_loading")
+        }
+        switch creatorPrivacyState {
+        case .signedOut:
+            return settings.t("creator_privacy.status_signed_out")
+        case .loading:
+            return settings.t("creator_privacy.status_loading")
+        case .notLoaded:
+            return settings.t("creator_privacy.status_not_loaded")
+        case .publicProfile:
+            return settings.t("creator_privacy.status_public")
+        case .privateProfile:
+            return settings.t("creator_privacy.status_private")
+        }
     }
 
     var pollinationsCanOpenLoginPage: Bool {
@@ -665,8 +709,168 @@ final class AppViewModel: ObservableObject {
     }
 
     func handleOpenURL(_ url: URL) {
+        if handleCreatorAuthRedirect(url) {
+            return
+        }
         if spotifyAppRemotePlaybackService.handleOpenURL(url) {
             return
+        }
+    }
+
+    func prepareCreatorPrivacySettings() {
+        let authenticated = creatorAccountClient.currentSession() != nil
+        creatorAccountConnected = authenticated
+        guard authenticated else {
+            creatorPrivacyTask?.cancel()
+            creatorPrivacyTask = nil
+            creatorAccountClient.cancelPendingLogin()
+            creatorPrivacyRequestInFlight = false
+            creatorPrivacyLoginInProgress = false
+            creatorPrivacyState = .signedOut
+            return
+        }
+        if creatorPrivacyState == .signedOut {
+            creatorPrivacyState = .notLoaded
+        }
+        refreshCreatorPrivacy(announceFailure: false)
+    }
+
+    func startCreatorAccountLogin() {
+        guard !creatorPrivacyRequestInFlight, !creatorPrivacyLoginInProgress else { return }
+        creatorPrivacyTask?.cancel()
+        creatorPrivacyRequestInFlight = true
+        creatorPrivacyState = .loading
+        creatorPrivacyTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await creatorAccountClient.startDiscordLogin(language: settings.uiLang)
+                if Task.isCancelled { return }
+                creatorPrivacyRequestInFlight = false
+                creatorPrivacyLoginInProgress = true
+                creatorPrivacyState = .signedOut
+                inAppBrowserURL = url
+                appendLog("creator privacy login: Discord authorization opened")
+            } catch {
+                if Task.isCancelled { return }
+                creatorPrivacyRequestInFlight = false
+                creatorPrivacyLoginInProgress = false
+                creatorAccountConnected = false
+                creatorPrivacyState = .signedOut
+                appendLog("creator privacy login start failed: \(error.localizedDescription)")
+                showSavedToast(settings.t("creator_privacy.login_failed"))
+            }
+        }
+    }
+
+    @discardableResult
+    func handleCreatorAuthRedirect(_ url: URL) -> Bool {
+        guard creatorPrivacyLoginInProgress,
+              url.scheme?.lowercased() == "spotify",
+              url.host?.lowercased() == "ivlyrics",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        let queryItems = components.queryItems ?? []
+        let action = queryItems.first { $0.name == "action" }?.value?.trimmed ?? ""
+        let loginToken = queryItems.first { $0.name == "loginToken" }?.value?.trimmed ?? ""
+        guard action == "discord-auth", !loginToken.isEmpty else { return false }
+        finishCreatorAccountLogin(loginToken: loginToken)
+        return true
+    }
+
+    func refreshCreatorPrivacy(announceFailure: Bool = true) {
+        guard !creatorPrivacyRequestInFlight else { return }
+        guard creatorAccountClient.currentSession() != nil else {
+            creatorAccountConnected = false
+            creatorPrivacyState = .signedOut
+            if announceFailure {
+                showSavedToast(settings.t("creator_privacy.login_required"))
+            }
+            return
+        }
+        creatorAccountConnected = true
+        creatorPrivacyTask?.cancel()
+        creatorPrivacyRequestInFlight = true
+        creatorPrivacyState = .loading
+        creatorPrivacyTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let privacy = try await creatorAccountClient.getPrivacy(language: settings.uiLang)
+                if Task.isCancelled { return }
+                creatorPrivacyRequestInFlight = false
+                creatorPrivacyState = privacy.isPrivate ? .privateProfile : .publicProfile
+            } catch {
+                if Task.isCancelled { return }
+                creatorPrivacyRequestInFlight = false
+                handleCreatorPrivacyFailure(error, fallbackState: .notLoaded)
+                appendLog("creator privacy load failed: \(error.localizedDescription)")
+                if announceFailure {
+                    showSavedToast(settings.t(isCreatorAuthenticationError(error)
+                        ? "creator_privacy.login_required"
+                        : "creator_privacy.load_failed"))
+                }
+            }
+        }
+    }
+
+    func setCreatorPrivacy(_ isPrivate: Bool) {
+        guard creatorPrivacyCanEdit else {
+            if !creatorAccountConnected {
+                showSavedToast(settings.t("creator_privacy.login_required"))
+                startCreatorAccountLogin()
+            }
+            return
+        }
+        let previousState = creatorPrivacyState
+        creatorPrivacyTask?.cancel()
+        creatorPrivacyRequestInFlight = true
+        creatorPrivacyState = isPrivate ? .privateProfile : .publicProfile
+        creatorPrivacyTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let privacy = try await creatorAccountClient.setPrivacy(isPrivate, language: settings.uiLang)
+                if Task.isCancelled { return }
+                creatorPrivacyRequestInFlight = false
+                creatorPrivacyState = privacy.isPrivate ? .privateProfile : .publicProfile
+                await clearCreatorIdentityCachesAndReload()
+                showSavedToast(settings.t(privacy.isPrivate
+                    ? "creator_privacy.saved_private"
+                    : "creator_privacy.saved_public"))
+            } catch {
+                if Task.isCancelled { return }
+                creatorPrivacyRequestInFlight = false
+                handleCreatorPrivacyFailure(error, fallbackState: previousState)
+                appendLog("creator privacy update failed: \(error.localizedDescription)")
+                showSavedToast(settings.t(isCreatorAuthenticationError(error)
+                    ? "creator_privacy.login_required"
+                    : "creator_privacy.save_failed"))
+            }
+        }
+    }
+
+    func disconnectCreatorAccount() {
+        guard !creatorPrivacyRequestInFlight else { return }
+        let previousState = creatorPrivacyState
+        creatorPrivacyTask?.cancel()
+        creatorPrivacyRequestInFlight = true
+        creatorPrivacyTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await creatorAccountClient.logout(language: settings.uiLang)
+                creatorAccountConnected = false
+                creatorPrivacyRequestInFlight = false
+                creatorPrivacyLoginInProgress = false
+                creatorPrivacyState = .signedOut
+                inAppBrowserURL = nil
+                appendLog("creator privacy: signed out")
+                showSavedToast(settings.t("creator_privacy.disconnected"))
+            } catch {
+                creatorPrivacyRequestInFlight = false
+                creatorAccountConnected = creatorAccountClient.currentSession() != nil
+                creatorPrivacyState = creatorAccountConnected ? previousState : .signedOut
+                appendLog("creator privacy logout failed: \(error.localizedDescription)")
+                showSavedToast(settings.t("creator_privacy.logout_failed"))
+            }
         }
     }
 
@@ -1442,20 +1646,17 @@ final class AppViewModel: ObservableObject {
     }
 
     func syncContributorProfileURL(_ contributor: LyricsResult.SyncContributor) async -> URL? {
+        guard !contributor.identityHidden else { return nil }
         let userHash = contributor.userHash.trimmed
         guard contributor.profileAvailable, !userHash.isEmpty else { return nil }
-        if let cached = creatorProfileUrlCache[userHash] {
-            return cached
-        }
-        let fallback = syncContributorProfileURL(identifier: userHash)
         do {
-            let resolved = try await fetchSyncContributorProfileURL(userHash: userHash, fallback: fallback)
-            creatorProfileUrlCache[userHash] = resolved
-            return resolved
+            // A creator may have enabled privacy on another device since this
+            // lyric response was cached. Verify the public profile on every tap
+            // before opening it instead of trusting a stale URL cache.
+            return try await fetchSyncContributorProfileURL(userHash: userHash)
         } catch {
             appendLog("sync creator profile lookup failed: \(error.localizedDescription)")
-            creatorProfileUrlCache[userHash] = fallback
-            return fallback
+            return nil
         }
     }
 
@@ -1501,6 +1702,79 @@ final class AppViewModel: ObservableObject {
 
     func closeInAppBrowser() {
         inAppBrowserURL = nil
+        if creatorPrivacyLoginInProgress {
+            creatorAccountClient.cancelPendingLogin()
+            creatorPrivacyLoginInProgress = false
+            creatorPrivacyRequestInFlight = false
+            creatorPrivacyState = creatorAccountConnected ? .notLoaded : .signedOut
+        }
+    }
+
+    private func finishCreatorAccountLogin(loginToken: String) {
+        guard !creatorPrivacyRequestInFlight else { return }
+        creatorPrivacyTask?.cancel()
+        creatorPrivacyLoginInProgress = false
+        creatorPrivacyRequestInFlight = true
+        creatorPrivacyState = .loading
+        inAppBrowserURL = nil
+        creatorPrivacyTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await creatorAccountClient.finishDiscordLogin(
+                    loginToken: loginToken,
+                    language: settings.uiLang
+                )
+                if Task.isCancelled { return }
+                creatorAccountConnected = true
+                creatorPrivacyState = .notLoaded
+                showSavedToast(settings.t("creator_privacy.login_success"))
+                appendLog("creator privacy login: authenticated session saved")
+                do {
+                    let privacy = try await creatorAccountClient.getPrivacy(language: settings.uiLang)
+                    if Task.isCancelled { return }
+                    creatorPrivacyState = privacy.isPrivate ? .privateProfile : .publicProfile
+                } catch {
+                    if Task.isCancelled { return }
+                    handleCreatorPrivacyFailure(error, fallbackState: .notLoaded)
+                    appendLog("creator privacy initial load failed: \(error.localizedDescription)")
+                }
+                creatorPrivacyRequestInFlight = false
+            } catch {
+                if Task.isCancelled { return }
+                creatorAccountClient.cancelPendingLogin()
+                creatorPrivacyRequestInFlight = false
+                creatorPrivacyLoginInProgress = false
+                creatorAccountConnected = creatorAccountClient.currentSession() != nil
+                creatorPrivacyState = creatorAccountConnected ? .notLoaded : .signedOut
+                appendLog("creator privacy login finish failed: \(error.localizedDescription)")
+                showSavedToast(settings.t("creator_privacy.login_failed"))
+            }
+        }
+    }
+
+    private func handleCreatorPrivacyFailure(_ error: Error, fallbackState: CreatorPrivacyState) {
+        if isCreatorAuthenticationError(error) || creatorAccountClient.currentSession() == nil {
+            creatorAccountClient.clearSession()
+            creatorAccountConnected = false
+            creatorPrivacyLoginInProgress = false
+            creatorPrivacyState = .signedOut
+        } else {
+            creatorAccountConnected = true
+            creatorPrivacyState = fallbackState
+        }
+    }
+
+    private func isCreatorAuthenticationError(_ error: Error) -> Bool {
+        guard let httpError = error as? HTTPStatusError else { return false }
+        return httpError.statusCode == 401 || httpError.statusCode == 403
+    }
+
+    private func clearCreatorIdentityCachesAndReload() async {
+        furiganaRepository.clearCache()
+        await lyricsRepository.clearCache()
+        await aiRepository.clearCache()
+        guard currentTrack?.hasUsableMetadata == true else { return }
+        reloadLyrics(bypassCache: true)
     }
 
     func startPollinationsLogin() {
@@ -2304,27 +2578,36 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func fetchSyncContributorProfileURL(userHash: String, fallback: URL) async throws -> URL {
+    private func fetchSyncContributorProfileURL(userHash: String) async throws -> URL? {
         var components = URLComponents(string: creatorProfileEndpoint)!
         components.queryItems = [URLQueryItem(name: "userHash", value: userHash)]
-        guard let url = components.url else { return fallback }
+        guard let url = components.url else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 12
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("ivLyrics-Android/0.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("ivLyrics-iOS/1", forHTTPHeaderField: "User-Agent")
         request.setValue(syncDataSpotifyOrigin, forHTTPHeaderField: "Origin")
         request.setValue(syncDataSpotifyReferer, forHTTPHeaderField: "Referer")
         request.setValue("no-cache, no-store, must-revalidate", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            return fallback
+        guard let http = response as? HTTPURLResponse else {
+            return nil
         }
+        if http.statusCode == 401 || http.statusCode == 403 || http.statusCode == 404 {
+            return nil
+        }
+        guard (200..<300).contains(http.statusCode) else { return nil }
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               boolValue(root["success"], fallback: false),
               let payload = root["data"] as? [String: Any] else {
-            return fallback
+            return nil
+        }
+        if boolValue(payload["anonymous"], fallback: false)
+            || boolValue(payload["isPrivate"], fallback: false)
+            || !boolValue(payload["profilePublic"], fallback: true) {
+            return nil
         }
         let account = payload["account"] as? [String: Any]
         let identifier = IvLyricsUtilities.firstNonEmpty(
@@ -2332,7 +2615,7 @@ final class AppViewModel: ObservableObject {
             stringValue(payload["nickname"]),
             stringValue(payload["userHash"])
         )
-        return identifier.isEmpty ? fallback : syncContributorProfileURL(identifier: identifier)
+        return identifier.isEmpty ? nil : syncContributorProfileURL(identifier: identifier)
     }
 
     private func syncContributorProfileURL(identifier: String) -> URL {

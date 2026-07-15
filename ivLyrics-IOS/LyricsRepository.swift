@@ -57,7 +57,8 @@ actor LyricsRepository {
     private let syncDataResponseCache = RawResponseDiskCache(
         namespace: "sync_data_api",
         maxEntries: 700,
-        maxAgeMs: LyricsRepository.lyricsCacheMaxAgeMs
+        maxAgeMs: LyricsRepository.lyricsCacheMaxAgeMs,
+        formatVersion: 2
     )
     private let defaults = UserDefaults.standard
     private var spotifyAccessToken = ""
@@ -111,7 +112,31 @@ actor LyricsRepository {
 
     private func putMemoryCachedLyrics(_ key: String, result: LyricsResult) {
         guard !key.trimmed.isEmpty, !result.lines.isEmpty else { return }
-        cache[key] = MemoryLyricsCacheEntry(result: result, savedAtMs: nowMs())
+        cache[key] = MemoryLyricsCacheEntry(
+            result: redactedContributorIdentitiesForCache(result),
+            savedAtMs: nowMs()
+        )
+    }
+
+    private func redactedContributorIdentitiesForCache(_ result: LyricsResult) -> LyricsResult {
+        guard !result.contributors.isEmpty else { return result }
+        var redacted = result
+        redacted.contributors = result.contributors.map { contributor in
+            LyricsResult.SyncContributor(
+                name: "Anonymous",
+                userHash: "",
+                profileAvailable: false,
+                anonymous: true,
+                isPrivate: contributor.isPrivate
+            )
+        }
+        return redacted
+    }
+
+    private func hasRedactedContributorSlots(_ result: LyricsResult) -> Bool {
+        result.contributors.contains { contributor in
+            contributor.anonymous && contributor.userHash.isEmpty
+        }
     }
 
     private func canApplyIvLyricsSyncToCachedResult(
@@ -137,6 +162,10 @@ actor LyricsRepository {
         resolvedIsrc: String
     ) -> Bool {
         guard !result.lines.isEmpty, result.selectionPolicyKey != "manual" else { return false }
+        if hasRedactedContributorSlots(result),
+           !TrackSnapshot.normalizeIsrc(resolvedIsrc).isEmpty {
+            return true
+        }
         if canApplyIvLyricsSyncToCachedResult(result, settings: settings) { return true }
         guard settings.preferSyncDataProvider,
               !TrackSnapshot.normalizeIsrc(resolvedIsrc).isEmpty else {
@@ -344,6 +373,26 @@ actor LyricsRepository {
                     return LoadedLyrics(trackKey: key, result: selected, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
                 }
                 log("cached provider sync-data unavailable; cached lyrics kept")
+                return LoadedLyrics(trackKey: key, result: cachedBase, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+            } else if cachedBase.karaoke,
+                      hasRedactedContributorSlots(cachedBase),
+                      syncDataProviders.contains(cachedBase.providerId),
+                      !isrc.isEmpty {
+                if let currentSyncData = await fetchSyncData(
+                    isrc: isrc,
+                    providerId: cachedBase.providerId,
+                    track: track,
+                    spotifyMatch: spotifyMatch,
+                    log: log
+                ) {
+                    var hydrated = cachedBase
+                    hydrated.contributors = currentSyncData.contributors
+                    putMemoryCachedLyrics(cacheKey, result: hydrated)
+                    diskCache.put(cacheKey, result: hydrated)
+                    log("sync-data contributors refreshed for cached lyrics: count=\(currentSyncData.contributors.count)")
+                    return LoadedLyrics(trackKey: key, result: hydrated, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
+                }
+                log("sync-data contributor refresh failed; anonymous cache slots kept")
                 return LoadedLyrics(trackKey: key, result: cachedBase, artworkURL: spotifyMatch?.artworkURL, logs: logs, resolvedIsrc: isrc, resolvedSpotifyTrackId: spotifyTrackId)
             } else {
                 log("OpenDB sync-data priority unchanged; cached provider kept: \(cachedBase.providerId.isEmpty ? "unknown" : cachedBase.providerId)")
@@ -1161,7 +1210,8 @@ actor LyricsRepository {
             guard !normalizedIsrc.isEmpty, AppSettings.lyricsProviderById(normalizedProvider) != nil else { return nil }
             let cacheKey = syncDataCacheKey(isrc, providerId: normalizedProvider)
             let cachedResponse = syncDataResponseCache.get(cacheKey)
-            if !cachedResponse.isEmpty {
+            let cachedIdentityRedacted = cachedResponse.contains("\"identityRedacted\":true")
+            if !cachedResponse.isEmpty, !cachedIdentityRedacted {
                 log("sync-data cache hit: isrc=\(normalizedIsrc)")
                 return try parseSyncDataResponse(
                     cachedResponse,
@@ -1170,16 +1220,21 @@ actor LyricsRepository {
                     fromCache: true
                 )
             }
+            if cachedIdentityRedacted {
+                log("sync-data timing cache hit; refreshing contributor privacy metadata")
+            }
 
             let bypassServerCache = shouldBypassSyncDataServerCache(normalizedIsrc)
-            if bypassServerCache {
-                if await isOpenDbUnavailable(log: log) {
-                    log("sync-data opendb: unavailable after cache clear, skip direct sync-data request")
-                    return nil
-                }
-            } else {
-                guard await shouldRequestSyncDataFromOpenDb(isrc: normalizedIsrc, provider: normalizedProvider, log: log) else {
-                    return nil
+            if !cachedIdentityRedacted {
+                if bypassServerCache {
+                    if await isOpenDbUnavailable(log: log) {
+                        log("sync-data opendb: unavailable after cache clear, skip direct sync-data request")
+                        return nil
+                    }
+                } else {
+                    guard await shouldRequestSyncDataFromOpenDb(isrc: normalizedIsrc, provider: normalizedProvider, log: log) else {
+                        return nil
+                    }
                 }
             }
 
@@ -1209,8 +1264,9 @@ actor LyricsRepository {
                 log: log,
                 fromCache: false
             )
-            if !cacheKey.isEmpty {
-                syncDataResponseCache.put(cacheKey, body: response)
+            if !cacheKey.isEmpty,
+               let persistentResponse = redactedSyncDataResponseForPersistence(response) {
+                syncDataResponseCache.put(cacheKey, body: persistentResponse)
             }
             return result
         } catch {
@@ -2052,6 +2108,69 @@ actor LyricsRepository {
         return parseSyncContributors(combined)
     }
 
+    private func redactedSyncDataResponseForPersistence(_ response: String) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(response.utf8)),
+              let redacted = redactContributorIdentityContainers(object),
+              JSONSerialization.isValidJSONObject(redacted),
+              let data = try? JSONSerialization.data(withJSONObject: redacted),
+              let serialized = String(data: data, encoding: .utf8),
+              !serialized.isEmpty else {
+            // Never persist a response we could not safely inspect.
+            return nil
+        }
+        return serialized
+    }
+
+    private func redactContributorIdentityContainers(_ value: Any) -> Any? {
+        if let array = value as? [Any] {
+            return array.compactMap { redactContributorIdentityContainers($0) }
+        }
+        guard let object = value as? [String: Any] else {
+            return value
+        }
+
+        var redacted: [String: Any] = [:]
+        for (key, nestedValue) in object {
+            switch key {
+            case "contributors", "creators", "authors":
+                if let contributors = nestedValue as? [Any] {
+                    redacted[key] = contributors.map(redactedContributorForPersistence)
+                } else {
+                    redacted[key] = redactedContributorForPersistence(nestedValue)
+                }
+            case "creator":
+                redacted[key] = redactedContributorForPersistence(nestedValue)
+            default:
+                redacted[key] = redactContributorIdentityContainers(nestedValue) ?? NSNull()
+            }
+        }
+        return redacted
+    }
+
+    private func redactedContributorForPersistence(_ raw: Any) -> [String: Any] {
+        let object = raw as? [String: Any] ?? [:]
+        let isPrivate = boolValue(object["isPrivate"], fallback: false)
+            || boolValue(object["private"], fallback: false)
+            || (object.keys.contains("profilePublic")
+                && !boolValue(object["profilePublic"], fallback: true))
+        return [
+            "name": "Anonymous",
+            "displayName": "Anonymous",
+            "userHash": NSNull(),
+            "avatarUrl": NSNull(),
+            "linked": false,
+            "profileAvailable": false,
+            "spotifyUserId": NSNull(),
+            "spotifyDisplayName": NSNull(),
+            "spotifyProfileUrl": NSNull(),
+            "profileUrl": NSNull(),
+            "identifier": NSNull(),
+            "anonymous": true,
+            "isPrivate": isPrivate,
+            "identityRedacted": true
+        ]
+    }
+
     private func appendContributorEntries(_ target: inout [Any], object: [String: Any], key: String) {
         if let array = object[key] as? [Any] {
             target.append(contentsOf: array)
@@ -2068,9 +2187,16 @@ actor LyricsRepository {
             var name = ""
             var userHash = ""
             var profileAvailable = false
+            var anonymous = false
+            var isPrivate = false
             if let string = raw as? String {
                 name = string.trimmed
             } else if let object = raw as? [String: Any] {
+                isPrivate = boolValue(object["isPrivate"], fallback: false)
+                    || boolValue(object["private"], fallback: false)
+                    || (object.keys.contains("profilePublic")
+                        && !boolValue(object["profilePublic"], fallback: true))
+                anonymous = boolValue(object["anonymous"], fallback: false) || isPrivate
                 name = IvLyricsUtilities.firstNonEmpty(
                     IvLyricsUtilities.firstNonEmpty(
                         IvLyricsUtilities.firstNonEmpty(stringValue(object["name"]), stringValue(object["nickname"])),
@@ -2080,20 +2206,36 @@ actor LyricsRepository {
                 )
                 userHash = IvLyricsUtilities.firstNonEmpty(IvLyricsUtilities.firstNonEmpty(stringValue(object["userHash"]), stringValue(object["hash"])), stringValue(object["id"]))
                 profileAvailable = boolValue(object["profileAvailable"], fallback: !userHash.isEmpty)
+                if object.keys.contains("linked"), !boolValue(object["linked"], fallback: false) {
+                    profileAvailable = false
+                }
             }
-            if name.trimmed.isEmpty {
+            let identityHidden = anonymous || isPrivate
+            if identityHidden {
+                name = "Anonymous"
+                userHash = ""
+                profileAvailable = false
+            } else if name.trimmed.isEmpty {
                 name = "Anonymous"
             }
             let key = userHash.isEmpty ? "name:\(name.lowercased())" : userHash
-            let anonymous = name.caseInsensitiveCompare("anonymous") == .orderedSame && userHash.isEmpty
-            if anonymous {
+            let legacyAnonymous = !identityHidden && name.caseInsensitiveCompare("anonymous") == .orderedSame && userHash.isEmpty
+            if legacyAnonymous {
                 if anonymousAdded { continue }
                 anonymousAdded = true
-            } else if seen.contains(key) {
+            } else if !identityHidden && seen.contains(key) {
                 continue
             }
-            seen.insert(key)
-            result.append(LyricsResult.SyncContributor(name: name, userHash: userHash, profileAvailable: profileAvailable))
+            if !identityHidden {
+                seen.insert(key)
+            }
+            result.append(LyricsResult.SyncContributor(
+                name: name,
+                userHash: userHash,
+                profileAvailable: profileAvailable,
+                anonymous: anonymous,
+                isPrivate: isPrivate
+            ))
         }
         return result
     }

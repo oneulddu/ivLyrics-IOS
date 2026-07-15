@@ -356,7 +356,8 @@ struct ContentView: View {
                 visible: inAppBrowserVisibleBinding,
                 dragOffset: $inAppBrowserDragOffset,
                 url: browserURL,
-                screenHeight: size.height
+                screenHeight: size.height,
+                onCreatorAuthRedirect: { model.handleCreatorAuthRedirect($0) }
             )
             .transition(.move(edge: .bottom))
             .zIndex(10)
@@ -1632,6 +1633,7 @@ private struct InAppBrowserOverlay: View {
     @Binding var dragOffset: CGFloat
     var url: URL
     var screenHeight: CGFloat
+    var onCreatorAuthRedirect: (URL) -> Bool
     @State private var loading = true
 
     var body: some View {
@@ -1642,7 +1644,8 @@ private struct InAppBrowserOverlay: View {
                 InAppBrowserWebView(
                     initialURL: url,
                     colorScheme: colorScheme,
-                    loading: $loading
+                    loading: $loading,
+                    onCreatorAuthRedirect: onCreatorAuthRedirect
                 )
                 .background(browserBackground)
                 .overlay {
@@ -1824,9 +1827,15 @@ private struct InAppBrowserWebView: UIViewRepresentable {
     var initialURL: URL
     var colorScheme: ColorScheme
     @Binding var loading: Bool
+    var onCreatorAuthRedirect: (URL) -> Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(initialURL: initialURL, colorScheme: colorScheme, loading: $loading)
+        Coordinator(
+            initialURL: initialURL,
+            colorScheme: colorScheme,
+            loading: $loading,
+            onCreatorAuthRedirect: onCreatorAuthRedirect
+        )
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -1843,6 +1852,7 @@ private struct InAppBrowserWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.colorScheme = colorScheme
+        context.coordinator.onCreatorAuthRedirect = onCreatorAuthRedirect
         if context.coordinator.initialURL != initialURL {
             context.coordinator.initialURL = initialURL
             webView.load(URLRequest(url: initialURL))
@@ -1861,10 +1871,17 @@ private struct InAppBrowserWebView: UIViewRepresentable {
         var initialURL: URL
         var colorScheme: ColorScheme
         @Binding var loading: Bool
+        var onCreatorAuthRedirect: (URL) -> Bool
 
-        init(initialURL: URL, colorScheme: ColorScheme, loading: Binding<Bool>) {
+        init(
+            initialURL: URL,
+            colorScheme: ColorScheme,
+            loading: Binding<Bool>,
+            onCreatorAuthRedirect: @escaping (URL) -> Bool
+        ) {
             self.initialURL = initialURL
             self.colorScheme = colorScheme
+            self.onCreatorAuthRedirect = onCreatorAuthRedirect
             _loading = loading
         }
 
@@ -1893,6 +1910,11 @@ private struct InAppBrowserWebView: UIViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
+            if onCreatorAuthRedirect(url) {
+                loading = false
+                decisionHandler(.cancel)
+                return
+            }
             if shouldOpenExternally(url) {
                 UIApplication.shared.open(url)
                 decisionHandler(.cancel)
@@ -1915,7 +1937,23 @@ private struct InAppBrowserWebView: UIViewRepresentable {
             if sameLyricsProfileNavigation(url, initialURL) {
                 return false
             }
+            if isCreatorLoginWebURL(initialURL), isCreatorLoginWebURL(url) {
+                return false
+            }
             return true
+        }
+
+        private func isCreatorLoginWebURL(_ url: URL) -> Bool {
+            let scheme = url.scheme?.lowercased() ?? ""
+            guard scheme == "https" else { return false }
+            let host = url.host?.lowercased() ?? ""
+            return host == "discord.com"
+                || host.hasSuffix(".discord.com")
+                || host == "discordapp.com"
+                || host.hasSuffix(".discordapp.com")
+                || host == "ivl.is"
+                || host == "lyrics.ivl.is"
+                || host == "lyrics.api.ivl.is"
         }
 
         private func injectProfileChrome(into webView: WKWebView, url: URL?) {
@@ -2000,6 +2038,7 @@ private struct InAppBrowserWebView: View {
     var initialURL: URL
     var colorScheme: ColorScheme
     @Binding var loading: Bool
+    var onCreatorAuthRedirect: (URL) -> Bool
 
     var body: some View {
         Text(initialURL.absoluteString)
@@ -3682,20 +3721,27 @@ private struct LyricsContributorCredit: View {
 
     @ViewBuilder
     private func contributorNameView(_ contributor: LyricsResult.SyncContributor) -> some View {
-        if interactive, contributor.profileAvailable, !contributor.userHash.trimmed.isEmpty {
+        if interactive,
+           !contributor.identityHidden,
+           contributor.profileAvailable,
+           !contributor.userHash.trimmed.isEmpty {
             Button {
                 Task {
                     await model.openSyncContributorProfile(contributor)
                 }
             } label: {
-                Text(contributor.name)
+                Text(contributorDisplayName(contributor))
                     .foregroundStyle(.white.opacity(linkedNameOpacity))
             }
             .buttonStyle(.plain)
         } else {
-            Text(contributor.name)
+            Text(contributorDisplayName(contributor))
                 .foregroundStyle(.white.opacity(nameOpacity))
         }
+    }
+
+    private func contributorDisplayName(_ contributor: LyricsResult.SyncContributor) -> String {
+        contributor.identityHidden ? settings.t("lyrics.credit_anonymous") : contributor.name
     }
 }
 
@@ -6827,6 +6873,7 @@ struct SettingsView: View {
             if settings.providerId == "paxsenix" {
                 Task { await refreshPaxsenixModels() }
             }
+            model.prepareCreatorPrivacySettings()
         }
         .onChange(of: settings.providerId) { _, providerId in
             guard providerId == "paxsenix" else { return }
@@ -7334,6 +7381,63 @@ struct SettingsView: View {
 
     private var toolsSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
+            settingsSection(
+                settings.t("creator_privacy.section"),
+                description: settings.t("creator_privacy.section_desc")
+            ) {
+                settingsCard(
+                    settings.t("creator_privacy.private_title"),
+                    description: settings.t("creator_privacy.private_desc")
+                ) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Group {
+                            if model.creatorPrivacyRequestInFlight {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Circle()
+                                    .fill(creatorPrivacyStatusColor)
+                                    .frame(width: 8, height: 8)
+                            }
+                        }
+                        .frame(width: 18, height: 18)
+
+                        Text(model.creatorPrivacyStatusText)
+                            .font(.pretendard(13))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Spacer(minLength: 10)
+
+                        Toggle("", isOn: creatorPrivacyBinding)
+                            .labelsHidden()
+                            .fixedSize()
+                            .disabled(!model.creatorPrivacyCanEdit)
+                            .accessibilityLabel(settings.t("creator_privacy.private_title"))
+                            .accessibilityValue(model.creatorPrivacyStatusText)
+                    }
+
+                    HStack(spacing: 10) {
+                        if model.creatorAccountConnected {
+                            settingsActionButton(settings.t("creator_privacy.refresh")) {
+                                model.refreshCreatorPrivacy()
+                            }
+                            .disabled(model.creatorPrivacyRequestInFlight)
+
+                            settingsActionButton(settings.t("creator_privacy.disconnect"), role: .destructive) {
+                                model.disconnectCreatorAccount()
+                            }
+                            .disabled(model.creatorPrivacyRequestInFlight)
+                        } else {
+                            settingsActionButton(settings.t("creator_privacy.login")) {
+                                model.startCreatorAccountLogin()
+                            }
+                            .disabled(model.creatorPrivacyRequestInFlight || model.creatorPrivacyLoginInProgress)
+                        }
+                    }
+                }
+            }
+
             settingsSection(settings.t("section.spotify_api")) {
                 settingsCard(settings.t("section.spotify_api")) {
                     SpotifySetupInstructionsPanel()
@@ -7594,6 +7698,26 @@ struct SettingsView: View {
 
     private var effectiveRuleSourceLang: String {
         model.effectiveSelectedRuleSourceLang
+    }
+
+    private var creatorPrivacyBinding: Binding<Bool> {
+        Binding(
+            get: { model.creatorPrivacyIsPrivate },
+            set: { model.setCreatorPrivacy($0) }
+        )
+    }
+
+    private var creatorPrivacyStatusColor: Color {
+        switch model.creatorPrivacyState {
+        case .privateProfile:
+            return Color(red: 0.67, green: 0.55, blue: 1.0)
+        case .publicProfile:
+            return Color(red: 0.21, green: 0.87, blue: 0.52)
+        case .loading, .notLoaded:
+            return Color.white.opacity(0.40)
+        case .signedOut:
+            return Color.white.opacity(0.24)
+        }
     }
 
     private var selectedProvider: AppSettings.Provider {

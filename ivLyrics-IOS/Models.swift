@@ -596,13 +596,52 @@ struct LyricsResult: Codable, Equatable, Sendable {
         var name: String
         var userHash: String
         var profileAvailable: Bool
+        var anonymous: Bool
+        var isPrivate: Bool
 
-        init(name: String, userHash: String = "", profileAvailable: Bool = false) {
+        var identityHidden: Bool {
+            anonymous || isPrivate
+        }
+
+        init(
+            name: String,
+            userHash: String = "",
+            profileAvailable: Bool = false,
+            anonymous: Bool = false,
+            isPrivate: Bool = false
+        ) {
             let safeName = name.trimmed
             let safeHash = userHash.trimmed
-            self.name = safeName.isEmpty ? "Anonymous" : safeName
-            self.userHash = safeHash
-            self.profileAvailable = profileAvailable && !safeHash.isEmpty
+            let shouldHideIdentity = anonymous || isPrivate
+            self.name = shouldHideIdentity || safeName.isEmpty ? "Anonymous" : safeName
+            self.userHash = shouldHideIdentity ? "" : safeHash
+            self.profileAvailable = !shouldHideIdentity && profileAvailable && !safeHash.isEmpty
+            self.anonymous = shouldHideIdentity
+            self.isPrivate = isPrivate
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case name, userHash, profileAvailable, anonymous, isPrivate
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                name: try container.decodeIfPresent(String.self, forKey: .name) ?? "",
+                userHash: try container.decodeIfPresent(String.self, forKey: .userHash) ?? "",
+                profileAvailable: try container.decodeIfPresent(Bool.self, forKey: .profileAvailable) ?? false,
+                anonymous: try container.decodeIfPresent(Bool.self, forKey: .anonymous) ?? false,
+                isPrivate: try container.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
+            )
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(name, forKey: .name)
+            try container.encode(userHash, forKey: .userHash)
+            try container.encode(profileAvailable, forKey: .profileAvailable)
+            try container.encode(anonymous, forKey: .anonymous)
+            try container.encode(isPrivate, forKey: .isPrivate)
         }
     }
 }
