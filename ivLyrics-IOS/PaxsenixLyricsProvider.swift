@@ -555,33 +555,31 @@ enum PaxsenixLyricsProvider {
         guard isTargetStructuredPayload(payload),
               let lines = payload["lyrics"] as? [[String: Any]],
               !lines.isEmpty else { return [] }
-        let anchoredHeaderIndexes = leadingHeaderIndexesBeforeEarlyCredit(
+        let earlyCreditIndexes = leadingIndexesThroughEarlyCredit(
             lines: lines,
-            track: track,
             references: references
         )
         var result = Set<Int>()
         var hasStrongAnchor = false
         var acceptsCreditContinuation = false
         var previousMetadataStart: Int64?
-        for index in 0..<min(lines.count, 12) {
+        for index in 0..<lines.count {
             let line = lines[index]
             let start = lineStartTime(line)
-            if index == 0, start >= 30_000 { break }
             let text = structuredLineText(line, reference: references[start])
             let isTitleHeader = index == 0 && isTitleArtistHeader(text, track: track)
-            let isAnchoredHeaderContinuation = anchoredHeaderIndexes.contains(index)
+            let isEarlyCreditPrefix = earlyCreditIndexes.contains(index)
             let isCredit = isCreditMetadataText(text)
             let isCopyright = hasStrongAnchor && isCopyrightMetadataText(text)
             let isCreditContinuation = acceptsCreditContinuation
                 && isNearPreviousMetadataLine(start, previous: previousMetadataStart)
                 && isCreditContinuationText(text)
             guard isTitleHeader
-                    || isAnchoredHeaderContinuation
+                    || isEarlyCreditPrefix
                     || isCredit
                     || isCreditContinuation
                     || isCopyright else { break }
-            if isTitleHeader || isAnchoredHeaderContinuation || isCredit { hasStrongAnchor = true }
+            if isTitleHeader || isEarlyCreditPrefix || isCredit { hasStrongAnchor = true }
             acceptsCreditContinuation = isCredit || isCreditContinuation
             previousMetadataStart = start
             result.insert(index)
@@ -589,57 +587,21 @@ enum PaxsenixLyricsProvider {
         return result
     }
 
-    private static func leadingHeaderIndexesBeforeEarlyCredit(
+    private static func leadingIndexesThroughEarlyCredit(
         lines: [[String: Any]],
-        track: TrackSnapshot,
         references: [Int64: String]
     ) -> Set<Int> {
-        let earlyLimit = min(lines.count, 4)
-        guard earlyLimit > 1,
+        let earlyLimit = min(lines.count, 10)
+        guard earlyLimit > 0,
               let creditIndex = (0..<earlyLimit).first(where: { index in
                   let start = lineStartTime(lines[index])
-                  return isStrongCreditMetadataText(
+                  return isCreditMetadataText(
                       structuredLineText(lines[index], reference: references[start])
                   )
-              }),
-              creditIndex > 0,
-              lineStartTime(lines[0]) < 30_000 else {
+              }) else {
             return []
         }
-        let headerLines = lines[..<creditIndex]
-        guard headerLines.allSatisfy({ line in
-            let start = lineStartTime(line)
-            let text = structuredLineText(line, reference: references[start])
-            return !text.isEmpty
-                && text.count <= 140
-                && structuredBackgroundText(line).isEmpty
-        }) else {
-            return []
-        }
-        let combinedHeader = headerLines.map { line in
-            let start = lineStartTime(line)
-            return structuredLineText(line, reference: references[start])
-        }.joined(separator: " ")
-        let expectedTitle = normalizeMetadataIdentity(track.title)
-        let normalizedHeader = normalizeMetadataIdentity(combinedHeader)
-        guard !expectedTitle.isEmpty else { return [] }
-        let titleMatches = normalizedHeader.contains(expectedTitle)
-        if !titleMatches {
-            let consecutiveStrongCredits = lines[creditIndex..<earlyLimit]
-                .prefix { line in
-                    let start = lineStartTime(line)
-                    return isStrongCreditMetadataText(
-                        structuredLineText(line, reference: references[start])
-                    )
-                }
-                .count
-            guard creditIndex == 1,
-                  consecutiveStrongCredits >= 2,
-                  isDashSeparatedHeaderLike(combinedHeader) else {
-                return []
-            }
-        }
-        return Set(0..<creditIndex)
+        return Set(0...creditIndex)
     }
 
     private static func isDashSeparatedHeaderLike(_ text: String) -> Bool {
@@ -786,7 +748,13 @@ enum PaxsenixLyricsProvider {
                 return word.allSatisfy(\.isNumber)
             }
             let first = String(firstLetter)
-            return first == first.uppercased() && first != first.lowercased()
+            let startsWithUppercase = first == first.uppercased() && first != first.lowercased()
+            let casedLetters = word.filter { character in
+                character.isLetter && character.lowercased() != character.uppercased()
+            }
+            let isMixedCaseAlias = casedLetters.contains(where: \.isLowercase)
+                && casedLetters.contains(where: \.isUppercase)
+            return startsWithUppercase || isMixedCaseAlias
         }
     }
 
