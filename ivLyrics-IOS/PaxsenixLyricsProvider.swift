@@ -1,6 +1,7 @@
 import Foundation
 
 enum PaxsenixLyricsProvider {
+    private static let cacheEntityRevision = "|paxsenix-entities-v1"
     private static let encodedEndpoints = [
         "homepage": "aHR0cHM6Ly9seXJpY3MucGF4c2VuaXgub3Jn",
         "catalogSearch": "aHR0cHM6Ly9pdHVuZXMuYXBwbGUuY29tL3NlYXJjaA==",
@@ -54,6 +55,45 @@ enum PaxsenixLyricsProvider {
         pattern: titleVersionSuffixPattern,
         options: .caseInsensitive
     )
+    private static let lyricEntityPattern = #"&(?:#[xX][0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]+);"#
+    private static let lyricEntityRegex = try? NSRegularExpression(pattern: lyricEntityPattern)
+    private static let namedLyricEntities: [String: String] = [
+        "amp": "&", "apos": "'", "quot": "\"", "lt": "<", "gt": ">"
+    ]
+#if DEBUG
+    private static let lyricEntityRegressionChecks: Void = {
+        assert(decodeLyricEntities("Don&apos;t stop") == "Don't stop")
+        assert(decodeLyricEntities("R&B &amp; friends &#39;now&#x27;") == "R&B & friends 'now'")
+        assert(decodeLyricEntities("&amp;apos;") == "&apos;")
+        assert(decodeLyricEntities("keep &unknown; and &#xD800;") == "keep &unknown; and &#xD800;")
+
+        let cached = LyricsResult(
+            lines: [LyricsLine(startTimeMs: 0, endTimeMs: 1, text: "Don&apos;t &amp;apos;")],
+            providerLabel: "Lyrically (Paxsenix)",
+            detail: "",
+            karaoke: false,
+            providerId: "paxsenix",
+            selectionPolicyKey: "provider-policy-v1"
+        )
+        assert(!canReuseCachedResult(cached))
+        let marked = markEntitiesDecoded(in: cached)
+        assert(canReuseCachedResult(marked))
+        assert(marked.lines.first?.text == "Don&apos;t &amp;apos;")
+        assert(markEntitiesDecoded(in: marked) == marked)
+
+        let splitApostrophe = parseTimedTokens(
+            [
+                ["text": "Don", "part": false, "timestamp": 0, "endtime": 100],
+                ["text": "&apos;", "part": false, "timestamp": 100, "endtime": 150],
+                ["text": "t", "part": false, "timestamp": 150, "endtime": 200]
+            ],
+            fallbackStart: 0,
+            fallbackEnd: 200,
+            referenceText: nil
+        )
+        assert(splitApostrophe.map(\.text).joined() == "Don't")
+    }()
+#endif
     private static let speakerPalette: [(color: String, fallback: String)] = [
         ("#a8ccff", "MALE 1"),
         ("#ffb8c7", "FEMALE 1"),
@@ -81,7 +121,10 @@ enum PaxsenixLyricsProvider {
     ]
 
     static var projectURL: String {
-        endpoint("homepage") ?? ""
+#if DEBUG
+        _ = lyricEntityRegressionChecks
+#endif
+        return endpoint("homepage") ?? ""
     }
 
     struct FetchOutcome: Sendable {
@@ -255,6 +298,9 @@ enum PaxsenixLyricsProvider {
         durationMs: Int64,
         track: TrackSnapshot
     ) throws -> ParsedVariants? {
+#if DEBUG
+        _ = lyricEntityRegressionChecks
+#endif
         if isTargetStructuredPayload(payload),
            let structured = parseStructuredLyrics(payload, requestedDurationMs: durationMs, track: track) {
             return structured
@@ -267,13 +313,21 @@ enum PaxsenixLyricsProvider {
             return variants(from: parsed)
         }
         if let lrc = payload["lrc"] as? String, !lrc.trimmed.isEmpty {
-            let parsed = try UnisonLyricsProvider.parseExternalLyrics(lrc, format: "lrc", durationMs: durationMs)
+            let parsed = try UnisonLyricsProvider.parseExternalLyrics(
+                decodeLyricEntities(lrc),
+                format: "lrc",
+                durationMs: durationMs
+            )
             return variants(from: parsed)
         }
         let plain = string(payload["plain"]).trimmed.isEmpty
             ? string(payload["lyrics"])
             : string(payload["plain"])
-        let parsed = try UnisonLyricsProvider.parseExternalLyrics(plain, format: "plain", durationMs: durationMs)
+        let parsed = try UnisonLyricsProvider.parseExternalLyrics(
+            decodeLyricEntities(plain),
+            format: "plain",
+            durationMs: durationMs
+        )
         return variants(from: parsed)
     }
 
@@ -368,7 +422,9 @@ enum PaxsenixLyricsProvider {
                 fallbackEnd: end,
                 referenceText: nil
             ).map { clamp($0, end: end) }
-            let rawLeadText = rawLine["text"] is String ? string(rawLine["text"]).trimmed : ""
+            let rawLeadText = rawLine["text"] is String
+                ? decodeLyricEntities(string(rawLine["text"])).trimmed
+                : ""
             let leadText = IvLyricsUtilities.firstNonEmpty(
                 leadSyllables.map { $0.text }.joined().trimmed,
                 rawLeadText
@@ -446,7 +502,7 @@ enum PaxsenixLyricsProvider {
         let referenceBoundaries = referenceWhitespaceBoundaries(items: items, referenceText: referenceText)
         var consumedCharacters = 0
         return items.enumerated().compactMap { index, item -> LyricsLine.Syllable? in
-            var text = string(item["text"])
+            var text = decodeLyricEntities(string(item["text"]))
             guard !text.isEmpty else { return nil }
             if let referenceBoundaries {
                 text = text.trimmed
@@ -473,15 +529,18 @@ enum PaxsenixLyricsProvider {
         referenceText: String?
     ) -> Set<Int>? {
         guard let referenceText, !referenceText.isEmpty else { return nil }
-        let compactTokens = items.map { normalizeReferenceSpacingCharacters(string($0["text"])) }
+        let decodedReferenceText = decodeLyricEntities(referenceText)
+        let compactTokens = items.map {
+            normalizeReferenceSpacingCharacters(decodeLyricEntities(string($0["text"])))
+        }
         guard compactTokens.allSatisfy({ !$0.isEmpty }),
-              compactTokens.joined() == normalizeReferenceSpacingCharacters(referenceText) else {
+              compactTokens.joined() == normalizeReferenceSpacingCharacters(decodedReferenceText) else {
             return nil
         }
         var boundaries = Set<Int>()
         var characterCount = 0
         var inWhitespace = false
-        for character in referenceText {
+        for character in decodedReferenceText {
             if character.isWhitespace {
                 if !inWhitespace, characterCount > 0 { boundaries.insert(characterCount) }
                 inWhitespace = true
@@ -501,10 +560,10 @@ enum PaxsenixLyricsProvider {
         guard let next,
               (item["part"] as? Bool) == false,
               text.last?.isWhitespace != true else { return false }
-        let nextText = string(next["text"])
+        let nextText = decodeLyricEntities(string(next["text"]))
         guard let first = nextText.first,
               !first.isWhitespace,
-              !",.;:!?%)]}".contains(first),
+              !",.;:!?%)]}'’‘".contains(first),
               let last = text.last,
               !"-‐‑‒–—'’".contains(last) else { return false }
         return true
@@ -841,18 +900,94 @@ enum PaxsenixLyricsProvider {
     }
 
     private static func structuredLineText(_ line: [String: Any], reference: String?) -> String {
-        if let reference, !reference.trimmed.isEmpty { return reference.trimmed }
-        if let items = line["text"] as? [[String: Any]] {
-            return items.map { string($0["text"]) }.joined().trimmed
+        if let reference, !reference.trimmed.isEmpty {
+            return decodeLyricEntities(reference).trimmed
         }
-        return string(line["text"]).trimmed
+        if let items = line["text"] as? [[String: Any]] {
+            return items.map { decodeLyricEntities(string($0["text"])) }.joined().trimmed
+        }
+        return decodeLyricEntities(string(line["text"])).trimmed
     }
 
     private static func structuredBackgroundText(_ line: [String: Any]) -> String {
         if let items = line["backgroundText"] as? [[String: Any]] {
-            return items.map { string($0["text"]) }.joined().trimmed
+            return items.map { decodeLyricEntities(string($0["text"])) }.joined().trimmed
         }
-        return string(line["backgroundText"]).trimmed
+        return decodeLyricEntities(string(line["backgroundText"])).trimmed
+    }
+
+    static func canReuseCachedResult(_ result: LyricsResult) -> Bool {
+        let providerId = result.providerId.trimmed.lowercased()
+        let providerLabel = result.providerLabel.trimmed.lowercased()
+        let isPaxsenix = providerId == "paxsenix"
+            || providerLabel.contains("paxsenix")
+            || providerLabel.contains("lyrically")
+        return !isPaxsenix || result.selectionPolicyKey.hasSuffix(cacheEntityRevision)
+    }
+
+    static func markEntitiesDecoded(in result: LyricsResult) -> LyricsResult {
+        guard result.providerId == "paxsenix",
+              !result.selectionPolicyKey.hasSuffix(cacheEntityRevision) else { return result }
+        var marked = result
+        marked.selectionPolicyKey += cacheEntityRevision
+        return marked
+    }
+
+    private static func decodeLyricEntities(_ value: String) -> String {
+        guard value.contains("&"), let regex = lyricEntityRegex else { return value }
+        let source = value as NSString
+        let matches = regex.matches(
+            in: value,
+            range: NSRange(location: 0, length: source.length)
+        )
+        guard !matches.isEmpty else { return value }
+
+        var result = ""
+        result.reserveCapacity(value.count)
+        var cursor = 0
+        for match in matches {
+            let range = match.range
+            if range.location > cursor {
+                result += source.substring(with: NSRange(location: cursor, length: range.location - cursor))
+            }
+            let entity = source.substring(with: range)
+            result += decodedLyricEntity(entity) ?? entity
+            cursor = NSMaxRange(range)
+        }
+        if cursor < source.length {
+            result += source.substring(from: cursor)
+        }
+        return result
+    }
+
+    private static func decodedLyricEntity(_ entity: String) -> String? {
+        guard entity.first == "&", entity.last == ";" else { return nil }
+        let body = String(entity.dropFirst().dropLast())
+        if body.hasPrefix("#") {
+            let numeric = String(body.dropFirst())
+            let radix: Int
+            let digits: String
+            if numeric.first == "x" || numeric.first == "X" {
+                radix = 16
+                digits = String(numeric.dropFirst())
+            } else {
+                radix = 10
+                digits = numeric
+            }
+            guard let value = UInt32(digits, radix: radix),
+                  let scalar = UnicodeScalar(value),
+                  isRenderableLyricScalar(scalar) else { return nil }
+            return String(scalar)
+        }
+        return namedLyricEntities[body]
+    }
+
+    private static func isRenderableLyricScalar(_ scalar: UnicodeScalar) -> Bool {
+        let value = scalar.value
+        if value < 0x20 {
+            return value == 0x09 || value == 0x0A || value == 0x0D
+        }
+        return !(0x7F...0x9F).contains(value)
     }
 
     private static func lineStartTime(_ line: [String: Any]) -> Int64 {

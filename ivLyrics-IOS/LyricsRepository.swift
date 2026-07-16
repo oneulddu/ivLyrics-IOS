@@ -107,6 +107,10 @@ actor LyricsRepository {
             cache.removeValue(forKey: key)
             return nil
         }
+        guard PaxsenixLyricsProvider.canReuseCachedResult(entry.result) else {
+            cache.removeValue(forKey: key)
+            return nil
+        }
         return entry.result
     }
 
@@ -121,6 +125,19 @@ actor LyricsRepository {
             result: result,
             savedAtMs: nowMs()
         )
+    }
+
+    private func markProviderLyricsNormalized(_ result: LyricsResult) -> LyricsResult {
+        PaxsenixLyricsProvider.markEntitiesDecoded(in: result)
+    }
+
+    private func reusableDiskCachedLyrics(_ key: String) -> LyricsResult? {
+        guard let result = diskCache.get(key) else { return nil }
+        guard PaxsenixLyricsProvider.canReuseCachedResult(result) else {
+            diskCache.remove(key)
+            return nil
+        }
+        return result
     }
 
     private func privacySafeContributorFallback(_ result: LyricsResult) -> LyricsResult {
@@ -263,7 +280,7 @@ actor LyricsRepository {
                 logs.removeAll(keepingCapacity: true)
             }
         }
-        if cachedBase == nil, let diskCached = diskCache.get(cacheKey) {
+        if cachedBase == nil, let diskCached = reusableDiskCachedLyrics(cacheKey) {
             putMemoryCachedLyrics(cacheKey, result: diskCached)
             let cachedIsrc = IvLyricsUtilities.firstNonEmpty(diskCached.isrc, track.isrc)
             if !shouldRevalidateCachedResult(diskCached, settings: settings, resolvedIsrc: cachedIsrc) {
@@ -374,9 +391,11 @@ actor LyricsRepository {
                         spotifyTrackId: spotifyTrackId,
                         log: log
                     ) {
-                        let selected = applied.withSelection(
-                            providerId: preferredSyncProvider,
-                            selectionPolicyKey: settings.lyricsProviderPolicySignature
+                        let selected = markProviderLyricsNormalized(
+                            applied.withSelection(
+                                providerId: preferredSyncProvider,
+                                selectionPolicyKey: settings.lyricsProviderPolicySignature
+                            )
                         )
                         putMemoryCachedLyrics(cacheKey, result: selected)
                         diskCache.put(cacheKey, result: selected)
@@ -404,9 +423,11 @@ actor LyricsRepository {
                     spotifyTrackId: spotifyTrackId,
                     log: log
                 ) {
-                    let selected = applied.withSelection(
-                        providerId: cachedBase.providerId,
-                        selectionPolicyKey: settings.lyricsProviderPolicySignature
+                    let selected = markProviderLyricsNormalized(
+                        applied.withSelection(
+                            providerId: cachedBase.providerId,
+                            selectionPolicyKey: settings.lyricsProviderPolicySignature
+                        )
                     )
                     putMemoryCachedLyrics(cacheKey, result: selected)
                     diskCache.put(cacheKey, result: selected)
@@ -506,9 +527,11 @@ actor LyricsRepository {
         }
 
         if let selected {
-            let selectedWithPolicy = selected.withSelection(
-                providerId: selectedProvider,
-                selectionPolicyKey: settings.lyricsProviderPolicySignature
+            let selectedWithPolicy = markProviderLyricsNormalized(
+                selected.withSelection(
+                    providerId: selectedProvider,
+                    selectionPolicyKey: settings.lyricsProviderPolicySignature
+                )
             )
             log("provider selected: \(selectedProvider) / type=\(selectedType) / lines=\(selected.lines.count)")
             putMemoryCachedLyrics(cacheKey, result: selectedWithPolicy)
