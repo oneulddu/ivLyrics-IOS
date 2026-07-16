@@ -10,6 +10,12 @@ enum PaxsenixLyricsProvider {
     ]
     private static let encodedStructuredProviderId = "a3Vnb3U="
     private static let requestTimeout: TimeInterval = 12
+    private static let structuredReferenceLineRegex = try? NSRegularExpression(
+        pattern: #"^\[(\d+),(\d+)\](.*)$"#
+    )
+    private static let structuredReferenceTokenRegex = try? NSRegularExpression(
+        pattern: #"<\d+,\d+,\d+>"#
+    )
     private static let speakerPalette: [(color: String, fallback: String)] = [
         ("#a8ccff", "MALE 1"),
         ("#ffb8c7", "FEMALE 1"),
@@ -529,7 +535,7 @@ enum PaxsenixLyricsProvider {
             string(rootRaw?["lyrics_text"])
         )
         guard !source.isEmpty,
-              let regex = try? NSRegularExpression(pattern: #"^\[(\d+),(\d+)\](.*)$"#) else {
+              let regex = structuredReferenceLineRegex else {
             return [:]
         }
         var result: [Int64: String] = [:]
@@ -540,8 +546,17 @@ enum PaxsenixLyricsProvider {
                 range: NSRange(location: 0, length: ns.length)
             ), match.numberOfRanges >= 4 else { continue }
             let timestamp = Int64(ns.substring(with: match.range(at: 1)))
-            let text = ns.substring(with: match.range(at: 3))
-                .regexReplacing(#"<\d+,\d+,\d+>"#, with: "")
+            let rawText = ns.substring(with: match.range(at: 3))
+            let text: String
+            if let tokenRegex = structuredReferenceTokenRegex {
+                text = tokenRegex.stringByReplacingMatches(
+                    in: rawText,
+                    range: NSRange(location: 0, length: (rawText as NSString).length),
+                    withTemplate: ""
+                )
+            } else {
+                text = rawText.regexReplacing(#"<\d+,\d+,\d+>"#, with: "")
+            }
             if let timestamp { result[timestamp] = text }
         }
         return result
