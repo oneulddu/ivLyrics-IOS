@@ -16,6 +16,32 @@ enum PaxsenixLyricsProvider {
     private static let structuredReferenceTokenRegex = try? NSRegularExpression(
         pattern: #"<\d+,\d+,\d+>"#
     )
+    private static let comparableApostrophePattern = #"[’‘`´]"#
+    private static let comparableApostropheRegex = try? NSRegularExpression(
+        pattern: comparableApostrophePattern
+    )
+    private static let comparableFeaturingPattern = #"\b(feat(?:uring)?|ft)\.?\b"#
+    private static let comparableFeaturingRegex = try? NSRegularExpression(
+        pattern: comparableFeaturingPattern,
+        options: .caseInsensitive
+    )
+    private static let comparableNonAlphanumericPattern = #"[^\p{L}\p{N}]+"#
+    private static let comparableNonAlphanumericRegex = try? NSRegularExpression(
+        pattern: comparableNonAlphanumericPattern
+    )
+    private static let comparableWhitespacePattern = #"\s+"#
+    private static let comparableWhitespaceRegex = try? NSRegularExpression(
+        pattern: comparableWhitespacePattern
+    )
+    private static let titleDecorationPattern = #"\([^)]*\)|\[[^\]]*\]"#
+    private static let titleDecorationRegex = try? NSRegularExpression(
+        pattern: titleDecorationPattern
+    )
+    private static let titleVersionSuffixPattern = #"\s+-\s+(?:remaster(?:ed)?|live|version|edit|mix).*$"#
+    private static let titleVersionSuffixRegex = try? NSRegularExpression(
+        pattern: titleVersionSuffixPattern,
+        options: .caseInsensitive
+    )
     private static let speakerPalette: [(color: String, fallback: String)] = [
         ("#a8ccff", "MALE 1"),
         ("#ffb8c7", "FEMALE 1"),
@@ -883,33 +909,78 @@ enum PaxsenixLyricsProvider {
     }
 
     private static func normalizeComparable(_ value: String) -> String {
-        value.nfkc()
-            .lowercased()
-            .replacingOccurrences(of: #"[’‘`´]"#, with: "'", options: .regularExpression)
-            .replacingOccurrences(
-                of: #"\b(feat(?:uring)?|ft)\.?\b"#,
-                with: " ",
-                options: [.regularExpression, .caseInsensitive]
-            )
-            .regexReplacing(#"[^\p{L}\p{N}]+"#, with: " ")
-            .trimmed
-            .regexReplacing(#"\s+"#, with: " ")
+        var normalized = replaceMatches(
+            in: value.nfkc().lowercased(),
+            regex: comparableApostropheRegex,
+            fallbackPattern: comparableApostrophePattern,
+            with: "'"
+        )
+        normalized = replaceMatches(
+            in: normalized,
+            regex: comparableFeaturingRegex,
+            fallbackPattern: comparableFeaturingPattern,
+            fallbackOptions: [.regularExpression, .caseInsensitive],
+            with: " "
+        )
+        normalized = replaceMatches(
+            in: normalized,
+            regex: comparableNonAlphanumericRegex,
+            fallbackPattern: comparableNonAlphanumericPattern,
+            with: " "
+        ).trimmed
+        return replaceMatches(
+            in: normalized,
+            regex: comparableWhitespaceRegex,
+            fallbackPattern: comparableWhitespacePattern,
+            with: " "
+        )
     }
 
     private static func normalizeTitleCore(_ value: String) -> String {
         normalizeComparable(
-            value
-                .regexReplacing(#"\([^)]*\)|\[[^\]]*\]"#, with: " ")
-                .replacingOccurrences(
-                    of: #"\s+-\s+(?:remaster(?:ed)?|live|version|edit|mix).*$"#,
-                    with: " ",
-                    options: [.regularExpression, .caseInsensitive]
-                )
+            replaceMatches(
+                in: replaceMatches(
+                    in: value,
+                    regex: titleDecorationRegex,
+                    fallbackPattern: titleDecorationPattern,
+                    with: " "
+                ),
+                regex: titleVersionSuffixRegex,
+                fallbackPattern: titleVersionSuffixPattern,
+                fallbackOptions: [.regularExpression, .caseInsensitive],
+                with: " "
+            )
         )
     }
 
     private static func normalizeMetadataIdentity(_ value: String) -> String {
-        normalizeTitleCore(value).regexReplacing(#"\s+"#, with: "")
+        replaceMatches(
+            in: normalizeTitleCore(value),
+            regex: comparableWhitespaceRegex,
+            fallbackPattern: comparableWhitespacePattern,
+            with: ""
+        )
+    }
+
+    private static func replaceMatches(
+        in value: String,
+        regex: NSRegularExpression?,
+        fallbackPattern: String,
+        fallbackOptions: String.CompareOptions = .regularExpression,
+        with replacement: String
+    ) -> String {
+        guard let regex else {
+            return value.replacingOccurrences(
+                of: fallbackPattern,
+                with: replacement,
+                options: fallbackOptions
+            )
+        }
+        return regex.stringByReplacingMatches(
+            in: value,
+            range: NSRange(value.startIndex..<value.endIndex, in: value),
+            withTemplate: replacement
+        )
     }
 
     private static func quality(_ candidate: ParsedCandidate) -> Double {
