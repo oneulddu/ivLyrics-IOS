@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.16",
+          "buildVersion": "21",
+          "date": "2026-07-16",
+          "localizedDescription": "v1.0.16은 Paxsenix 및 Unison 가사 제공업체의 검색과 참조 처리 로직을 개선했습니다.\n\nv1.0.16 improves search and reference handling for the Paxsenix and Unison lyrics providers.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.16/ivLyrics-IOS-v1.0.16-unsigned.ipa",
+          "size": 6593052,
+          "sha256": "1c2d4787b50b3a436950955ef2b28d54497b7e4355971f9aa06307f7787493e0",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.15",
           "buildVersion": "20",
           "date": "2026-07-15",
