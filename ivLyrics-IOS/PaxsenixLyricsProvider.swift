@@ -16,6 +16,18 @@ enum PaxsenixLyricsProvider {
     private static let structuredReferenceTokenRegex = try? NSRegularExpression(
         pattern: #"<\d+,\d+,\d+>"#
     )
+    private static let referenceDoubleQuotePattern = #"[“”„‟]"#
+    private static let referenceDoubleQuoteRegex = try? NSRegularExpression(
+        pattern: referenceDoubleQuotePattern
+    )
+    private static let referenceSingleQuotePattern = #"[‘’‚‛]"#
+    private static let referenceSingleQuoteRegex = try? NSRegularExpression(
+        pattern: referenceSingleQuotePattern
+    )
+    private static let referenceWhitespacePattern = #"\s"#
+    private static let referenceWhitespaceRegex = try? NSRegularExpression(
+        pattern: referenceWhitespacePattern
+    )
     private static let comparableApostrophePattern = #"[’‘`´]"#
     private static let comparableApostropheRegex = try? NSRegularExpression(
         pattern: comparableApostrophePattern
@@ -849,10 +861,24 @@ enum PaxsenixLyricsProvider {
     }
 
     private static func normalizeReferenceSpacingCharacters(_ value: String) -> String {
-        value.nfkc()
-            .replacingOccurrences(of: #"[“”„‟]"#, with: "\"", options: .regularExpression)
-            .replacingOccurrences(of: #"[‘’‚‛]"#, with: "'", options: .regularExpression)
-            .regexReplacing(#"\s"#, with: "")
+        let doubleQuotesNormalized = replaceMatches(
+            in: value.nfkc(),
+            regex: referenceDoubleQuoteRegex,
+            fallbackPattern: referenceDoubleQuotePattern,
+            with: "\""
+        )
+        let quotesNormalized = replaceMatches(
+            in: doubleQuotesNormalized,
+            regex: referenceSingleQuoteRegex,
+            fallbackPattern: referenceSingleQuotePattern,
+            with: "'"
+        )
+        return replaceMatches(
+            in: quotesNormalized,
+            regex: referenceWhitespaceRegex,
+            fallbackPattern: referenceWhitespacePattern,
+            with: ""
+        )
     }
 
     private static func selectBestCandidate(
