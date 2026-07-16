@@ -27,6 +27,27 @@ enum UnisonLyricsProvider {
     private static let lrcTimestampRegex = try? NSRegularExpression(
         pattern: lrcTimestampPattern
     )
+    private static let backgroundParenthesesPattern = "[()（）]"
+    private static let backgroundParenthesesRegex = try? NSRegularExpression(
+        pattern: backgroundParenthesesPattern
+    )
+    private static let ttmlRootPattern = #"<tt\b[^>]*>"#
+    private static let ttmlRootRegex = try? NSRegularExpression(
+        pattern: ttmlRootPattern,
+        options: .caseInsensitive
+    )
+    private static let namespaceDeclarationPattern = #"xmlns:([A-Za-z][\w.-]*)\s*="#
+    private static let namespaceDeclarationRegex = try? NSRegularExpression(
+        pattern: namespaceDeclarationPattern
+    )
+    private static let elementNamespacePattern = #"</?([A-Za-z][\w.-]*):"#
+    private static let elementNamespaceRegex = try? NSRegularExpression(
+        pattern: elementNamespacePattern
+    )
+    private static let attributeNamespacePattern = #"\s([A-Za-z][\w.-]*):[\w.-]+\s*="#
+    private static let attributeNamespaceRegex = try? NSRegularExpression(
+        pattern: attributeNamespacePattern
+    )
 
     private static let speakerPalette = [
         SpeakerPresentation(speaker: "CUSTOM", color: "#a8ccff", fallback: "MALE 1"),
@@ -517,7 +538,7 @@ enum UnisonLyricsProvider {
 
     private static func stripBackgroundParentheses(_ part: ParsedPart) -> ParsedPart {
         var syllables = part.syllables.compactMap { syllable -> LyricsLine.Syllable? in
-            let text = syllable.text.regexReplacing("[()（）]", with: "")
+            let text = stripBackgroundParentheses(syllable.text)
             guard !text.isEmpty else { return nil }
             return LyricsLine.Syllable(
                 text: text,
@@ -527,9 +548,20 @@ enum UnisonLyricsProvider {
         }
         trimEmptySyllables(&syllables)
         return ParsedPart(
-            text: normalizeDisplayText(part.text.regexReplacing("[()（）]", with: "")),
+            text: normalizeDisplayText(stripBackgroundParentheses(part.text)),
             syllables: syllables,
             hasTimedText: part.hasTimedText
+        )
+    }
+
+    private static func stripBackgroundParentheses(_ value: String) -> String {
+        guard let backgroundParenthesesRegex else {
+            return value.regexReplacing(backgroundParenthesesPattern, with: "")
+        }
+        return backgroundParenthesesRegex.stringByReplacingMatches(
+            in: value,
+            range: NSRange(value.startIndex..<value.endIndex, in: value),
+            withTemplate: ""
         )
     }
 
@@ -739,18 +771,30 @@ enum UnisonLyricsProvider {
     }
 
     private static func declareMissingNamespaces(_ xml: String) -> String {
-        guard let root = firstRegexMatchWithRange(#"<tt\b[^>]*>"#, in: xml, options: .caseInsensitive) else {
+        let root: RegexMatch?
+        if let ttmlRootRegex {
+            root = firstRegexMatchWithRange(ttmlRootRegex, in: xml)
+        } else {
+            root = firstRegexMatchWithRange(ttmlRootPattern, in: xml, options: .caseInsensitive)
+        }
+        guard let root else {
             return xml
         }
         var declared = Set(["xml", "xmlns"])
-        for match in regexMatches(#"xmlns:([A-Za-z][\w.-]*)\s*="#, in: root.values[0]) {
+        let declaredMatches = namespaceDeclarationRegex.map { regexMatches($0, in: root.values[0]) }
+            ?? regexMatches(namespaceDeclarationPattern, in: root.values[0])
+        for match in declaredMatches {
             if match.count > 1 { declared.insert(match[1]) }
         }
         var used = Set<String>()
-        for match in regexMatches(#"</?([A-Za-z][\w.-]*):"#, in: xml) where match.count > 1 {
+        let elementMatches = elementNamespaceRegex.map { regexMatches($0, in: xml) }
+            ?? regexMatches(elementNamespacePattern, in: xml)
+        for match in elementMatches where match.count > 1 {
             used.insert(match[1])
         }
-        for match in regexMatches(#"\s([A-Za-z][\w.-]*):[\w.-]+\s*="#, in: xml) where match.count > 1 {
+        let attributeMatches = attributeNamespaceRegex.map { regexMatches($0, in: xml) }
+            ?? regexMatches(attributeNamespacePattern, in: xml)
+        for match in attributeMatches where match.count > 1 {
             used.insert(match[1])
         }
         let missing = used.subtracting(declared).sorted()
@@ -884,8 +928,17 @@ enum UnisonLyricsProvider {
         options: NSRegularExpression.Options = []
     ) -> RegexMatch? {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return nil }
+        return firstRegexMatchWithRange(regex, in: value)
+    }
+
+    private static func firstRegexMatchWithRange(
+        _ regex: NSRegularExpression,
+        in value: String
+    ) -> RegexMatch? {
         let source = value as NSString
-        guard let match = regex.firstMatch(in: value, range: NSRange(location: 0, length: source.length)) else { return nil }
+        guard let match = regex.firstMatch(in: value, range: NSRange(location: 0, length: source.length)) else {
+            return nil
+        }
         let values = (0..<match.numberOfRanges).map { index -> String in
             let range = match.range(at: index)
             return range.location == NSNotFound ? "" : source.substring(with: range)
