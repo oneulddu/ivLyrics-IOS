@@ -18,7 +18,7 @@ enum LyricsProviderAppContracts {
     static let providerOrderRawValues = ["musixmatch", "deezer", "unison", "bugs", "genie", "lrclib"]
     static let defaultEnabledProviderRawValues: Set<String> = ["lrclib"]
     static let unofficialProviderRawValues = ["musixmatch", "deezer", "unison", "bugs", "genie"]
-    static let standardProviderOrderRawValues = ["lrclib", "lyricsplus", "unison"]
+    static let standardProviderOrderRawValues = ["lrclib", "paxsenix", "lyricsplus", "unison"]
     static let standardDefaultEnabledProviderRawValues: Set<String> = ["lrclib"]
 
     static func standardProviderEnabledDefault(_ providerID: String) -> Bool {

@@ -20,6 +20,76 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.17",
+          "buildVersion": "22",
+          "date": "2026-07-16",
+          "localizedDescription": "v1.0.16 대비 Paxsenix 가사 텍스트의 특수 문자 표시를 개선했습니다.\n\nCompared with v1.0.16, this release improves special-character display in Paxsenix lyrics.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.17/ivLyrics-IOS-v1.0.17-unsigned.ipa",
+          "size": 6595794,
+          "sha256": "429c1429396cf98662ffbe3c47224c81fdf4cd26a94a4ae93e1bb0ebc70f81aa",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.0.16",
+          "buildVersion": "21",
+          "date": "2026-07-16",
+          "localizedDescription": "v1.0.16은 Paxsenix 및 Unison 가사 제공업체의 검색과 참조 처리 로직을 개선했습니다.\n\nv1.0.16 improves search and reference handling for the Paxsenix and Unison lyrics providers.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.16/ivLyrics-IOS-v1.0.16-unsigned.ipa",
+          "size": 6593052,
+          "sha256": "1c2d4787b50b3a436950955ef2b28d54497b7e4355971f9aa06307f7787493e0",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.0.15",
+          "buildVersion": "20",
+          "date": "2026-07-15",
+          "localizedDescription": "v1.0.15에서는 캐시된 크리에이터 식별자 갱신을 개선하고 AltStore용 서명되지 않은 IPA를 제공합니다.\n\nv1.0.15 improves refresh handling for cached creator identities and provides an unsigned IPA for AltStore.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.15/ivLyrics-IOS-v1.0.15-unsigned.ipa",
+          "size": 6590308,
+          "sha256": "fec81234d0c01a57a976e066cc5f27111da2621a9cef4dda7de300c2d94de811",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.0.14",
+          "buildVersion": "19",
+          "date": "2026-07-15",
+          "localizedDescription": "ivLyrics iOS 1.0.14에서는 비공개 Sync Creator 프로필 기능을 추가했습니다.\n\nivLyrics iOS 1.0.14 adds support for private Sync Creator profiles.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.14/ivLyrics-IOS-v1.0.14-unsigned.ipa",
+          "size": 6576190,
+          "sha256": "4a59738375cdfa69bb2cad1e0934a62c68635d2e166ad80a5098ef566d970fd7",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.0.13",
+          "buildVersion": "18",
+          "date": "2026-07-15",
+          "localizedDescription": "ivLyrics iOS 1.0.13은 Paxsenix 가사 제공자 업데이트와 AltStore 배포 정보 개선을 포함합니다.\n\nivLyrics iOS 1.0.13 includes an update to the Paxsenix lyrics provider and improved AltStore distribution metadata.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.13/ivLyrics-IOS-v1.0.13-unsigned.ipa",
+          "size": 6521401,
+          "sha256": "d2a4e3be797002a196ab771933572662f5367682618cb53f162f9046eb599227",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.0.12",
+          "buildVersion": "17",
+          "date": "2026-07-14",
+          "localizedDescription": "v1.0.12 iOS 릴리스와 AltStore 설치용 무서명 IPA를 제공합니다.\n\nv1.0.12 provides the iOS release and an unsigned IPA for AltStore installation.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.12/ivLyrics-IOS-v1.0.12-unsigned.ipa",
+          "size": 6525348,
+          "sha256": "501f1a5da0e77d163dec8f42aec583adb7b3266e4d44e31d23a74354f4202b18",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.0.11",
+          "buildVersion": "16",
+          "date": "2026-07-14",
+          "localizedDescription": "v1.0.11은 가사·보컬 표시와 PiP 렌더링을 최적화해 더 안정적이고 효율적인 재생 경험을 제공합니다.\n\nv1.0.11 optimizes lyric, vocal, and PiP rendering for a more stable and efficient playback experience.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.11/ivLyrics-IOS-v1.0.11-unsigned.ipa",
+          "size": 6458298,
+          "sha256": "833804f66bc973624340e2aec16e8dc4f51fc192c9d48c144beaa45aecce6cfa",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.10",
           "buildVersion": "15",
           "date": "2026-07-13",

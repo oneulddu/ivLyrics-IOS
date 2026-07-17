@@ -356,7 +356,8 @@ struct ContentView: View {
                 visible: inAppBrowserVisibleBinding,
                 dragOffset: $inAppBrowserDragOffset,
                 url: browserURL,
-                screenHeight: size.height
+                screenHeight: size.height,
+                onCreatorAuthRedirect: { model.handleCreatorAuthRedirect($0) }
             )
             .transition(.move(edge: .bottom))
             .zIndex(10)
@@ -1632,6 +1633,7 @@ private struct InAppBrowserOverlay: View {
     @Binding var dragOffset: CGFloat
     var url: URL
     var screenHeight: CGFloat
+    var onCreatorAuthRedirect: (URL) -> Bool
     @State private var loading = true
 
     var body: some View {
@@ -1642,7 +1644,8 @@ private struct InAppBrowserOverlay: View {
                 InAppBrowserWebView(
                     initialURL: url,
                     colorScheme: colorScheme,
-                    loading: $loading
+                    loading: $loading,
+                    onCreatorAuthRedirect: onCreatorAuthRedirect
                 )
                 .background(browserBackground)
                 .overlay {
@@ -1824,9 +1827,15 @@ private struct InAppBrowserWebView: UIViewRepresentable {
     var initialURL: URL
     var colorScheme: ColorScheme
     @Binding var loading: Bool
+    var onCreatorAuthRedirect: (URL) -> Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(initialURL: initialURL, colorScheme: colorScheme, loading: $loading)
+        Coordinator(
+            initialURL: initialURL,
+            colorScheme: colorScheme,
+            loading: $loading,
+            onCreatorAuthRedirect: onCreatorAuthRedirect
+        )
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -1843,6 +1852,7 @@ private struct InAppBrowserWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.colorScheme = colorScheme
+        context.coordinator.onCreatorAuthRedirect = onCreatorAuthRedirect
         if context.coordinator.initialURL != initialURL {
             context.coordinator.initialURL = initialURL
             webView.load(URLRequest(url: initialURL))
@@ -1861,10 +1871,17 @@ private struct InAppBrowserWebView: UIViewRepresentable {
         var initialURL: URL
         var colorScheme: ColorScheme
         @Binding var loading: Bool
+        var onCreatorAuthRedirect: (URL) -> Bool
 
-        init(initialURL: URL, colorScheme: ColorScheme, loading: Binding<Bool>) {
+        init(
+            initialURL: URL,
+            colorScheme: ColorScheme,
+            loading: Binding<Bool>,
+            onCreatorAuthRedirect: @escaping (URL) -> Bool
+        ) {
             self.initialURL = initialURL
             self.colorScheme = colorScheme
+            self.onCreatorAuthRedirect = onCreatorAuthRedirect
             _loading = loading
         }
 
@@ -1893,6 +1910,11 @@ private struct InAppBrowserWebView: UIViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
+            if onCreatorAuthRedirect(url) {
+                loading = false
+                decisionHandler(.cancel)
+                return
+            }
             if shouldOpenExternally(url) {
                 UIApplication.shared.open(url)
                 decisionHandler(.cancel)
@@ -1915,7 +1937,23 @@ private struct InAppBrowserWebView: UIViewRepresentable {
             if sameLyricsProfileNavigation(url, initialURL) {
                 return false
             }
+            if isCreatorLoginWebURL(initialURL), isCreatorLoginWebURL(url) {
+                return false
+            }
             return true
+        }
+
+        private func isCreatorLoginWebURL(_ url: URL) -> Bool {
+            let scheme = url.scheme?.lowercased() ?? ""
+            guard scheme == "https" else { return false }
+            let host = url.host?.lowercased() ?? ""
+            return host == "discord.com"
+                || host.hasSuffix(".discord.com")
+                || host == "discordapp.com"
+                || host.hasSuffix(".discordapp.com")
+                || host == "ivl.is"
+                || host == "lyrics.ivl.is"
+                || host == "lyrics.api.ivl.is"
         }
 
         private func injectProfileChrome(into webView: WKWebView, url: URL?) {
@@ -2000,6 +2038,7 @@ private struct InAppBrowserWebView: View {
     var initialURL: URL
     var colorScheme: ColorScheme
     @Binding var loading: Bool
+    var onCreatorAuthRedirect: (URL) -> Bool
 
     var body: some View {
         Text(initialURL.absoluteString)
@@ -3682,20 +3721,27 @@ private struct LyricsContributorCredit: View {
 
     @ViewBuilder
     private func contributorNameView(_ contributor: LyricsResult.SyncContributor) -> some View {
-        if interactive, contributor.profileAvailable, !contributor.userHash.trimmed.isEmpty {
+        if interactive,
+           !contributor.identityHidden,
+           contributor.profileAvailable,
+           !contributor.userHash.trimmed.isEmpty {
             Button {
                 Task {
                     await model.openSyncContributorProfile(contributor)
                 }
             } label: {
-                Text(contributor.name)
+                Text(contributorDisplayName(contributor))
                     .foregroundStyle(.white.opacity(linkedNameOpacity))
             }
             .buttonStyle(.plain)
         } else {
-            Text(contributor.name)
+            Text(contributorDisplayName(contributor))
                 .foregroundStyle(.white.opacity(nameOpacity))
         }
+    }
+
+    private func contributorDisplayName(_ contributor: LyricsResult.SyncContributor) -> String {
+        contributor.identityHidden ? settings.t("lyrics.credit_anonymous") : contributor.name
     }
 }
 
@@ -3844,7 +3890,7 @@ private struct LyricsProviderAttribution: View {
     @EnvironmentObject private var model: AppViewModel
     var includesSyncContributors = false
 
-    private static let visibleProviderIds: Set<String> = ["lrclib", "lyricsplus", "unison"]
+    private static let visibleProviderIds: Set<String> = ["lrclib", "paxsenix", "lyricsplus", "unison"]
 
     @ViewBuilder
     var body: some View {
@@ -6793,6 +6839,9 @@ struct SettingsView: View {
     @State private var selectedTab: SettingsTab = .lyrics
     @State private var deezerARLInput = ""
     @State private var deezerCredentialStatus = ""
+    @State private var paxsenixModels: [PaxsenixAIProvider.Model] = []
+    @State private var paxsenixModelsLoading = false
+    @State private var paxsenixModelsError = ""
 
     var body: some View {
         ZStack {
@@ -6829,6 +6878,14 @@ struct SettingsView: View {
             }
 #endif
             Task { await settings.refreshDeezerConfiguration() }
+            if settings.providerId == "paxsenix" {
+                Task { await refreshPaxsenixModels() }
+            }
+            model.prepareCreatorPrivacySettings()
+        }
+        .onChange(of: settings.providerId) { _, providerId in
+            guard providerId == "paxsenix" else { return }
+            Task { await refreshPaxsenixModels() }
         }
         .fullScreenCover(isPresented: $settingsLogsPresented) {
             LogsView(visible: $settingsLogsPresented)
@@ -7229,7 +7286,8 @@ struct SettingsView: View {
                 }
                 .font(.pretendard(14))
 
-                if provider.id == "lyricsplus", let url = URL(string: LyricsPlusProvider.projectURL) {
+                if let projectURL = provider.projectURL,
+                   let url = URL(string: projectURL) {
                     Link(destination: url) {
                         Label(settings.t("lyrics.provider.open_project"), systemImage: "arrow.up.right.square")
                             .font(.pretendard(13, weight: .semibold))
@@ -7416,8 +7474,53 @@ struct SettingsView: View {
                 settingsCard(settings.t("field.base_url")) {
                     settingsTextField(settings.t("field.base_url"), text: $settings.baseUrl)
                 }
-                settingsCard(settings.t("field.model")) {
-                    settingsTextField(settings.t("field.model"), text: $settings.model)
+                settingsCard(
+                    settings.t("field.model"),
+                    description: settings.providerId == "paxsenix" && settings.model.trimmed.isEmpty
+                        ? settings.t("field.model_required")
+                        : ""
+                ) {
+                    if settings.providerId == "paxsenix" {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 10) {
+                                Picker("", selection: $settings.model) {
+                                    Text(settings.t("field.model_required")).tag("")
+                                    if !settings.model.trimmed.isEmpty,
+                                       !paxsenixModels.contains(where: { $0.id == settings.model }) {
+                                        Text(settings.model).tag(settings.model)
+                                    }
+                                    ForEach(paxsenixModels) { model in
+                                        Text(model.displayName).tag(model.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                .settingsMenuSurface()
+                                .disabled(paxsenixModelsLoading || paxsenixModels.isEmpty)
+
+                                Button {
+                                    Task { await refreshPaxsenixModels() }
+                                } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                        .frame(width: 34, height: 34)
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(paxsenixModelsLoading)
+                                .accessibilityLabel(settings.t("button.refresh_models"))
+                            }
+                            if paxsenixModelsLoading {
+                                Text(settings.t("status.models_loading"))
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.62))
+                            } else if !paxsenixModelsError.isEmpty {
+                                Text(settings.t("status.models_unavailable"))
+                                    .font(.caption)
+                                    .foregroundStyle(Color.orange.opacity(0.88))
+                            }
+                            settingsTextField(settings.t("field.model_id"), text: $settings.model)
+                        }
+                    } else {
+                        settingsTextField(settings.t("field.model"), text: $settings.model)
+                    }
                 }
                 settingsCard(settings.t("field.max_tokens")) {
                     Stepper(value: maxTokensBinding, in: 256...65_536, step: 256) {
@@ -7492,6 +7595,63 @@ struct SettingsView: View {
 
     private var toolsSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
+            settingsSection(
+                settings.t("creator_privacy.section"),
+                description: settings.t("creator_privacy.section_desc")
+            ) {
+                settingsCard(
+                    settings.t("creator_privacy.private_title"),
+                    description: settings.t("creator_privacy.private_desc")
+                ) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Group {
+                            if model.creatorPrivacyRequestInFlight {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Circle()
+                                    .fill(creatorPrivacyStatusColor)
+                                    .frame(width: 8, height: 8)
+                            }
+                        }
+                        .frame(width: 18, height: 18)
+
+                        Text(model.creatorPrivacyStatusText)
+                            .font(.pretendard(13))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Spacer(minLength: 10)
+
+                        Toggle("", isOn: creatorPrivacyBinding)
+                            .labelsHidden()
+                            .fixedSize()
+                            .disabled(!model.creatorPrivacyCanEdit)
+                            .accessibilityLabel(settings.t("creator_privacy.private_title"))
+                            .accessibilityValue(model.creatorPrivacyStatusText)
+                    }
+
+                    HStack(spacing: 10) {
+                        if model.creatorAccountConnected {
+                            settingsActionButton(settings.t("creator_privacy.refresh")) {
+                                model.refreshCreatorPrivacy()
+                            }
+                            .disabled(model.creatorPrivacyRequestInFlight)
+
+                            settingsActionButton(settings.t("creator_privacy.disconnect"), role: .destructive) {
+                                model.disconnectCreatorAccount()
+                            }
+                            .disabled(model.creatorPrivacyRequestInFlight)
+                        } else {
+                            settingsActionButton(settings.t("creator_privacy.login")) {
+                                model.startCreatorAccountLogin()
+                            }
+                            .disabled(model.creatorPrivacyRequestInFlight || model.creatorPrivacyLoginInProgress)
+                        }
+                    }
+                }
+            }
+
             settingsSection(settings.t("section.spotify_api")) {
                 settingsCard(settings.t("section.spotify_api")) {
                     SpotifySetupInstructionsPanel()
@@ -7754,8 +7914,46 @@ struct SettingsView: View {
         model.effectiveSelectedRuleSourceLang
     }
 
+    private var creatorPrivacyBinding: Binding<Bool> {
+        Binding(
+            get: { model.creatorPrivacyIsPrivate },
+            set: { model.setCreatorPrivacy($0) }
+        )
+    }
+
+    private var creatorPrivacyStatusColor: Color {
+        switch model.creatorPrivacyState {
+        case .privateProfile:
+            return Color(red: 0.67, green: 0.55, blue: 1.0)
+        case .publicProfile:
+            return Color(red: 0.21, green: 0.87, blue: 0.52)
+        case .loading, .notLoaded:
+            return Color.white.opacity(0.40)
+        case .signedOut:
+            return Color.white.opacity(0.24)
+        }
+    }
+
     private var selectedProvider: AppSettings.Provider {
         AppSettings.providerById(settings.providerId)
+    }
+
+    @MainActor
+    private func refreshPaxsenixModels() async {
+        guard settings.providerId == "paxsenix", !paxsenixModelsLoading else { return }
+        paxsenixModelsLoading = true
+        paxsenixModelsError = ""
+        defer { paxsenixModelsLoading = false }
+        do {
+            paxsenixModels = try await PaxsenixAIProvider.fetchModels(apiKeys: settings.apiKeys)
+            if paxsenixModels.isEmpty {
+                paxsenixModelsError = "empty"
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            paxsenixModelsError = error.localizedDescription
+        }
     }
 
     private var uiLanguageBinding: Binding<String> {

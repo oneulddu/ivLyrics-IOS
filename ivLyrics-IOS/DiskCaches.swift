@@ -46,8 +46,8 @@ nonisolated final class LyricsDiskCache: @unchecked Sendable {
             do {
                 let data = try Data(contentsOf: file)
                 let envelope = try JSONDecoder().decode(Envelope.self, from: data)
-                guard envelope.version == 1 else { return nil }
-                if baseLyricsCache, (envelope.contributorSchemaVersion ?? 0) < 9 {
+                guard envelope.version == 2 else { return nil }
+                if baseLyricsCache, (envelope.contributorSchemaVersion ?? 0) < 12 {
                     return nil
                 }
                 if let maxAgeMs,
@@ -57,7 +57,7 @@ nonisolated final class LyricsDiskCache: @unchecked Sendable {
                 }
                 guard !envelope.result.lines.isEmpty else { return nil }
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
-                return envelope.result
+                return redactedResultForPersistence(envelope.result)
             } catch {
                 try? FileManager.default.removeItem(at: file)
                 return nil
@@ -71,11 +71,11 @@ nonisolated final class LyricsDiskCache: @unchecked Sendable {
             do {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let envelope = Envelope(
-                    version: 1,
-                    contributorSchemaVersion: baseLyricsCache ? 9 : nil,
+                    version: 2,
+                    contributorSchemaVersion: baseLyricsCache ? 12 : nil,
                     cacheKey: key,
                     savedAtMs: Int64(Date().timeIntervalSince1970 * 1000),
-                    result: result
+                    result: redactedResultForPersistence(result)
                 )
                 let data = try JSONEncoder().encode(envelope)
                 let file = fileForKey(key)
@@ -127,6 +127,20 @@ nonisolated final class LyricsDiskCache: @unchecked Sendable {
         directory.appendingPathComponent("\(IvLyricsUtilities.sha256(key)).json")
     }
 
+    private func redactedResultForPersistence(_ result: LyricsResult) -> LyricsResult {
+        var redacted = result
+        redacted.contributors = result.contributors.map { contributor in
+            LyricsResult.SyncContributor(
+                name: "Anonymous",
+                userHash: "",
+                profileAvailable: false,
+                anonymous: true,
+                isPrivate: contributor.isPrivate
+            )
+        }
+        return redacted
+    }
+
     private func prune() {
         guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]),
               files.count > maxEntries else {
@@ -163,14 +177,16 @@ nonisolated final class RawResponseDiskCache: @unchecked Sendable {
     private let directory: URL
     private let maxEntries: Int
     private let maxAgeMs: Int64?
+    private let formatVersion: Int
     private let queue = DispatchQueue(label: "ivlyrics.raw-cache")
 
-    init(namespace: String, maxEntries: Int, maxAgeMs: Int64? = nil) {
+    init(namespace: String, maxEntries: Int, maxAgeMs: Int64? = nil, formatVersion: Int = 1) {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let safeNamespace = namespace.trimmed.lowercased().regexReplacing("[^a-z0-9_-]", with: "_")
         directory = root.appendingPathComponent("lyrics_cache/\(safeNamespace.isEmpty ? "raw" : safeNamespace)", isDirectory: true)
         self.maxEntries = max(16, maxEntries)
         self.maxAgeMs = maxAgeMs.flatMap { $0 > 0 ? $0 : nil }
+        self.formatVersion = max(1, formatVersion)
     }
 
     func get(_ key: String) -> String {
@@ -179,7 +195,7 @@ nonisolated final class RawResponseDiskCache: @unchecked Sendable {
             guard FileManager.default.fileExists(atPath: file.path) else { return "" }
             do {
                 let envelope = try JSONDecoder().decode(Envelope.self, from: Data(contentsOf: file))
-                guard envelope.version == 1, !envelope.body.isEmpty else { return "" }
+                guard envelope.version == formatVersion, !envelope.body.isEmpty else { return "" }
                 if let maxAgeMs,
                    (envelope.savedAtMs <= 0 || Int64(Date().timeIntervalSince1970 * 1000) - envelope.savedAtMs > maxAgeMs) {
                     try? FileManager.default.removeItem(at: file)
@@ -199,7 +215,7 @@ nonisolated final class RawResponseDiskCache: @unchecked Sendable {
             guard !key.trimmed.isEmpty, !body.trimmed.isEmpty else { return }
             do {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let envelope = Envelope(version: 1, cacheKey: key, savedAtMs: Int64(Date().timeIntervalSince1970 * 1000), body: body)
+                let envelope = Envelope(version: formatVersion, cacheKey: key, savedAtMs: Int64(Date().timeIntervalSince1970 * 1000), body: body)
                 try JSONEncoder().encode(envelope).write(to: fileForKey(key), options: .atomic)
                 prune()
             } catch {

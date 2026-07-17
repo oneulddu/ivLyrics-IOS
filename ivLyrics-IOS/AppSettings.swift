@@ -55,9 +55,20 @@ final class AppSettings: ObservableObject {
             supportsPlain: true
         ),
         StandardLyricsProvider(
+            id: "paxsenix",
+            name: "Lyrically (Paxsenix)",
+            author: "default",
+            projectURL: PaxsenixLyricsProvider.projectURL,
+            supportsNativeKaraoke: true,
+            supportsIvLyricsSync: false,
+            supportsSynced: true,
+            supportsPlain: true
+        ),
+        StandardLyricsProvider(
             id: "lyricsplus",
             name: "LyricsPlus",
             author: "default",
+            projectURL: LyricsPlusProvider.projectURL,
             supportsNativeKaraoke: true,
             supportsIvLyricsSync: false,
             supportsSynced: true,
@@ -67,6 +78,8 @@ final class AppSettings: ObservableObject {
             id: "unison",
             name: "Unison",
             author: "default",
+            projectURL: "https://github.com/better-lyrics/unison",
+            defaultEnabled: false,
             supportsNativeKaraoke: true,
             supportsIvLyricsSync: false,
             supportsSynced: true,
@@ -82,7 +95,8 @@ final class AppSettings: ObservableObject {
         Provider(id: "openrouter", label: "OpenRouter", description: "여러 AI 모델 라우팅", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "anthropic/claude-3.5-sonnet", apiKeyURL: "https://openrouter.ai/keys"),
         Provider(id: "groq", label: "Groq", description: "빠른 OpenAI 호환 추론", defaultBaseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama-3.3-70b-versatile", apiKeyURL: "https://console.groq.com/keys"),
         Provider(id: "perplexity", label: "Perplexity", description: "Sonar API 사용", defaultBaseUrl: "https://api.perplexity.ai", defaultModel: "sonar-pro", apiKeyURL: "https://www.perplexity.ai/settings/api"),
-        Provider(id: "pollinations", label: "Pollinations.ai", description: "Pollinations OpenAI 호환 API", defaultBaseUrl: "https://gen.pollinations.ai", defaultModel: "openai", apiKeyURL: "https://enter.pollinations.ai")
+        Provider(id: "pollinations", label: "Pollinations.ai", description: "Pollinations OpenAI 호환 API", defaultBaseUrl: "https://gen.pollinations.ai", defaultModel: "openai", apiKeyURL: "https://enter.pollinations.ai"),
+        Provider(id: "paxsenix", label: "paxsenix", description: "OpenAI 호환 API 서버", defaultBaseUrl: PaxsenixAIProvider.baseURL, defaultModel: "", apiKeyURL: PaxsenixAIProvider.dashboardURL)
     ]
 
     static let languages: [Language] = [
@@ -1038,13 +1052,28 @@ final class AppSettings: ObservableObject {
             guard known.contains(value), seen.insert(value).inserted else { return nil }
             return value
         }
-        result.append(contentsOf: standardDefaultLyricsProviderOrder.filter { seen.insert($0).inserted })
+        for (defaultIndex, providerId) in standardDefaultLyricsProviderOrder.enumerated() where seen.insert(providerId).inserted {
+            let previous = standardDefaultLyricsProviderOrder[..<defaultIndex].reversed().first { result.contains($0) }
+            if let previous, let insertionIndex = result.firstIndex(of: previous) {
+                result.insert(providerId, at: insertionIndex + 1)
+                continue
+            }
+            let next = standardDefaultLyricsProviderOrder.dropFirst(defaultIndex + 1).first { result.contains($0) }
+            if let next, let insertionIndex = result.firstIndex(of: next) {
+                result.insert(providerId, at: insertionIndex)
+            } else {
+                result.append(providerId)
+            }
+        }
         return result
     }
 
     private static func normalizedStandardLyricsProviderEnabled(_ values: [String: Bool]) -> [String: Bool] {
-        Dictionary(uniqueKeysWithValues: standardDefaultLyricsProviderOrder.map {
-            ($0, values[$0] ?? LyricsProviderAppContracts.standardProviderEnabledDefault($0))
+        Dictionary(uniqueKeysWithValues: standardDefaultLyricsProviderOrder.map { providerId in
+            let providerFallback = standardLyricsProviderById(providerId)?.defaultEnabled ?? true
+            let fallback = providerFallback
+                && LyricsProviderAppContracts.standardProviderEnabledDefault(providerId)
+            return (providerId, values[providerId] ?? fallback)
         })
     }
 
@@ -1737,6 +1766,8 @@ final class AppSettings: ObservableObject {
         var id: String
         var name: String
         var author: String
+        var projectURL: String? = nil
+        var defaultEnabled: Bool = true
         var supportsNativeKaraoke: Bool
         var supportsIvLyricsSync: Bool
         var supportsSynced: Bool
