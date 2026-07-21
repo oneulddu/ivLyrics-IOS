@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.0.18",
+          "buildVersion": "23",
+          "date": "2026-07-21",
+          "localizedDescription": "ivLyrics iOS 1.0.18은 앱 현지화 번역을 보완하고 AltStore용 무서명 IPA를 제공합니다.\n\nivLyrics iOS 1.0.18 completes app localization translations and provides an unsigned IPA for AltStore.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.0.18/ivLyrics-IOS-v1.0.18-unsigned.ipa",
+          "size": 6596682,
+          "sha256": "bdc9508fe4ec9a6fe2b2d4dc4476856441b3745af6791a09bddb8ad9f2c97519",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.17",
           "buildVersion": "22",
           "date": "2026-07-16",
