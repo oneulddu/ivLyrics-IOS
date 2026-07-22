@@ -199,7 +199,11 @@ struct VinylPlayerModeView: View {
         rotation: Double,
         interactive: Bool
     ) -> some View {
-        VinylDisc(track: track, accent: accentColor(for: track))
+        VinylDisc(
+            track: track,
+            accent: accentColor(for: track),
+            centerCounterRotation: settings.vinylCenterRotationEnabled ? 0 : -rotation
+        )
             .frame(width: frame.width, height: frame.height)
             .rotationEffect(.degrees(rotation))
             .position(x: frame.midX, y: frame.midY)
@@ -573,6 +577,7 @@ private struct VinylAlbumCover: View {
 private struct VinylDisc: View {
     let track: TrackSnapshot
     let accent: Color
+    let centerCounterRotation: Double
 
     var body: some View {
         GeometryReader { proxy in
@@ -603,54 +608,58 @@ private struct VinylDisc: View {
                     ), lineWidth: size * 0.018)
                 }
 
-                Circle()
-                    .fill(RadialGradient(
-                        colors: [Color(red: 0.188, green: 0.149, blue: 0.165), Color(red: 0.129, green: 0.098, blue: 0.110)],
-                        center: UnitPoint(x: 0.5, y: 0.45),
-                        startRadius: 0,
-                        endRadius: size * 0.224
-                    ))
-                    .frame(width: size * 0.447, height: size * 0.447)
-                Circle()
-                    .stroke(accent, lineWidth: max(1, size * 0.004))
-                    .frame(width: size * 0.441, height: size * 0.441)
-                Circle()
-                    .stroke(accent.opacity(0.52), lineWidth: max(0.7, size * 0.0022))
-                    .frame(width: size * 0.376, height: size * 0.376)
+                ZStack {
+                    Circle()
+                        .fill(RadialGradient(
+                            colors: [Color(red: 0.188, green: 0.149, blue: 0.165), Color(red: 0.129, green: 0.098, blue: 0.110)],
+                            center: UnitPoint(x: 0.5, y: 0.45),
+                            startRadius: 0,
+                            endRadius: size * 0.224
+                        ))
+                        .frame(width: size * 0.447, height: size * 0.447)
+                    Circle()
+                        .stroke(accent, lineWidth: max(1, size * 0.004))
+                        .frame(width: size * 0.441, height: size * 0.441)
+                    Circle()
+                        .stroke(accent.opacity(0.52), lineWidth: max(0.7, size * 0.0022))
+                        .frame(width: size * 0.376, height: size * 0.376)
 
-                VinylCircularText(
-                    text: circularLabel,
-                    radius: size * 0.162,
-                    upper: true,
-                    color: accent.opacity(0.78),
-                    fontSize: max(5.5, size * 0.0168)
-                )
-                VinylCircularText(
-                    text: circularLabel,
-                    radius: size * 0.162,
-                    upper: false,
-                    color: accent.opacity(0.70),
-                    fontSize: max(5.5, size * 0.0168)
-                )
+                    VinylCircularText(
+                        text: circularLabel,
+                        radius: size * 0.162,
+                        upper: true,
+                        color: accent.opacity(0.78),
+                        fontSize: max(5.5, size * 0.0168)
+                    )
+                    VinylCircularText(
+                        text: circularLabel,
+                        radius: size * 0.162,
+                        upper: false,
+                        color: accent.opacity(0.70),
+                        fontSize: max(5.5, size * 0.0168)
+                    )
 
-                Text(track.title)
-                    .font(.pretendard(max(10, size * 0.0455), weight: .bold))
-                    .foregroundStyle(accent)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.54)
-                    .frame(width: size * 0.35)
-                    .position(x: size * 0.5, y: size * 0.442)
-                Text(track.artist)
-                    .font(.pretendard(max(7, size * 0.0245), weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.55)
-                    .frame(width: size * 0.35)
-                    .position(x: size * 0.5, y: size * 0.567)
+                    Text(track.title)
+                        .font(.pretendard(max(10, size * 0.0455), weight: .bold))
+                        .foregroundStyle(accent)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.54)
+                        .frame(width: size * 0.35)
+                        .position(x: size * 0.5, y: size * 0.442)
+                    Text(track.artist)
+                        .font(.pretendard(max(7, size * 0.0245), weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.55)
+                        .frame(width: size * 0.35)
+                        .position(x: size * 0.5, y: size * 0.567)
 
-                Circle()
-                    .fill(Color(white: 0.82))
-                    .frame(width: max(4, size * 0.0188), height: max(4, size * 0.0188))
+                    Circle()
+                        .fill(Color(white: 0.82))
+                        .frame(width: max(4, size * 0.0188), height: max(4, size * 0.0188))
+                }
+                .frame(width: size, height: size)
+                .rotationEffect(.degrees(centerCounterRotation))
             }
         }
     }

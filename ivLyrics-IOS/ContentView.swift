@@ -7360,6 +7360,12 @@ struct SettingsView: View {
                 )
 
                 settingsToggleCard(
+                    settings.t("vinyl.settings.center_rotation"),
+                    description: settings.t("vinyl.settings.center_rotation_desc"),
+                    binding: settingsSavedBinding(\.vinylCenterRotationEnabled)
+                )
+
+                settingsToggleCard(
                     settings.t("vinyl.settings.lyrics"),
                     description: settings.t("vinyl.settings.lyrics_desc"),
                     binding: settingsSavedBinding(\.vinylLyricsEnabled)
