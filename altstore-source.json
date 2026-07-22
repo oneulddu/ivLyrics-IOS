@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.1.0",
+          "buildVersion": "24",
+          "date": "2026-07-22",
+          "localizedDescription": "v1.0.18 대비, 비닐 플레이어 모드의 표시와 사용자 설정 기능을 대폭 확장했습니다.\n\nCompared with v1.0.18, this release greatly expands vinyl player display and customization options.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.0/ivLyrics-IOS-v1.1.0-unsigned.ipa",
+          "size": 6723320,
+          "sha256": "c4ae38f07c207c92fb9b0fca787426e181d7861e870327592e47ef218fe8f9a9",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.0.18",
           "buildVersion": "23",
           "date": "2026-07-21",
