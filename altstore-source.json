@@ -2,8 +2,8 @@
   "name": "ivLyrics iOS",
   "subtitle": "Official ivLyrics releases for AltStore Classic.",
   "description": "Spotify 재생 곡의 싱크 가사를 제공하는 ivLyrics iOS 공식 소스입니다. This is the official AltStore source for ivLyrics iOS.",
-  "iconURL": "https://raw.githubusercontent.com/ivLis-Studio/ivLyrics-IOS/main/ivLyrics-IOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
-  "website": "https://github.com/ivLis-Studio/ivLyrics-IOS",
+  "iconURL": "https://raw.githubusercontent.com/oneulddu/ivLyrics-IOS/main/ivLyrics-IOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+  "website": "https://github.com/oneulddu/ivLyrics-IOS",
   "tintColor": "#FF3B7D",
   "featuredApps": [
     "kr.ivlis.ivlyrics.ios"
@@ -15,10 +15,20 @@
       "developerName": "ivLis Studio",
       "subtitle": "Synced Spotify lyrics with karaoke effects.",
       "localizedDescription": "Spotify 재생 곡의 싱크 가사, 번역, 발음 및 노래방 효과를 제공하는 iOS 앱입니다. An iOS lyrics player with synchronized karaoke effects, translations, and pronunciation guides for Spotify playback.",
-      "iconURL": "https://raw.githubusercontent.com/ivLis-Studio/ivLyrics-IOS/main/ivLyrics-IOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "iconURL": "https://raw.githubusercontent.com/oneulddu/ivLyrics-IOS/main/ivLyrics-IOS/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
       "tintColor": "#FF3B7D",
       "category": "entertainment",
       "versions": [
+        {
+          "version": "1.1.2",
+          "buildVersion": "7",
+          "date": "2026-07-23",
+          "localizedDescription": "v1.1.2 iOS 릴리스와 AltStore 설치용 무서명 IPA를 제공합니다.\n\nv1.1.2 provides the iOS release and an unsigned IPA for AltStore installation.",
+          "downloadURL": "https://github.com/oneulddu/ivLyrics-IOS/releases/download/v1.1.2/ivLyrics-IOS-v1.1.2-unsigned.ipa",
+          "size": 7205493,
+          "sha256": "ab3326d2936ffb365362ed9625f67153ef92a50e794ed796b02a4c37a0886d47",
+          "minOSVersion": "17.0"
+        },
         {
           "version": "1.1.2",
           "buildVersion": "26",
