@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.1.2",
+          "buildVersion": "26",
+          "date": "2026-07-23",
+          "localizedDescription": "ivLyrics iOS 1.1.2는 가사 언어 감지와 전체 가사 싱크 보정 기능을 추가한 업데이트입니다.\n\nivLyrics iOS 1.1.2 adds lyrics language detection and a global lyrics sync adjustment.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.2/ivLyrics-IOS-v1.1.2-unsigned.ipa",
+          "size": 6735658,
+          "sha256": "a056af09007f9642245d64a4f9092743e79681bd6b76e6c0936d5035a9201ee4",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.1.1",
           "buildVersion": "25",
           "date": "2026-07-22",
