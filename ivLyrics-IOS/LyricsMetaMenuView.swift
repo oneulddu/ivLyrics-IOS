@@ -258,6 +258,14 @@ struct LyricsMetaMenuOverlay: View {
     private var syncTab: some View {
         VStack(alignment: .leading, spacing: 14) {
             offsetBlock(
+                title: settings.t("lyrics.global_sync.title"),
+                detail: settings.t("lyrics.global_sync.help"),
+                resetTitle: settings.t("lyrics.global_sync.reset"),
+                value: model.globalOffsetMs,
+                setValue: { model.setGlobalOffsetMs($0, notify: true) },
+                isDimmed: false
+            )
+            offsetBlock(
                 title: settings.t("lyrics.sync.title"),
                 detail: trackSyncDetailText,
                 resetTitle: settings.t("lyrics.sync.reset"),

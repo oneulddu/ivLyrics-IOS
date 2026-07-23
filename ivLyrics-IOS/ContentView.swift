@@ -2826,6 +2826,12 @@ struct TransportPanel: View {
 
             VStack(spacing: 6) {
                 compactOffsetRow(
+                    title: settings.t("lyrics.global_sync.title"),
+                    value: model.globalOffsetMs,
+                    decrement: { model.adjustGlobalOffsetMs(-100) },
+                    increment: { model.adjustGlobalOffsetMs(100) }
+                )
+                compactOffsetRow(
                     title: settings.t("lyrics.sync.title"),
                     value: model.trackOffsetMs,
                     decrement: { model.adjustTrackOffsetMs(-100) },
@@ -7702,8 +7708,16 @@ struct SettingsView: View {
                 .disabled(!model.spotifyUserConnected)
             }
 
-            settingsSection(settings.t("lyrics.sync.title"), description: settings.t("lyrics.sync.help")) {
-                settingsCard(settings.t("lyrics.sync.title")) {
+            settingsSection(settings.t("lyrics.tab.sync"), description: settings.t("lyrics.global_sync.help")) {
+                settingsCard(settings.t("lyrics.tab.sync")) {
+                    DetailedOffsetControls(
+                        title: settings.t("lyrics.global_sync.title"),
+                        help: settings.t("lyrics.global_sync.help"),
+                        value: model.globalOffsetMs,
+                        resetTitle: settings.t("lyrics.global_sync.reset"),
+                        adjust: { model.adjustGlobalOffsetMs($0) },
+                        reset: { model.setGlobalOffsetMs(0, notify: true) }
+                    )
                     DetailedOffsetControls(
                         title: settings.t("lyrics.sync.title"),
                         help: settings.t("lyrics.sync.help"),

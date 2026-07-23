@@ -569,6 +569,19 @@ final class AppSettings: ObservableObject {
         setTrackBackgroundSettings(trackKey, nil)
     }
 
+    func globalSyncOffsetMs() -> Int {
+        min(10_000, max(-10_000, defaults.integer(forKey: "global_sync_offset_ms")))
+    }
+
+    func setGlobalSyncOffsetMs(_ offset: Int) {
+        let safeOffset = min(10_000, max(-10_000, offset))
+        if safeOffset == 0 {
+            defaults.removeObject(forKey: "global_sync_offset_ms")
+        } else {
+            defaults.set(safeOffset, forKey: "global_sync_offset_ms")
+        }
+    }
+
     func trackSyncOffsetMs(_ key: String) -> Int {
         offsetMap("track_sync_offsets_v1")[key] ?? 0
     }
