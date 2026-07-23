@@ -21,22 +21,12 @@
       "versions": [
         {
           "version": "1.1.2",
-          "buildVersion": "7",
+          "buildVersion": "8",
           "date": "2026-07-23",
           "localizedDescription": "v1.1.2 iOS 릴리스와 AltStore 설치용 무서명 IPA를 제공합니다.\n\nv1.1.2 provides the iOS release and an unsigned IPA for AltStore installation.",
           "downloadURL": "https://github.com/oneulddu/ivLyrics-IOS/releases/download/v1.1.2/ivLyrics-IOS-v1.1.2-unsigned.ipa",
           "size": 7205493,
-          "sha256": "ab3326d2936ffb365362ed9625f67153ef92a50e794ed796b02a4c37a0886d47",
-          "minOSVersion": "17.0"
-        },
-        {
-          "version": "1.1.2",
-          "buildVersion": "26",
-          "date": "2026-07-23",
-          "localizedDescription": "ivLyrics iOS 1.1.2는 가사 언어 감지와 전체 가사 싱크 보정 기능을 추가한 업데이트입니다.\n\nivLyrics iOS 1.1.2 adds lyrics language detection and a global lyrics sync adjustment.",
-          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.2/ivLyrics-IOS-v1.1.2-unsigned.ipa",
-          "size": 6735658,
-          "sha256": "a056af09007f9642245d64a4f9092743e79681bd6b76e6c0936d5035a9201ee4",
+          "sha256": "c12408533834c6468d0470f477cfa1aeed235e98e27d6837c9bd59b875892c3f",
           "minOSVersion": "17.0"
         },
         {
