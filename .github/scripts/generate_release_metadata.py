@@ -484,7 +484,6 @@ def build_altstore_source(current_tag, ipa, content):
         if not (
             isinstance(item, dict)
             and str(item.get("version")) == ipa["versionName"]
-            and str(item.get("buildVersion")) == ipa["buildNumber"]
         )
     ]
     app["versions"] = [version, *versions]
