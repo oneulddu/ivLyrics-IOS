@@ -43,6 +43,13 @@ enum AppI18n {
         "spotify.step4.desc"
     ]
 
+    private static let sharedFallbackKeys: [String: String] = [
+        "setting.preview_hidden": "preview.none",
+        "setting.main_preview_original": "preview.original",
+        "setting.main_preview_pronunciation": "preview.pronunciation",
+        "setting.main_preview_translation": "preview.translation"
+    ]
+
     private static let extraStrings: [String: [String: String]] = [
         "ko": [
             "button.close": "닫기",
@@ -182,6 +189,10 @@ enum AppI18n {
             "lyrics.rule.track_language": "곡 언어",
             "lyrics.rule.save_target": "저장 대상",
             "lyrics.rule.reset": "이 언어 규칙 초기화",
+            "lyrics.global_sync.title": "전역 싱크 오프셋",
+            "lyrics.global_sync.help": "모든 곡에 적용되며 곡별 및 Bluetooth 오프셋과 별도로 더해집니다. +값은 가사를 더 일찍, -값은 더 늦게 보여줍니다.",
+            "lyrics.global_sync.reset": "전역 오프셋 초기화",
+            "toast.global_sync_offset_format": "전역 싱크 오프셋 %s",
             "lyrics.sync.title": "현재 곡 싱크 오프셋",
             "lyrics.sync.reset": "0ms로 초기화",
             "lyrics.sync.no_track": "재생 중인 곡이 없으면 저장되지 않습니다.",
@@ -450,6 +461,10 @@ enum AppI18n {
             "lyrics.rule.track_language": "Song language",
             "lyrics.rule.save_target": "Save target",
             "lyrics.rule.reset": "Reset Source Rule",
+            "lyrics.global_sync.title": "Global Sync Offset",
+            "lyrics.global_sync.help": "Applies to every song and is added separately to per-song and Bluetooth offsets. Positive values show lyrics earlier; negative values show them later.",
+            "lyrics.global_sync.reset": "Reset Global Offset",
+            "toast.global_sync_offset_format": "Global sync offset %s",
             "lyrics.sync.title": "Current Song Sync Offset",
             "lyrics.sync.reset": "Reset to 0ms",
             "lyrics.sync.no_track": "No playing song, so this will not be saved.",
@@ -627,26 +642,41 @@ enum AppI18n {
     static func t(_ lang: String?, _ key: String) -> String {
         let normalized = normalize(lang)
         if iosOverrideKeys.contains(key) {
-            if let value = extraStrings[normalized]?[key] {
+            if let value = nonBlank(extraStrings[normalized]?[key]) {
                 return value
             }
-            if let value = extraStrings["en"]?[key] {
+            if let value = nonBlank(extraStrings["en"]?[key]) {
                 return value
             }
         }
-        if let value = androidStrings[normalized]?[key] {
+        if let value = nonBlank(androidStrings[normalized]?[key]) {
             return value
         }
-        if let value = extraStrings[normalized]?[key] {
+        if let value = nonBlank(extraStrings[normalized]?[key]) {
             return value
         }
-        if let value = androidStrings["en"]?[key] {
+        if let fallbackKey = sharedFallbackKeys[key],
+           let value = nonBlank(androidStrings[normalized]?[fallbackKey]) {
             return value
         }
-        if let value = extraStrings["en"]?[key] {
+        if let value = nonBlank(androidStrings["en"]?[key]) {
+            return value
+        }
+        if let value = nonBlank(extraStrings["en"]?[key]) {
+            return value
+        }
+        if let fallbackKey = sharedFallbackKeys[key],
+           let value = nonBlank(androidStrings["en"]?[fallbackKey]) {
             return value
         }
         return key
+    }
+
+    private static func nonBlank(_ value: String?) -> String? {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return value
     }
 
     static func format(_ lang: String?, _ key: String, _ arguments: [CVarArg]) -> String {

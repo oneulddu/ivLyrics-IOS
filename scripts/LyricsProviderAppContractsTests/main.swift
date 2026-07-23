@@ -1,8 +1,7 @@
 import Foundation
 
-private var failures: [String] = []
+nonisolated(unsafe) private var failures: [String] = []
 
-@MainActor
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() { failures.append(message) }
 }

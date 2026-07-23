@@ -108,6 +108,16 @@ final class AppViewModel: ObservableObject {
             settings.setTrackSyncOffsetMs(key, trackOffsetMs)
         }
     }
+    @Published var globalOffsetMs: Int = 0 {
+        didSet {
+            let clamped = Self.clampSyncOffset(globalOffsetMs)
+            if globalOffsetMs != clamped {
+                globalOffsetMs = clamped
+                return
+            }
+            settings.setGlobalSyncOffsetMs(globalOffsetMs)
+        }
+    }
     @Published var videoOffsetMs: Int = 0 {
         didSet {
             let clamped = Self.clampSyncOffset(videoOffsetMs)
@@ -197,6 +207,7 @@ final class AppViewModel: ObservableObject {
 
     init(settings: AppSettings) {
         self.settings = settings
+        globalOffsetMs = settings.globalSyncOffsetMs()
         lyricsResult = LyricsResult.empty(settings.t("status.waiting_current_track"))
         manualLrclibStatus = settings.t("lyrics.lrclib_search.ready")
         updateStatus = settings.t("update.status_idle")
@@ -375,7 +386,7 @@ final class AppViewModel: ObservableObject {
     }
 
     var adjustedPositionMs: Int64 {
-        let adjusted = nowPositionMs + Int64(trackOffsetMs + bluetoothOffsetMs)
+        let adjusted = nowPositionMs + Int64(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
         if durationMs > 0 {
             return max(0, min(durationMs, adjusted))
         }
@@ -433,7 +444,7 @@ final class AppViewModel: ObservableObject {
 
     var youtubePlaybackSeconds: Double {
         guard let youtubeInfo else { return 0 }
-        let offsetMs = trackOffsetMs + bluetoothOffsetMs + videoOffsetMs
+        let offsetMs = globalOffsetMs + trackOffsetMs + bluetoothOffsetMs + videoOffsetMs
         var value = Double(max(0, nowPositionMs + Int64(offsetMs))) / 1000.0
         if youtubeInfo.hasCaptionStartTime && !youtubeInfo.isAutoMatchedUnknownCaptionStart {
             value += youtubeInfo.captionStartTimeSeconds - Double(firstLyricTimeMs) / 1000.0
@@ -450,7 +461,7 @@ final class AppViewModel: ObservableObject {
     }
 
     var youtubeOffsetSeconds: Double {
-        Double(trackOffsetMs + bluetoothOffsetMs + videoOffsetMs) / 1000.0
+        Double(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs + videoOffsetMs) / 1000.0
     }
 
     func applyManualTrack(loadImmediately: Bool = true) {
@@ -983,6 +994,18 @@ final class AppViewModel: ObservableObject {
         setTrackOffsetMs(trackOffsetMs + deltaMs, notify: true)
     }
 
+    func adjustGlobalOffsetMs(_ deltaMs: Int) {
+        setGlobalOffsetMs(globalOffsetMs + deltaMs, notify: true)
+    }
+
+    func setGlobalOffsetMs(_ offsetMs: Int, notify: Bool) {
+        let nextOffset = Self.clampSyncOffset(offsetMs)
+        globalOffsetMs = nextOffset
+        if notify {
+            showSavedToast(settings.tf("toast.global_sync_offset_format", formatSignedMs(nextOffset)))
+        }
+    }
+
     func setTrackOffsetMs(_ offsetMs: Int, notify: Bool) {
         let nextOffset = Self.clampSyncOffset(offsetMs)
         trackOffsetMs = nextOffset
@@ -1060,9 +1083,14 @@ final class AppViewModel: ObservableObject {
         setPlayback(playing: !track.playing)
     }
 
-    private func setPlayback(playing targetPlaying: Bool) {
+    func pausePlayback() {
+        setPlayback(playing: false, forceCommand: true)
+    }
+
+    private func setPlayback(playing targetPlaying: Bool, forceCommand: Bool = false) {
         guard var track = currentTrack else { return }
-        guard track.playing != targetPlaying else { return }
+        let playbackChanged = track.playing != targetPlaying
+        guard playbackChanged || forceCommand else { return }
         let position = track.positionNow()
         if spotifyAppRemotePlaybackService.connected || spotifyLivePolling {
             spotifyPlaybackInteractionGuard.registerPlayback(
@@ -1071,9 +1099,11 @@ final class AppViewModel: ObservableObject {
                 uptime: ProcessInfo.processInfo.systemUptime
             )
         }
-        track = track.withPlayback(positionMs: position, playing: targetPlaying)
-        currentTrack = track
-        nowPositionMs = track.positionNow()
+        if playbackChanged {
+            track = track.withPlayback(positionMs: position, playing: targetPlaying)
+            currentTrack = track
+            nowPositionMs = track.positionNow()
+        }
         if spotifyAppRemotePlaybackService.connected {
             spotifyAppRemotePlaybackService.setPlayback(playing: targetPlaying)
             scheduleSpotifyPlaybackRefreshBurst(loadLyricsIfNeeded: false)
@@ -1115,7 +1145,7 @@ final class AppViewModel: ObservableObject {
     func seek(toLyricsTimeMs lyricsTimeMs: Int64) {
         guard var track = currentTrack else { return }
         let duration = max(0, track.durationMs)
-        let target = lyricsTimeMs - Int64(trackOffsetMs + bluetoothOffsetMs)
+        let target = lyricsTimeMs - Int64(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
         let position = duration > 0 ? max(0, min(duration, target)) : max(0, target)
         seekPlayer(to: position, track: &track)
         lyricsFocusRequestRevision &+= 1

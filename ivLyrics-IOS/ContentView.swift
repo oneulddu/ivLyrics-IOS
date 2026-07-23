@@ -167,6 +167,7 @@ struct ContentView: View {
     @State private var lyricsMetaTipVisible = false
     @State private var lyricsMetaTipToken = UUID()
     @State private var inAppBrowserDragOffset: CGFloat = 0
+    @State private var vinylModeVisible = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -243,6 +244,13 @@ struct ContentView: View {
                 inAppBrowserDragOffset = 0
                 updateLandscapeAutoHide(isLandscape: isLandscape)
             }
+            .onChange(of: model.currentTrack?.hasUsableMetadata == true) { _, available in
+                if !available && vinylModeVisible {
+                    withAnimation(.easeOut(duration: 0.26)) {
+                        vinylModeVisible = false
+                    }
+                }
+            }
             .fullScreenCover(isPresented: $showingSettings) {
                 SettingsView()
                     .environmentObject(settings)
@@ -268,6 +276,25 @@ struct ContentView: View {
                 size: size,
                 safeAreaInsets: safeAreaInsets
             )
+            .opacity(vinylModeVisible ? 0 : 1)
+            .scaleEffect(vinylModeVisible ? 0.985 : 1)
+            .allowsHitTesting(!vinylModeVisible)
+            .accessibilityHidden(vinylModeVisible)
+            .animation(
+                settings.vinylAnimationsEnabled
+                    ? .timingCurve(0.22, 0.74, 0.28, 1, duration: 0.36)
+                    : nil,
+                value: vinylModeVisible
+            )
+            if vinylModeVisible {
+                VinylPlayerModeView(isPresented: $vinylModeVisible)
+                    .transition(
+                        settings.vinylAnimationsEnabled
+                            ? .opacity.combined(with: .scale(scale: 0.975))
+                            : .identity
+                    )
+                    .zIndex(4)
+            }
             overlayContent(
                 isLandscape: isLandscape,
                 size: size,
@@ -428,7 +455,7 @@ struct ContentView: View {
                 Spacer(minLength: 0)
                     .frame(maxHeight: 20)
 
-                ArtworkView(size: artworkSize, cornerRadius: 24)
+                ArtworkView(size: artworkSize, cornerRadius: 24, onTap: presentVinylMode)
                     .padding(.bottom, 8)
 
                 Color.clear
@@ -614,7 +641,8 @@ struct ContentView: View {
             LandscapePlayerPane(
                 controlsVisible: controlsShown,
                 centered: centerPlayer,
-                containerSize: size
+                containerSize: size,
+                onOpenVinyl: presentVinylMode
             )
             .frame(width: playerWidth, height: max(1, size.height - 32))
 
@@ -662,6 +690,21 @@ struct ContentView: View {
             landscapeControlsVisible = true
         }
         scheduleLandscapeControlsAutoHide(isLandscape: isLandscape)
+    }
+
+    private func presentVinylMode() {
+        guard model.currentTrack?.hasUsableMetadata == true else {
+            model.showSavedToast(settings.t("status.waiting_current_track"))
+            return
+        }
+        showLyricsPage(false)
+        showingLyricsMetaMenu = false
+        dismissLyricsMetaTip()
+        withAnimation(settings.vinylAnimationsEnabled
+            ? .timingCurve(0.18, 0.80, 0.22, 1, duration: 0.42)
+            : nil) {
+            vinylModeVisible = true
+        }
     }
 
     private func updateLandscapeAutoHide(isLandscape: Bool) {
@@ -2094,13 +2137,14 @@ private struct LandscapePlayerPane: View {
     var controlsVisible: Bool
     var centered: Bool
     var containerSize: CGSize
+    var onOpenVinyl: () -> Void
 
     var body: some View {
         let _ = settings.typographyRevision
         let typography = settings.typographySettings()
         AndroidLandscapePlayerLayout(tablet: containerSize.width > 900) {
             VStack(spacing: metadataSpacing) {
-                LandscapeArtworkView(size: artworkSize)
+                LandscapeArtworkView(size: artworkSize, onTap: onOpenVinyl)
                     .scaleEffect(controlsVisible ? 1 : 1.08)
                 VStack(spacing: 4) {
                     Text(model.titleText.trimmed.isEmpty ? settings.t("label.no_current_track") : model.titleText)
@@ -2152,6 +2196,7 @@ private struct LandscapePlayerPane: View {
 private struct LandscapeArtworkView: View {
     @EnvironmentObject private var model: AppViewModel
     var size: CGFloat
+    var onTap: () -> Void
 
     var body: some View {
         ZStack {
@@ -2168,7 +2213,7 @@ private struct LandscapeArtworkView: View {
         }
         .frame(width: size, height: size)
         .clipped()
-        .artworkSwipeActions(size: size)
+        .artworkSwipeActions(size: size, onTap: onTap)
     }
 }
 
@@ -2406,6 +2451,7 @@ struct ArtworkView: View {
     @EnvironmentObject private var model: AppViewModel
     var size: CGFloat = 88
     var cornerRadius: CGFloat = 8
+    var onTap: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
@@ -2422,16 +2468,19 @@ struct ArtworkView: View {
         }
         .frame(width: size, height: size)
         .clipped()
-        .artworkSwipeActions(size: size)
+        .artworkSwipeActions(size: size, onTap: onTap)
     }
 }
 
 private struct ArtworkSwipeActionsModifier: ViewModifier {
+    @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
     @State private var swipeOffset: CGFloat = 0
     @State private var isDragging = false
+    @State private var suppressTapUntil = Date.distantPast
 
     var size: CGFloat
+    var onTap: (() -> Void)?
 
     func body(content: Content) -> some View {
         let maxOffset = max(26, size * 0.12)
@@ -2440,8 +2489,13 @@ private struct ArtworkSwipeActionsModifier: ViewModifier {
             .rotationEffect(.degrees(Double(swipeOffset / max(maxOffset, 1)) * 1.6))
             .animation(.easeOut(duration: 0.15), value: swipeOffset)
             .onLongPressGesture {
+                suppressTapUntil = Date().addingTimeInterval(0.45)
                 performLongPressHaptic()
                 model.showTmiForCurrentTrack(bypassCache: false)
+            }
+            .onTapGesture {
+                guard Date() >= suppressTapUntil else { return }
+                onTap?()
             }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 16)
@@ -2469,6 +2523,9 @@ private struct ArtworkSwipeActionsModifier: ViewModifier {
                         }
                     }
             )
+            .accessibilityHint(onTap == nil
+                ? settings.t("vinyl.tmi_hint")
+                : settings.t("vinyl.open_hint") + ". " + settings.t("vinyl.tmi_hint"))
     }
 
     private func settle() {
@@ -2484,8 +2541,8 @@ private struct ArtworkSwipeActionsModifier: ViewModifier {
 }
 
 private extension View {
-    func artworkSwipeActions(size: CGFloat) -> some View {
-        modifier(ArtworkSwipeActionsModifier(size: size))
+    func artworkSwipeActions(size: CGFloat, onTap: (() -> Void)? = nil) -> some View {
+        modifier(ArtworkSwipeActionsModifier(size: size, onTap: onTap))
     }
 }
 
@@ -2506,6 +2563,12 @@ private struct TmiSheetView: View {
 
                 VStack(alignment: .leading, spacing: 0) {
                     header
+
+                    Text(settings.t("tmi.disclaimer"))
+                        .font(.pretendard(11.5))
+                        .foregroundStyle(.white.opacity(0.60))
+                        .lineSpacing(2)
+                        .padding(.top, 10)
 
                     ScrollView {
                         content
@@ -2763,6 +2826,12 @@ struct TransportPanel: View {
 
             VStack(spacing: 6) {
                 compactOffsetRow(
+                    title: settings.t("lyrics.global_sync.title"),
+                    value: model.globalOffsetMs,
+                    decrement: { model.adjustGlobalOffsetMs(-100) },
+                    increment: { model.adjustGlobalOffsetMs(100) }
+                )
+                compactOffsetRow(
                     title: settings.t("lyrics.sync.title"),
                     value: model.trackOffsetMs,
                     decrement: { model.adjustTrackOffsetMs(-100) },
@@ -2929,6 +2998,7 @@ struct MainLyricPreviewPanel: View {
     // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var chromeless = false
+    var typographyOverride: AppSettings.TypographySettings? = nil
     @State private var emptyLyricsPreviewKey = ""
     @State private var hiddenEmptyLyricsPreviewKey = ""
     @State private var emptyLyricsPreviewToken = UUID()
@@ -2941,7 +3011,11 @@ struct MainLyricPreviewPanel: View {
                 if !rows.isEmpty {
                     VStack(spacing: 4) {
                         ForEach(rows) { row in
-                            MainLyricPreviewRowView(row: row, positionMs: model.adjustedPositionMs)
+                            MainLyricPreviewRowView(
+                                row: row,
+                                positionMs: model.adjustedPositionMs,
+                                typographyOverride: typographyOverride
+                            )
                         }
                     }
                     .frame(maxWidth: .infinity, minHeight: reservedContentHeight, alignment: .center)
@@ -2965,7 +3039,7 @@ struct MainLyricPreviewPanel: View {
     }
 
     private var reservedContentHeight: CGFloat {
-        let typography = settings.typographySettings()
+        let typography = typographyOverride ?? settings.typographySettings()
         let primarySize = typography.scaledSize(slotId: AppSettings.typoMainPreviewOriginal, baseSize: 17)
         let pronunciationSize = typography.scaledSize(slotId: AppSettings.typoMainPreviewPronunciation, baseSize: 14.5)
         let translationSize = typography.scaledSize(slotId: AppSettings.typoMainPreviewTranslation, baseSize: 14.5)
@@ -3380,6 +3454,7 @@ private struct MainLyricPreviewRowView: View {
     @EnvironmentObject private var settings: AppSettings
     var row: MainLyricPreviewRow
     var positionMs: Int64
+    var typographyOverride: AppSettings.TypographySettings? = nil
     @State private var contentWidth: CGFloat = 0
 
     var body: some View {
@@ -3423,7 +3498,7 @@ private struct MainLyricPreviewRowView: View {
 
     private var typography: AppSettings.TypographySettings {
         _ = settings.typographyRevision
-        return settings.typographySettings()
+        return typographyOverride ?? settings.typographySettings()
     }
 
     private var lineProgress: CGFloat {
@@ -6825,6 +6900,7 @@ struct SettingsView: View {
     private enum SettingsTab: String, CaseIterable, Identifiable {
         case lyrics
         case display
+        case fullscreen
         case ai
         case tools
 
@@ -6920,26 +6996,29 @@ struct SettingsView: View {
     }
 
     private var settingsTabs: some View {
-        HStack(spacing: 10) {
-            ForEach(SettingsTab.allCases) { tab in
-                Button {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        selectedTab = tab
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(SettingsTab.allCases) { tab in
+                    Button {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            selectedTab = tab
+                        }
+                    } label: {
+                        Text(settings.t(tab.titleKey))
+                            .font(.pretendard(15, weight: .bold))
+                            .foregroundStyle(selectedTab == tab ? Color(red: 0.08, green: 0.08, blue: 0.09) : .white)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 16)
+                            .frame(minWidth: 96, minHeight: 48)
+                            .background(
+                                selectedTab == tab
+                                    ? Color(red: 0.94, green: 0.94, blue: 0.95)
+                                    : Color(red: 0.17, green: 0.17, blue: 0.19),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
                     }
-                } label: {
-                    Text(settings.t(tab.titleKey))
-                        .font(.pretendard(15, weight: .bold))
-                        .foregroundStyle(selectedTab == tab ? Color(red: 0.08, green: 0.08, blue: 0.09) : .white)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 48)
-                        .background(
-                            selectedTab == tab
-                                ? Color(red: 0.94, green: 0.94, blue: 0.95)
-                                : Color(red: 0.17, green: 0.17, blue: 0.19),
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        )
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -6951,6 +7030,8 @@ struct SettingsView: View {
             lyricsSettingsPage
         case .display:
             displaySettingsPage
+        case .fullscreen:
+            fullscreenSettingsPage
         case .ai:
             aiSettingsPage
         case .tools:
@@ -7453,6 +7534,156 @@ struct SettingsView: View {
         }
     }
 
+    private var fullscreenSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            settingsSection(settings.t("vinyl.mode"), description: settings.t("vinyl.settings.subtitle")) {
+                settingsCard(
+                    settings.t("vinyl.settings.album_size"),
+                    description: settings.t("vinyl.settings.album_size_desc")
+                ) {
+                    HStack {
+                        Slider(value: Binding(get: {
+                            Double(AppSettings.clampVinylSizePercent(settings.vinylAlbumSizePercent))
+                        }, set: { value in
+                            settings.vinylAlbumSizePercent = AppSettings.clampVinylSizePercent(Int(value.rounded()))
+                        }), in: 70...140, step: 5, onEditingChanged: { editing in
+                            if !editing { model.showSavedToast(settings.t("toast.settings_saved")) }
+                        })
+                        Text("\(AppSettings.clampVinylSizePercent(settings.vinylAlbumSizePercent))%")
+                            .font(.pretendard(13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+
+                settingsCard(
+                    settings.t("vinyl.settings.record_size"),
+                    description: settings.t("vinyl.settings.record_size_desc")
+                ) {
+                    HStack {
+                        Slider(value: Binding(get: {
+                            Double(AppSettings.clampVinylSizePercent(settings.vinylRecordSizePercent))
+                        }, set: { value in
+                            settings.vinylRecordSizePercent = AppSettings.clampVinylSizePercent(Int(value.rounded()))
+                        }), in: 70...140, step: 5, onEditingChanged: { editing in
+                            if !editing { model.showSavedToast(settings.t("toast.settings_saved")) }
+                        })
+                        Text("\(AppSettings.clampVinylSizePercent(settings.vinylRecordSizePercent))%")
+                            .font(.pretendard(13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(settings.t("vinyl.settings.tonearm_title"))
+                        .font(.pretendard(18, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text(settings.t("vinyl.settings.tonearm_subtitle"))
+                        .font(.pretendard(12, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.58))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 8)
+
+                settingsCard(
+                    settings.t("vinyl.settings.tonearm_style"),
+                    description: settings.t("vinyl.settings.tonearm_style_desc")
+                ) {
+                    Picker("", selection: Binding(get: {
+                        AppSettings.normalizeVinylTonearmStyle(settings.vinylTonearmStyle)
+                    }, set: { value in
+                        settings.vinylTonearmStyle = AppSettings.normalizeVinylTonearmStyle(value)
+                        model.showSavedToast(settings.t("toast.settings_saved"))
+                    })) {
+                        Text(settings.t("vinyl.settings.tonearm_style_s")).tag(AppSettings.vinylTonearmStyleS)
+                        Text(settings.t("vinyl.settings.tonearm_style_straight")).tag(AppSettings.vinylTonearmStyleStraight)
+                        Text(settings.t("vinyl.settings.tonearm_style_j")).tag(AppSettings.vinylTonearmStyleJ)
+                        Text(settings.t("vinyl.settings.tonearm_style_linear")).tag(AppSettings.vinylTonearmStyleLinear)
+                    }
+                    .labelsHidden()
+                    .settingsMenuSurface()
+                }
+
+                settingsCard(
+                    settings.t("vinyl.settings.tonearm_finish"),
+                    description: settings.t("vinyl.settings.tonearm_finish_desc")
+                ) {
+                    Picker("", selection: Binding(get: {
+                        AppSettings.normalizeVinylTonearmFinish(settings.vinylTonearmFinish)
+                    }, set: { value in
+                        settings.vinylTonearmFinish = AppSettings.normalizeVinylTonearmFinish(value)
+                        model.showSavedToast(settings.t("toast.settings_saved"))
+                    })) {
+                        Text(settings.t("vinyl.settings.tonearm_finish_white")).tag(AppSettings.vinylTonearmFinishWhite)
+                        Text(settings.t("vinyl.settings.tonearm_finish_silver")).tag(AppSettings.vinylTonearmFinishSilver)
+                        Text(settings.t("vinyl.settings.tonearm_finish_black")).tag(AppSettings.vinylTonearmFinishBlack)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                settingsCard(
+                    settings.t("vinyl.settings.tonearm_size"),
+                    description: settings.t("vinyl.settings.tonearm_size_desc")
+                ) {
+                    HStack {
+                        Slider(value: Binding(get: {
+                            Double(AppSettings.clampVinylTonearmSizePercent(settings.vinylTonearmSizePercent))
+                        }, set: { value in
+                            settings.vinylTonearmSizePercent = AppSettings.clampVinylTonearmSizePercent(Int(value.rounded()))
+                        }), in: 80...120, step: 5, onEditingChanged: { editing in
+                            if !editing { model.showSavedToast(settings.t("toast.settings_saved")) }
+                        })
+                        Text("\(AppSettings.clampVinylTonearmSizePercent(settings.vinylTonearmSizePercent))%")
+                            .font(.pretendard(13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+
+                settingsToggleCard(
+                    settings.t("vinyl.settings.animations"),
+                    description: settings.t("vinyl.settings.animations_desc"),
+                    binding: settingsSavedBinding(\.vinylAnimationsEnabled)
+                )
+
+                settingsToggleCard(
+                    settings.t("vinyl.settings.center_rotation"),
+                    description: settings.t("vinyl.settings.center_rotation_desc"),
+                    binding: settingsSavedBinding(\.vinylCenterRotationEnabled)
+                )
+
+                settingsToggleCard(
+                    settings.t("vinyl.settings.lyrics"),
+                    description: settings.t("vinyl.settings.lyrics_desc"),
+                    binding: settingsSavedBinding(\.vinylLyricsEnabled)
+                )
+            }
+
+            settingsSection(settings.t("section.typography"), description: settings.t("vinyl.settings.typography_desc")) {
+                ForEach(AppSettings.vinylTypographySlots) { slot in
+                    settingsCard(
+                        settings.t("typography.slot.\(slot.id)"),
+                        description: settings.t("typography.slot.\(slot.id)_desc")
+                    ) {
+                        VStack(spacing: 10) {
+                            HStack {
+                                Slider(value: typographySizeBinding(slot), in: 70...160, step: 1, onEditingChanged: { editing in
+                                    if !editing { model.showSavedToast(settings.t("toast.typography_saved")) }
+                                })
+                                Text("\(typographyStyle(slot).sizePercent)%")
+                                    .foregroundStyle(.white.opacity(0.68))
+                            }
+                            Picker(settings.t("field.weight"), selection: typographyWeightBinding(slot)) {
+                                Text(settings.t("typography.weight.regular")).tag(AppSettings.typoWeightRegular)
+                                Text(settings.t("typography.weight.semibold")).tag(AppSettings.typoWeightSemibold)
+                                Text(settings.t("typography.weight.bold")).tag(AppSettings.typoWeightBold)
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var aiSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
             settingsSection(settings.t("section.ai_lyrics"), description: settings.t("section.ai_lyrics_desc")) {
@@ -7691,8 +7922,16 @@ struct SettingsView: View {
                 .disabled(!model.spotifyUserConnected)
             }
 
-            settingsSection(settings.t("lyrics.sync.title"), description: settings.t("lyrics.sync.help")) {
-                settingsCard(settings.t("lyrics.sync.title")) {
+            settingsSection(settings.t("lyrics.tab.sync"), description: settings.t("lyrics.global_sync.help")) {
+                settingsCard(settings.t("lyrics.tab.sync")) {
+                    DetailedOffsetControls(
+                        title: settings.t("lyrics.global_sync.title"),
+                        help: settings.t("lyrics.global_sync.help"),
+                        value: model.globalOffsetMs,
+                        resetTitle: settings.t("lyrics.global_sync.reset"),
+                        adjust: { model.adjustGlobalOffsetMs($0) },
+                        reset: { model.setGlobalOffsetMs(0, notify: true) }
+                    )
                     DetailedOffsetControls(
                         title: settings.t("lyrics.sync.title"),
                         help: settings.t("lyrics.sync.help"),
