@@ -1217,6 +1217,11 @@ final class AppViewModel: ObservableObject {
         track = track.withPlayback(positionMs: position, playing: track.playing)
         currentTrack = track
         nowPositionMs = position
+        spotifyDJLyricsTimeline.registerExplicitSeek(
+            trackKey: track.stableKey,
+            playerPositionMs: position,
+            uptime: ProcessInfo.processInfo.systemUptime
+        )
         guard shouldSendSeekCommand(target: position) else { return }
         if spotifyAppRemotePlaybackService.connected || spotifyLivePolling {
             spotifyPlaybackInteractionGuard.registerSeek(

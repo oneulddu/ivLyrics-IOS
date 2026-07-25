@@ -76,6 +76,18 @@ struct SpotifyDJLyricsTimeline {
         lyricsOffsetMs
     }
 
+    mutating func registerExplicitSeek(
+        trackKey incomingTrackKey: String,
+        playerPositionMs: Int64,
+        uptime: TimeInterval
+    ) {
+        guard incomingTrackKey == trackKey else { return }
+        handoffPending = false
+        lastPlayerPositionMs = max(0, playerPositionMs)
+        lastLyricsPositionMs = lastPlayerPositionMs + lyricsOffsetMs
+        lastSampleAt = max(0, uptime)
+    }
+
     mutating func reset() {
         trackKey = ""
         lastPlaying = false
