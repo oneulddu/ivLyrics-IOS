@@ -109,6 +109,7 @@ actor LyricsRepository {
     }
 
     typealias CachedLyricsLoadedHandler = @MainActor @Sendable (CachedLyricsPreview) async -> Void
+    typealias ProviderLoadingHandler = @MainActor @Sendable (String) async -> Void
     typealias SpotifyMetadataResolvedHandler = @MainActor @Sendable (ResolvedSpotifyMetadata) async -> Void
 
     struct SpotifyCredentialValidation: Sendable {
@@ -245,6 +246,7 @@ actor LyricsRepository {
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
         onCachedLyricsLoaded: CachedLyricsLoadedHandler? = nil,
+        onProviderLoading: ProviderLoadingHandler? = nil,
         onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler? = nil,
         allowPolicyChangeRetry: Bool = true
     ) async throws -> LoadedLyrics {
@@ -257,6 +259,7 @@ actor LyricsRepository {
                 track: track,
                 settings: settings,
                 onCachedLyricsLoaded: onCachedLyricsLoaded,
+                onProviderLoading: onProviderLoading,
                 onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                 allowPolicyChangeRetry: allowPolicyChangeRetry
             )
@@ -265,6 +268,7 @@ actor LyricsRepository {
             track: track,
             settings: settings,
             onCachedLyricsLoaded: onCachedLyricsLoaded,
+            onProviderLoading: onProviderLoading,
             onSpotifyMetadataResolved: onSpotifyMetadataResolved,
             allowPolicyChangeRetry: allowPolicyChangeRetry
         )
@@ -274,6 +278,7 @@ actor LyricsRepository {
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
         onCachedLyricsLoaded: CachedLyricsLoadedHandler? = nil,
+        onProviderLoading: ProviderLoadingHandler? = nil,
         onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler? = nil,
         allowPolicyChangeRetry: Bool = true
     ) async throws -> LoadedLyrics {
@@ -299,6 +304,7 @@ actor LyricsRepository {
                         track: track,
                         settings: latestSettings,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -373,6 +379,7 @@ actor LyricsRepository {
                             track: track,
                             settings: latestSettings,
                             onCachedLyricsLoaded: onCachedLyricsLoaded,
+                            onProviderLoading: onProviderLoading,
                             onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                             allowPolicyChangeRetry: false
                         )
@@ -407,6 +414,7 @@ actor LyricsRepository {
                             track: track,
                             settings: latestSettings,
                             onCachedLyricsLoaded: onCachedLyricsLoaded,
+                            onProviderLoading: onProviderLoading,
                             onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                             allowPolicyChangeRetry: false
                         )
@@ -437,6 +445,7 @@ actor LyricsRepository {
                         track: track,
                         settings: latestSettings,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -464,6 +473,7 @@ actor LyricsRepository {
                         track: track,
                         settings: latestSettings,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -531,6 +541,7 @@ actor LyricsRepository {
                         track: track,
                         settings: latestSettings,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -584,6 +595,7 @@ actor LyricsRepository {
                 artworkURL: spotifyMatch?.artworkURL,
                 logs: logs,
                 onCachedLyricsLoaded: onCachedLyricsLoaded,
+                onProviderLoading: onProviderLoading,
                 onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                 allowPolicyChangeRetry: allowPolicyChangeRetry
             )
@@ -644,6 +656,7 @@ actor LyricsRepository {
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
         onCachedLyricsLoaded: CachedLyricsLoadedHandler?,
+        onProviderLoading: ProviderLoadingHandler?,
         onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler?,
         allowPolicyChangeRetry: Bool
     ) async throws -> LoadedLyrics {
@@ -673,6 +686,7 @@ actor LyricsRepository {
                         track: track,
                         settings: latestSettings,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -986,6 +1000,9 @@ actor LyricsRepository {
         func loadOnce(_ providerId: String) async -> ProviderVariants? {
             if attempted.contains(providerId) { return attempts[providerId] }
             attempted.insert(providerId)
+            if let providerName = AppSettings.standardLyricsProviderById(providerId)?.name {
+                await onProviderLoading?(providerName)
+            }
             do {
                 if let variants = try await loadProviderVariants(
                     providerId: providerId,
@@ -2966,6 +2983,7 @@ actor LyricsRepository {
         artworkURL: URL?,
         logs: [String],
         onCachedLyricsLoaded: CachedLyricsLoadedHandler?,
+        onProviderLoading: ProviderLoadingHandler?,
         onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler?,
         allowPolicyChangeRetry: Bool
     ) async throws -> LoadedLyrics {
@@ -2994,6 +3012,12 @@ actor LyricsRepository {
             syncDataSelectionContext: context
         )
         do {
+            let loadingProviders = policy.orderedProviders
+                .filter { policy.allows($0) }
+                .map(providerDisplayName)
+            if !loadingProviders.isEmpty {
+                await onProviderLoading?(loadingProviders.joined(separator: " · "))
+            }
             let orchestration = try await LyricsProviderCredentialManager.shared.fetch(
                 request,
                 policy: policy,
@@ -3020,6 +3044,7 @@ actor LyricsRepository {
                         track: track,
                         settings: latestSettings,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -3111,6 +3136,7 @@ actor LyricsRepository {
                         track: track,
                         settings: finalSettings,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
+                        onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                         allowPolicyChangeRetry: false
                     )
@@ -3132,6 +3158,7 @@ actor LyricsRepository {
                     track: track,
                     settings: latestSettings,
                     onCachedLyricsLoaded: onCachedLyricsLoaded,
+                    onProviderLoading: onProviderLoading,
                     onSpotifyMetadataResolved: onSpotifyMetadataResolved,
                     allowPolicyChangeRetry: false
                 )

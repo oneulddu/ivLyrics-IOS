@@ -15,12 +15,19 @@ actor AiLyricsRepository {
     private let supplementTaskPronunciation = "pronunciation"
     private let supplementTaskTranslation = "translation"
     private let tmiPromptVersion = "origin-v1"
+    private let culturalAnnotationPromptVersion = "cultural-v4"
     private let diskCache = LyricsDiskCache(namespace: "ai_lyrics", maxEntries: 500)
     private let metadataDiskCache = RawResponseDiskCache(namespace: "ai_metadata_cache", maxEntries: 500)
     private let tmiDiskCache = RawResponseDiskCache(namespace: "ai_tmi_cache", maxEntries: 500)
+    private let culturalAnnotationDiskCache = RawResponseDiskCache(
+        namespace: "ai_cultural_annotations",
+        maxEntries: 500,
+        formatVersion: 4
+    )
     private var memoryCache: [String: LyricsResult] = [:]
     private var metadataMemoryCache: [String: MetadataTranslation] = [:]
     private var tmiMemoryCache: [String: TmiInfo] = [:]
+    private var culturalAnnotationMemoryCache: [String: [CulturalAnnotation]] = [:]
     private var lastPartialEmitUptime: TimeInterval = 0
     private let partialEmitMinInterval: TimeInterval = 0.6
 
@@ -139,6 +146,14 @@ actor AiLyricsRepository {
         var info: TmiInfo?
         var errorMessage: String
         var logs: [String]
+    }
+
+    struct CulturalAnnotationResponse: Sendable {
+        var requestKey: String
+        var annotations: [CulturalAnnotation]
+        var logs: [String]
+        var hadError: Bool
+        var errorMessage: String
     }
 
     func loadSupplements(
@@ -613,13 +628,105 @@ actor AiLyricsRepository {
         }
     }
 
+    func loadCulturalAnnotations(
+        track: TrackSnapshot,
+        baseResult: LyricsResult,
+        settings: AppSettings.Snapshot,
+        sourceLangOverride: String = "",
+        bypassCache: Bool = false
+    ) async -> CulturalAnnotationResponse {
+        var logs: [String] = []
+        func response(
+            requestKey: String = "",
+            annotations: [CulturalAnnotation] = [],
+            hadError: Bool = false,
+            errorMessage: String = ""
+        ) -> CulturalAnnotationResponse {
+            CulturalAnnotationResponse(
+                requestKey: requestKey,
+                annotations: annotations,
+                logs: logs,
+                hadError: hadError,
+                errorMessage: errorMessage
+            )
+        }
+
+        guard settings.culturalAnnotationsEnabled, !baseResult.lines.isEmpty else {
+            return response()
+        }
+        let lineTexts = baseResult.lines.map(displayLineText)
+        let textPayload = lineTexts.joined(separator: "\n")
+        guard !textPayload.trimmed.isEmpty else {
+            return response()
+        }
+        let detectedSourceLang = Self.detectLanguage(textPayload)
+        let normalizedOverride = AppSettings.normalizeLanguageCode(sourceLangOverride)
+        let sourceLang = normalizedOverride.isEmpty || normalizedOverride.caseInsensitiveCompare("auto") == .orderedSame
+            ? detectedSourceLang
+            : normalizedOverride
+        let targetLang = settings.resolveTargetLanguage(sourceLang: sourceLang)
+        let requestKey = "cultural|"
+            + track.stableKey
+            + "|source=\(sourceLang)"
+            + "|target=\(targetLang)"
+            + "|prompt=\(culturalAnnotationPromptVersion)"
+            + "|provider=\(settings.provider.id)"
+            + "|model=\(settings.model)"
+            + "|url=\(settings.baseUrl)"
+            + "|temp=\(settings.temperature)"
+            + "|text=\(IvLyricsUtilities.sha256(textPayload))"
+
+        if !bypassCache {
+            if let cached = culturalAnnotationMemoryCache[requestKey] {
+                logs.append("ai cultural annotations cache hit: \(settings.provider.label)")
+                return response(requestKey: requestKey, annotations: cached)
+            }
+            if let cached = culturalAnnotationsFromDisk(requestKey) {
+                culturalAnnotationMemoryCache[requestKey] = cached
+                logs.append("ai cultural annotations disk cache hit: \(settings.provider.label)")
+                return response(requestKey: requestKey, annotations: cached)
+            }
+        }
+        guard settings.hasApiKey else {
+            logs.append("ai cultural annotations skipped: API key missing for \(settings.provider.label)")
+            return response(requestKey: requestKey, hadError: true, errorMessage: "API key missing")
+        }
+        guard !settings.model.trimmed.isEmpty else {
+            logs.append("ai cultural annotations skipped: model missing for \(settings.provider.label)")
+            return response(requestKey: requestKey, hadError: true, errorMessage: "AI model missing")
+        }
+
+        logs.append("ai cultural annotations: provider=\(settings.provider.label) / source=\(sourceLang) / target=\(targetLang)")
+        do {
+            let raw = try await callProviderRaw(
+                prompt: buildCulturalAnnotationPrompt(
+                    lineTexts: lineTexts,
+                    sourceLang: sourceLang,
+                    targetLang: targetLang
+                ),
+                settings: settings
+            )
+            let annotations = try parseCulturalAnnotations(raw: raw, lineTexts: lineTexts)
+            culturalAnnotationMemoryCache[requestKey] = annotations
+            putCulturalAnnotationsToDisk(cacheKey: requestKey, annotations: annotations)
+            logs.append("ai cultural annotations response: \(annotations.count)")
+            return response(requestKey: requestKey, annotations: annotations)
+        } catch {
+            let message = error.localizedDescription
+            logs.append("ai cultural annotations error: \(message)")
+            return response(requestKey: requestKey, hadError: true, errorMessage: message)
+        }
+    }
+
     func clearCache() {
         memoryCache.removeAll()
         metadataMemoryCache.removeAll()
         tmiMemoryCache.removeAll()
+        culturalAnnotationMemoryCache.removeAll()
         diskCache.clear()
         metadataDiskCache.clear()
         tmiDiskCache.clear()
+        culturalAnnotationDiskCache.clear()
     }
 
     func clearTrackCache(_ trackKey: String) {
@@ -628,9 +735,11 @@ actor AiLyricsRepository {
         memoryCache = memoryCache.filter { !$0.key.hasPrefix(key + "|") }
         metadataMemoryCache = metadataMemoryCache.filter { !$0.key.hasPrefix("metadata|" + key + "|") }
         tmiMemoryCache = tmiMemoryCache.filter { !$0.key.hasPrefix("tmi|" + key + "|") }
+        culturalAnnotationMemoryCache = culturalAnnotationMemoryCache.filter { !$0.key.hasPrefix("cultural|" + key + "|") }
         diskCache.removeByKeyPrefix(key + "|")
         metadataDiskCache.removeByKeyPrefix("metadata|" + key + "|")
         tmiDiskCache.removeByKeyPrefix("tmi|" + key + "|")
+        culturalAnnotationDiskCache.removeByKeyPrefix("cultural|" + key + "|")
     }
 
     private func callProviderRaw(prompt: String, settings: AppSettings.Snapshot) async throws -> String {
@@ -1339,6 +1448,100 @@ actor AiLyricsRepository {
         return part.syllables.map(\.text).joined().trimmed
     }
 
+    private func buildCulturalAnnotationPrompt(
+        lineTexts: [String],
+        sourceLang: String,
+        targetLang: String
+    ) -> String {
+        let numberedLyrics = lineTexts.enumerated().map { index, text in
+            "L\(index)\t\(promptRowText(text))"
+        }.joined(separator: "\n")
+        return """
+        Analyze the lyrics line by line for a reader whose language is \(targetLang).
+        The source language is \(sourceLang).
+
+        Find ONLY expressions whose meaning depends on cultural background that a reader from another culture is likely to miss. This is not a translation, vocabulary, grammar, slang, or general lyric explanation task.
+
+        REQUIRED ELIGIBILITY GATE - ALL THREE ANSWERS MUST BE YES:
+        1. Does understanding the line require a concrete fact outside the lyrics, such as a named custom, institution, practice, event, belief, game, or identifiable work?
+        2. Is that fact specific to a particular culture, region, community, or historical setting rather than broadly understandable human experience?
+        3. Would a competent natural translation still fail to carry that fact?
+        If any answer is no, do not annotate.
+
+        ANNOTATE ONLY WHEN SEPARATE CULTURAL KNOWLEDGE IS REQUIRED:
+        - country- or region-specific school life, institutions, customs, traditional games, or daily practices
+        - historical, religious, or social institutions and their culture-specific implications
+        - an unmistakable quotation or parody whose exact source or work can be identified
+        - an established culture-specific meaning that a natural translation cannot carry
+
+        DO NOT ANNOTATE:
+        - ordinary words, slang, conversational phrasing, code-switching, or expressions understandable from context
+        - ordinary metaphors, poetic imagery, symbolism, atmosphere, emotion, or possible literary interpretations
+        - punctuation, quotation marks, typography, rhyme, repetition, or other writing devices
+        - broadly shared images such as heaven, hell, an abyss, darkness, light, moonlight, shadows, seasons, dreams, tears, or broken/scattered things
+        - an idiom's etymology, religious origin, or dictionary history when its natural translation already conveys the lyric
+
+        STRICT JUDGMENT RULES:
+        - The note must state a verifiable external cultural fact. If it merely interprets what the image means, symbolizes, suggests, or emphasizes, omit it.
+        - Quotation marks alone never prove a quotation or allusion. Only annotate one when unmistakable textual evidence identifies the exact source or work.
+        - Do not infer a country from the language alone.
+        - Require high confidence. Prefer zero annotations over a weak annotation.
+        - Most songs should produce zero or only a few annotations across the entire lyrics. Never annotate lines merely to provide coverage.
+        - Each note must be one short sentence in \(targetLang), at most 72 characters.
+        - expression must be an exact substring of that original lyric line.
+        - Return at most 3 annotations per line.
+
+        MANDATORY NEGATIVE EXAMPLES:
+        - Quoted text such as "目を閉じて、また起きて、" is not a cultural reference merely because it uses quotation marks.
+        - "奈落の底" is an ordinary abyss/hell metaphor when the translation already conveys "the bottom of the abyss"; do not explain it.
+        - "バラバラの月光" is ordinary poetic imagery; do not invent a cultural meaning or symbolism for it.
+        - Notes such as "the quotation marks imply a cited line," "this symbolizes despair," or "the moonlight represents fragmentation" are literary interpretation, not cultural context, and must never be returned.
+
+        POSITIVE CONTRAST:
+        - "缶蹴り" or "ケイドロ" may need a note because they name locally familiar children's games whose rules are not carried by translation.
+        - "夕焼け小焼け" may need a note when the line relies on the specific song's use in local evening return-home broadcasts.
+
+        Return JSON only in this exact shape:
+        {"annotations":[{"lineIndex":0,"expression":"exact original expression","note":"brief explanation"}]}
+        Use zero-based lineIndex. Return {"annotations":[]} when nothing truly requires cultural knowledge.
+
+        \(numberedLyrics)
+        """
+    }
+
+    private func parseCulturalAnnotations(raw: String, lineTexts: [String]) throws -> [CulturalAnnotation] {
+        let root = try parseJsonObjectResponse(raw)
+        guard let values = root["annotations"] as? [Any], !lineTexts.isEmpty else { return [] }
+        var result: [CulturalAnnotation] = []
+        var countByLine: [Int: Int] = [:]
+        var seen: Set<String> = []
+        for rawValue in values {
+            guard let value = rawValue as? [String: Any] else { continue }
+            let lineIndex = intValue(value["lineIndex"], fallback: -1)
+            guard lineTexts.indices.contains(lineIndex) else { continue }
+            let expression = stringValue(value["expression"])
+            let note = CulturalAnnotation.compactNote(stringValue(value["note"]))
+            let dedupeKey = "\(lineIndex)\n\(expression)"
+            guard !expression.isEmpty,
+                  !note.isEmpty,
+                  lineTexts[lineIndex].contains(expression),
+                  !seen.contains(dedupeKey),
+                  countByLine[lineIndex, default: 0] < 3 else {
+                continue
+            }
+            seen.insert(dedupeKey)
+            countByLine[lineIndex, default: 0] += 1
+            result.append(CulturalAnnotation(lineIndex: lineIndex, expression: expression, note: note))
+        }
+        return result.sorted {
+            if $0.lineIndex != $1.lineIndex { return $0.lineIndex < $1.lineIndex }
+            let text = lineTexts[$0.lineIndex]
+            let left = text.range(of: $0.expression)?.lowerBound ?? text.endIndex
+            let right = text.range(of: $1.expression)?.lowerBound ?? text.endIndex
+            return left < right
+        }
+    }
+
     private func buildTaggedPayload(_ requests: [SupplementRequest]) -> String {
         requests.enumerated().map { index, request in
             "\(rowId(index))\t\(promptRowText(request.text))"
@@ -1744,6 +1947,28 @@ actor AiLyricsRepository {
             return
         }
         tmiDiskCache.put(cacheKey, body: raw)
+    }
+
+    private func culturalAnnotationsFromDisk(_ cacheKey: String) -> [CulturalAnnotation]? {
+        let raw = culturalAnnotationDiskCache.get(cacheKey)
+        guard !raw.trimmed.isEmpty, let data = raw.data(using: .utf8) else { return nil }
+        do {
+            return try JSONDecoder().decode([CulturalAnnotation].self, from: data)
+        } catch {
+            culturalAnnotationDiskCache.remove(cacheKey)
+            return nil
+        }
+    }
+
+    private func putCulturalAnnotationsToDisk(
+        cacheKey: String,
+        annotations: [CulturalAnnotation]
+    ) {
+        guard let data = try? JSONEncoder().encode(annotations),
+              let raw = String(data: data, encoding: .utf8) else {
+            return
+        }
+        culturalAnnotationDiskCache.put(cacheKey, body: raw)
     }
 
     private func stringValue(_ value: Any?) -> String {

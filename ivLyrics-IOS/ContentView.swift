@@ -1364,7 +1364,9 @@ struct HeaderBar: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("ivLyrics")
                     .font(.pretendard(21, weight: .bold))
-                Text(model.status.text(settings: settings))
+                Text(model.status == .loading
+                    ? model.lyricsLoadingText
+                    : model.status.text(settings: settings))
                     .font(.pretendard(12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.72))
             }
@@ -1522,8 +1524,14 @@ private struct LyricsPageOverlay: View {
                     .contentShape(Rectangle())
                     .gesture(dismissDragGesture)
 
+                if model.culturalAnnotationsLoading {
+                    CulturalAnnotationLoadingPill()
+                        .padding(.top, 8)
+                        .padding(.horizontal, 24)
+                }
+
                 LyricsTimelineScrollView(
-                    topPadding: 16,
+                    topPadding: model.culturalAnnotationsLoading ? 10 : 16,
                     bottomPadding: safeAreaBottom + 28,
                     horizontalPadding: 24,
                     centerAnchorY: 0.42
@@ -2431,6 +2439,8 @@ private struct LandscapeCommandBar: View {
 }
 
 private struct LandscapeLyricsPane: View {
+    @EnvironmentObject private var model: AppViewModel
+
     var body: some View {
         LyricsTimelineScrollView(
             topPadding: 6,
@@ -2444,6 +2454,34 @@ private struct LandscapeLyricsPane: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
         }
+        .overlay(alignment: .topTrailing) {
+            if model.culturalAnnotationsLoading {
+                CulturalAnnotationLoadingPill()
+                    .padding(.top, 8)
+                    .padding(.trailing, 12)
+            }
+        }
+    }
+}
+
+private struct CulturalAnnotationLoadingPill: View {
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white)
+            Text(model.culturalAnnotationsLoadingText)
+                .font(.pretendard(12, weight: .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.white.opacity(0.84))
+        .padding(.horizontal, 12)
+        .frame(height: 34)
+        .background(.black.opacity(0.34), in: Capsule())
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .allowsHitTesting(false)
     }
 }
 
@@ -2672,7 +2710,7 @@ private struct TmiSheetView: View {
             HStack(spacing: 12) {
                 ProgressView()
                     .tint(.white)
-                Text(settings.t("tmi.loading"))
+                Text(model.tmiLoadingText)
                     .font(.pretendard(13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.86))
                 Spacer(minLength: 0)
@@ -2999,6 +3037,7 @@ struct MainLyricPreviewPanel: View {
     @EnvironmentObject private var playbackClock: PlaybackClock
     var chromeless = false
     var typographyOverride: AppSettings.TypographySettings? = nil
+    var showsCulturalAnnotations = false
     @State private var emptyLyricsPreviewKey = ""
     @State private var hiddenEmptyLyricsPreviewKey = ""
     @State private var emptyLyricsPreviewToken = UUID()
@@ -3045,7 +3084,10 @@ struct MainLyricPreviewPanel: View {
         let translationSize = typography.scaledSize(slotId: AppSettings.typoMainPreviewTranslation, baseSize: 14.5)
         let primaryRow = primarySize * 1.22 + max(7, primarySize * 0.46 * 0.82)
         let secondaryRow = max(pronunciationSize, translationSize) * 1.18
-        return primaryRow + 2 * (4 + secondaryRow)
+        let culturalRow = showsCulturalAnnotations && settings.culturalAnnotationsEnabled
+            ? 4 + CGFloat(AppSettings.clampCulturalFontSize(settings.culturalAnnotationsVinylFontSize)) * 1.4
+            : 0
+        return primaryRow + 2 * (4 + secondaryRow) + culturalRow
     }
 
     private func previewRows(previewItems: Int) -> [MainLyricPreviewRow] {
@@ -3055,7 +3097,7 @@ struct MainLyricPreviewPanel: View {
         guard let entry = LyricsTimelineDisplayBuilder.previewItem(
             context: model.timelineContext,
             positionMs: model.adjustedPositionMs,
-            trackDurationMs: model.durationMs,
+            trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         ) else {
             return [MainLyricPreviewRow(text: settings.t("status.lyrics_waiting"), primary: true)]
@@ -3064,15 +3106,15 @@ struct MainLyricPreviewPanel: View {
         switch entry {
         case .interlude(let info):
             return [MainLyricPreviewRow.interlude(interludeLabel(info.kind))]
-        case .line(_, let line, _):
-            return previewRows(for: line, previewItems: previewItems)
+        case .line(let lineIndex, let line, _):
+            return previewRows(for: line, lineIndex: lineIndex, previewItems: previewItems)
         }
     }
 
     private func emptyPreviewRows() -> [MainLyricPreviewRow] {
         let detail = model.lyricsResult.detail.trimmed
         if model.status == .loading || isLoadingLyricsPreview(detail) {
-            return [.loading(settings.t("status.lyrics_loading"))]
+            return [.loading(model.lyricsLoadingText)]
         }
         if hiddenEmptyLyricsPreviewKey == buildEmptyLyricsPreviewKey(detail: detail) {
             return []
@@ -3080,9 +3122,16 @@ struct MainLyricPreviewPanel: View {
         return [MainLyricPreviewRow(text: detail.isEmpty ? settings.t("status.lyrics_waiting") : detail, primary: true)]
     }
 
-    private func previewRows(for line: LyricsLine, previewItems: Int) -> [MainLyricPreviewRow] {
+    private func previewRows(for line: LyricsLine, lineIndex: Int, previewItems: Int) -> [MainLyricPreviewRow] {
         var rows: [MainLyricPreviewRow] = []
         let original = originalPreviewText(line)
+        let culturalAnnotations = showsCulturalAnnotations && settings.culturalAnnotationsEnabled
+            ? CulturalAnnotation.forLine(
+                model.culturalAnnotations,
+                lineIndex: lineIndex,
+                text: original.text
+            )
+            : []
         if AppSettings.previewItemEnabled(previewItems, AppSettings.previewItemOriginal) {
             addPreviewRow(&rows, text: original.text, rubyText: original.rubyText, syllables: original.syllables, kind: original.kind, speaker: line.speaker, slotId: AppSettings.typoMainPreviewOriginal)
         }
@@ -3090,7 +3139,7 @@ struct MainLyricPreviewPanel: View {
             addSupplementPreviewRow(
                 &rows,
                 text: line.pronunciationText,
-                generatingText: settings.t("loading.pronunciation"),
+                generatingText: model.aiPronunciationLoadingText,
                 fallback: original,
                 speaker: line.speaker,
                 generating: model.lyricsSupplementPronunciationLoading,
@@ -3101,7 +3150,7 @@ struct MainLyricPreviewPanel: View {
             addSupplementPreviewRow(
                 &rows,
                 text: line.translationText,
-                generatingText: settings.t("loading.translation"),
+                generatingText: model.aiTranslationLoadingText,
                 fallback: original,
                 speaker: line.speaker,
                 generating: model.lyricsSupplementTranslationLoading,
@@ -3110,6 +3159,26 @@ struct MainLyricPreviewPanel: View {
         }
         if rows.isEmpty {
             addPreviewRow(&rows, text: original.text, rubyText: original.rubyText, syllables: original.syllables, kind: original.kind, speaker: line.speaker, slotId: AppSettings.typoMainPreviewOriginal)
+        }
+        if !culturalAnnotations.isEmpty,
+           let originalIndex = rows.firstIndex(where: { $0.slotId == AppSettings.typoMainPreviewOriginal }) {
+            rows[originalIndex].text = CulturalAnnotation.annotateText(
+                rows[originalIndex].text,
+                annotations: culturalAnnotations
+            )
+            rows[originalIndex].syllables = CulturalAnnotation.annotateSyllables(
+                text: original.text,
+                syllables: rows[originalIndex].syllables,
+                annotations: culturalAnnotations
+            )
+            rows[originalIndex].rubyText = ""
+        }
+        for (index, annotation) in culturalAnnotations.enumerated() {
+            rows.append(MainLyricPreviewRow(
+                text: "\(index + 1). \(annotation.note)",
+                primary: false,
+                type: .cultural
+            ))
         }
         return rows.map { row in
             var syncedRow = row
@@ -3350,6 +3419,7 @@ private enum MainLyricPreviewRowType: String {
     case text
     case interlude
     case loading
+    case cultural
 }
 
 private struct MainLyricPreviewRow: Identifiable {
@@ -3472,6 +3542,14 @@ private struct MainLyricPreviewRowView: View {
         case .loading:
             MainLyricPreviewLoadingSkeleton()
             .frame(maxWidth: .infinity, alignment: .center)
+        case .cultural:
+            Text(row.text)
+                .font(vinylCulturalAnnotationFont)
+                .foregroundStyle(.white.opacity(Double(settings.culturalAnnotationsVinylOpacity) / 100))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .center)
         case .text:
             MainLyricPreviewSlideLayout(lineProgress: lineProgress) {
                 previewTextView
@@ -3499,6 +3577,28 @@ private struct MainLyricPreviewRowView: View {
     private var typography: AppSettings.TypographySettings {
         _ = settings.typographyRevision
         return typographyOverride ?? settings.typographySettings()
+    }
+
+    private var vinylCulturalAnnotationFont: Font {
+        let size = CGFloat(AppSettings.clampCulturalFontSize(settings.culturalAnnotationsVinylFontSize))
+        let weight: Font.Weight
+        switch AppSettings.clampCulturalFontWeight(settings.culturalAnnotationsVinylFontWeight) {
+        case 100: weight = .ultraLight
+        case 200: weight = .thin
+        case 300: weight = .light
+        case 400: weight = .regular
+        case 500: weight = .medium
+        case 600: weight = .semibold
+        case 700: weight = .bold
+        case 800: weight = .heavy
+        default: weight = .black
+        }
+        switch AppSettings.normalizeCulturalFontFamily(settings.culturalAnnotationsVinylFontFamily) {
+        case "system": return .system(size: size, weight: weight)
+        case "serif": return .system(size: size, weight: weight, design: .serif)
+        case "monospace": return .system(size: size, weight: weight, design: .monospaced)
+        default: return .custom("Pretendard", size: size).weight(weight)
+        }
     }
 
     private var lineProgress: CGFloat {
@@ -3871,13 +3971,13 @@ struct LyricsTimelineView: View {
         let items = LyricsTimelineDisplayBuilder.items(
             context: timelineContext,
             positionMs: position,
-            trackDurationMs: model.durationMs,
+            trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )
         let activeItemID = LyricsTimelineDisplayBuilder.previewItem(
             context: timelineContext,
             positionMs: position,
-            trackDurationMs: model.durationMs,
+            trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )?.id
         let activeDisplayIndex = activeItemID.flatMap { id in
@@ -3892,8 +3992,20 @@ struct LyricsTimelineView: View {
         LazyVStack(spacing: 12) {
             if model.lyricsResult.lines.isEmpty {
                 if model.status == .loading {
-                    LyricsLoadingSkeleton()
-                        .padding(.horizontal, 14)
+                    VStack(alignment: .leading, spacing: 18) {
+                        HStack(spacing: 9) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                            Text(model.lyricsLoadingText)
+                                .font(.pretendard(13, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.78))
+                                .lineLimit(2)
+                        }
+                        LyricsLoadingSkeleton()
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
                 } else {
                     Text(model.lyricsResult.detail)
                         .font(.body.weight(.medium))
@@ -3914,10 +4026,18 @@ struct LyricsTimelineView: View {
                         switch item {
                         case .line(let index, let line, _):
                             let lineActive = itemActive || (activeItemID == nil && index == model.activeLineIndex)
+                            let originalText = model.displayText(for: line)
                             LyricsLineView(
                                 lineIndex: index,
                                 line: line,
-                                originalText: model.displayText(for: line),
+                                originalText: originalText,
+                                culturalAnnotations: settings.culturalAnnotationsEnabled
+                                    ? CulturalAnnotation.forLine(
+                                        model.culturalAnnotations,
+                                        lineIndex: index,
+                                        text: originalText
+                                    )
+                                    : [],
                                 active: lineActive,
                                 displayDistance: displayDistance,
                                 progress: lineActive ? model.progress(for: line) : 0,
@@ -4128,7 +4248,7 @@ private struct LyricsTimelineScrollView: View {
         LyricsTimelineDisplayBuilder.scrollTargetID(
             context: model.timelineContext,
             positionMs: model.adjustedPositionMs,
-            trackDurationMs: model.durationMs,
+            trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled,
             vocalPartAnchorsEnabled: !settings.karaokeDataAsLineSynced
         )
@@ -4894,6 +5014,7 @@ struct LyricsLineView: View, Equatable {
     var lineIndex: Int
     var line: LyricsLine
     var originalText: String
+    var culturalAnnotations: [CulturalAnnotation] = []
     var active: Bool
     var displayDistance: Double
     var progress: Double
@@ -4910,6 +5031,7 @@ struct LyricsLineView: View, Equatable {
         lhs.lineIndex == rhs.lineIndex
             && lhs.line == rhs.line
             && lhs.originalText == rhs.originalText
+            && lhs.culturalAnnotations == rhs.culturalAnnotations
             && lhs.active == rhs.active
             && lhs.displayDistance == rhs.displayDistance
             && lhs.progress == rhs.progress
@@ -4948,6 +5070,13 @@ struct LyricsLineView: View, Equatable {
                     .multilineTextAlignment(textAlignment)
             } else if !useVocalPartSupplements, translationLoading {
                 supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsTranslation, baseSize: 14)
+            }
+            ForEach(Array(culturalAnnotations.enumerated()), id: \.element.id) { index, annotation in
+                Text("\(index + 1). \(annotation.note)")
+                    .font(culturalAnnotationFont)
+                    .foregroundStyle(.white.opacity(Double(settings.culturalAnnotationsOpacity) / 100))
+                    .multilineTextAlignment(textAlignment)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: frameAlignment)
@@ -4991,6 +5120,7 @@ struct LyricsLineView: View, Equatable {
                             text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
                             rubyText: settings.japaneseFuriganaEnabled ? part.furiganaText : "",
                             syllables: shouldRenderTimedKaraoke ? part.syllables : [],
+                            culturalAnnotations: culturalAnnotations,
                             startTimeMs: part.startTimeMs,
                             endTimeMs: part.endTimeMs,
                             positionMs: positionMs,
@@ -5016,6 +5146,7 @@ struct LyricsLineView: View, Equatable {
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
                 syllables: line.syllables,
+                culturalAnnotations: culturalAnnotations,
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
@@ -5032,6 +5163,7 @@ struct LyricsLineView: View, Equatable {
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
                 syllables: [],
+                culturalAnnotations: culturalAnnotations,
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
@@ -5049,6 +5181,7 @@ struct LyricsLineView: View, Equatable {
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
                 syllables: [],
+                culturalAnnotations: culturalAnnotations,
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
@@ -5106,6 +5239,34 @@ struct LyricsLineView: View, Equatable {
 
     private func hasTimedSyllables(_ syllables: [LyricsLine.Syllable]) -> Bool {
         syllables.contains { $0.endTimeMs > $0.startTimeMs }
+    }
+
+    private var culturalAnnotationFont: Font {
+        let size = CGFloat(AppSettings.clampCulturalFontSize(settings.culturalAnnotationsFontSize))
+        let weight = culturalAnnotationFontWeight
+        switch AppSettings.normalizeCulturalFontFamily(settings.culturalAnnotationsFontFamily) {
+        case "system":
+            return .system(size: size, weight: weight)
+        case "serif":
+            return .system(size: size, weight: weight, design: .serif)
+        case "monospace":
+            return .system(size: size, weight: weight, design: .monospaced)
+        default:
+            return .custom("Pretendard-Regular", size: size).weight(weight)
+        }
+    }
+
+    private var culturalAnnotationFontWeight: Font.Weight {
+        switch AppSettings.clampCulturalFontWeight(settings.culturalAnnotationsFontWeight) {
+        case ...200: return .ultraLight
+        case 300: return .light
+        case 400: return .regular
+        case 500: return .medium
+        case 600: return .semibold
+        case 700: return .bold
+        case 800: return .heavy
+        default: return .black
+        }
     }
 
     private var lineActiveColor: Color {
@@ -5177,6 +5338,7 @@ struct SyllableKaraokeText: View {
     var text: String
     var rubyText: String = ""
     var syllables: [LyricsLine.Syllable]
+    var culturalAnnotations: [CulturalAnnotation] = []
     var startTimeMs: Int64
     var endTimeMs: Int64
     var positionMs: Int64
@@ -5207,7 +5369,10 @@ struct SyllableKaraokeText: View {
         let segments = karaokeSegments
         Group {
             if segments.isEmpty {
-                Text(text.isEmpty ? " " : text)
+                Text(CulturalAnnotation.annotateText(
+                    text.isEmpty ? " " : text,
+                    annotations: culturalAnnotations
+                ))
                     .foregroundStyle(fallbackColor)
                     .multilineTextAlignment(alignment)
                     .modifier(LyricGlyphEffectModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
@@ -5233,7 +5398,12 @@ struct SyllableKaraokeText: View {
 
     private var karaokeSegments: [KaraokeSyllableSegment] {
         let annotations = rubyAnnotations
-        let displaySyllables = effectiveSyllables
+        let sourceSyllables = effectiveSyllables
+        let displaySyllables = CulturalAnnotation.annotateSyllables(
+            text: text,
+            syllables: sourceSyllables,
+            annotations: culturalAnnotations
+        )
         let bounceActiveIndex = bounceEnabled && active && !displaySyllables.isEmpty
             ? activeSegmentIndex(in: displaySyllables)
             : nil
@@ -5241,7 +5411,9 @@ struct SyllableKaraokeText: View {
         timedSegments.reserveCapacity(displaySyllables.count)
         var sourceOffset = 0
         for (index, syllable) in displaySyllables.enumerated() {
-            let sourceLength = syllable.text.count
+            let sourceLength = sourceSyllables.indices.contains(index)
+                ? sourceSyllables[index].text.count
+                : syllable.text.count
             defer { sourceOffset += sourceLength }
             guard !syllable.text.isEmpty else { continue }
             let bounce = karaokeBounce(for: syllable, index: index, activeIndex: bounceActiveIndex)
@@ -5260,7 +5432,7 @@ struct SyllableKaraokeText: View {
         if !timedSegments.isEmpty {
             return timedSegments
         }
-        return untimedRubySegments(annotations: annotations)
+        return addingCulturalMarkers(to: untimedRubySegments(annotations: annotations))
     }
 
     private func untimedRubySegments(annotations: [FuriganaRepository.RubyAnnotation]) -> [KaraokeSyllableSegment] {
@@ -5307,6 +5479,39 @@ struct SyllableKaraokeText: View {
             }
         }
         return result
+    }
+
+    private func addingCulturalMarkers(
+        to segments: [KaraokeSyllableSegment]
+    ) -> [KaraokeSyllableSegment] {
+        let markers = CulturalAnnotation.markerInsertions(
+            in: text,
+            annotations: culturalAnnotations
+        )
+        guard !markers.isEmpty, !segments.isEmpty else { return segments }
+        var markerIndex = 0
+        var sourceOffset = 0
+        return segments.map { sourceSegment in
+            var segment = sourceSegment
+            let endOffset = sourceOffset + sourceSegment.text.count
+            var localMarkers: [CulturalAnnotation.MarkerInsertion] = []
+            while markerIndex < markers.count, markers[markerIndex].offset <= endOffset {
+                let marker = markers[markerIndex]
+                markerIndex += 1
+                if marker.offset > sourceOffset {
+                    localMarkers.append(marker)
+                }
+            }
+            for marker in localMarkers.reversed() {
+                let index = segment.text.index(
+                    segment.text.startIndex,
+                    offsetBy: marker.offset - sourceOffset
+                )
+                segment.text.insert(contentsOf: "[\(marker.number)]", at: index)
+            }
+            sourceOffset = endOffset
+            return segment
+        }
     }
 
     private var rubyAnnotations: [FuriganaRepository.RubyAnnotation] {
@@ -6898,21 +7103,32 @@ private struct SpotifySetupInstructionsPanel: View {
 
 struct SettingsView: View {
     private enum SettingsTab: String, CaseIterable, Identifiable {
+        case general
         case lyrics
-        case display
-        case fullscreen
+        case appearance
+        case player
         case ai
-        case tools
+        case system
 
         var id: String { rawValue }
         var titleKey: String { "tab.\(rawValue)" }
+        var systemImage: String {
+            switch self {
+            case .general: return "slider.horizontal.3"
+            case .lyrics: return "text.quote"
+            case .appearance: return "paintbrush"
+            case .player: return "play.rectangle"
+            case .ai: return "sparkles"
+            case .system: return "gearshape.2"
+            }
+        }
     }
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
     @State private var settingsLogsPresented = false
-    @State private var selectedTab: SettingsTab = .lyrics
+    @State private var selectedTab: SettingsTab = .general
     @State private var deezerARLInput = ""
     @State private var deezerCredentialStatus = ""
     @State private var paxsenixModels: [PaxsenixAIProvider.Model] = []
@@ -6936,8 +7152,13 @@ struct SettingsView: View {
                     settingsTabs
                         .padding(.top, 20)
 
-                    selectedSettingsPage
-                        .padding(.top, 22)
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(settings.t(selectedTab.titleKey))
+                            .font(.pretendard(21, weight: .bold))
+                            .foregroundStyle(.white)
+                        selectedSettingsPage
+                    }
+                    .padding(.top, 22)
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 18)
@@ -6985,13 +7206,14 @@ struct SettingsView: View {
             Button {
                 dismiss()
             } label: {
-                Text(settings.t("button.close"))
-                    .font(.pretendard(16, weight: .semibold))
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 88, height: 48)
-                    .background(Color(red: 0.23, green: 0.23, blue: 0.25), in: Capsule())
+                    .frame(width: 44, height: 44)
+                    .background(Color(red: 0.23, green: 0.23, blue: 0.25), in: RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(settings.t("button.close"))
         }
     }
 
@@ -7004,18 +7226,22 @@ struct SettingsView: View {
                             selectedTab = tab
                         }
                     } label: {
-                        Text(settings.t(tab.titleKey))
-                            .font(.pretendard(15, weight: .bold))
-                            .foregroundStyle(selectedTab == tab ? Color(red: 0.08, green: 0.08, blue: 0.09) : .white)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .padding(.horizontal, 16)
-                            .frame(minWidth: 96, minHeight: 48)
-                            .background(
-                                selectedTab == tab
-                                    ? Color(red: 0.94, green: 0.94, blue: 0.95)
-                                    : Color(red: 0.17, green: 0.17, blue: 0.19),
-                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            )
+                        HStack(spacing: 7) {
+                            Image(systemName: tab.systemImage)
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(settings.t(tab.titleKey))
+                                .font(.pretendard(14, weight: .semibold))
+                        }
+                        .foregroundStyle(selectedTab == tab ? Color(red: 0.05, green: 0.10, blue: 0.11) : .white.opacity(0.82))
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 13)
+                        .frame(minWidth: 88, minHeight: 40)
+                        .background(
+                            selectedTab == tab
+                                ? Color(red: 0.75, green: 0.88, blue: 0.86)
+                                : Color.white.opacity(0.07),
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -7026,23 +7252,23 @@ struct SettingsView: View {
     @ViewBuilder
     private var selectedSettingsPage: some View {
         switch selectedTab {
+        case .general:
+            generalSettingsPage
         case .lyrics:
             lyricsSettingsPage
-        case .display:
-            displaySettingsPage
-        case .fullscreen:
-            fullscreenSettingsPage
+        case .appearance:
+            appearanceSettingsPage
+        case .player:
+            playerSettingsPage
         case .ai:
             aiSettingsPage
-        case .tools:
-            toolsSettingsPage
+        case .system:
+            systemSettingsPage
         }
     }
 
-    private var lyricsSettingsPage: some View {
+    private var generalSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
-            lyricsProviderSettingsSection
-
             settingsSection(settings.t("section.language"), description: settings.t("section.language_desc")) {
                 settingsCard(settings.t("setting.ui_language"), description: settings.t("setting.ui_language_desc")) {
                     Picker("", selection: uiLanguageBinding) {
@@ -7084,6 +7310,30 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            settingsSection(settings.t("section.player"), description: settings.t("section.player_desc")) {
+                settingsToggleCard(
+                    settings.t("setting.keep_screen_on"),
+                    description: settings.t("setting.keep_screen_on_desc"),
+                    binding: keepScreenOnBinding
+                )
+                settingsToggleCard(
+                    settings.t("setting.landscape_auto_hide"),
+                    description: settings.t("setting.landscape_auto_hide_desc"),
+                    binding: landscapeAutoHideBinding
+                )
+                settingsToggleCard(
+                    settings.t("setting.landscape_center_no_lyrics"),
+                    description: settings.t("setting.landscape_center_no_lyrics_desc"),
+                    binding: landscapeCenterNoLyricsBinding
+                )
+            }
+        }
+    }
+
+    private var lyricsSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            lyricsProviderSettingsSection
 
             settingsSection(settings.t("tab.lyrics")) {
                 settingsToggleCard(settings.t("setting.auto_interlude"), description: settings.t("setting.auto_interlude_desc"), binding: autoInterludeBinding)
@@ -7395,12 +7645,9 @@ struct SettingsView: View {
         )
     }
 
-    private var displaySettingsPage: some View {
+    private var appearanceSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
-            settingsSection(settings.t("section.player"), description: settings.t("section.player_desc")) {
-                settingsToggleCard(settings.t("setting.keep_screen_on"), description: settings.t("setting.keep_screen_on_desc"), binding: keepScreenOnBinding)
-                settingsToggleCard(settings.t("setting.landscape_auto_hide"), description: settings.t("setting.landscape_auto_hide_desc"), binding: landscapeAutoHideBinding)
-                settingsToggleCard(settings.t("setting.landscape_center_no_lyrics"), description: settings.t("setting.landscape_center_no_lyrics_desc"), binding: landscapeCenterNoLyricsBinding)
+            settingsSection(settings.t("section.typography"), description: settings.t("section.typography_desc")) {
                 settingsCard(settings.t("setting.lyrics_alignment"), description: settings.t("setting.lyrics_alignment_desc")) {
                     Picker("", selection: lyricsAlignmentBinding) {
                         Text(settings.t("alignment.left")).tag("left")
@@ -7410,10 +7657,63 @@ struct SettingsView: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                 }
+                ForEach(AppSettings.typographySlots) { slot in
+                    settingsCard(
+                        settings.t("typography.slot.\(slot.id)"),
+                        description: settings.t("typography.slot.\(slot.id)_desc")
+                    ) {
+                        VStack(spacing: 10) {
+                            HStack {
+                                Slider(value: typographySizeBinding(slot), in: 70...160, step: 1, onEditingChanged: { editing in
+                                    if !editing { model.showSavedToast(settings.t("toast.typography_saved")) }
+                                })
+                                Text("\(typographyStyle(slot).sizePercent)%")
+                                    .foregroundStyle(.white.opacity(0.68))
+                            }
+                            Picker(settings.t("field.weight"), selection: typographyWeightBinding(slot)) {
+                                Text(settings.t("typography.weight.regular")).tag(AppSettings.typoWeightRegular)
+                                Text(settings.t("typography.weight.semibold")).tag(AppSettings.typoWeightSemibold)
+                                Text(settings.t("typography.weight.bold")).tag(AppSettings.typoWeightBold)
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                    }
+                }
             }
 
+            settingsSection(settings.t("section.speaker_colors"), description: settings.t("section.speaker_colors_desc")) {
+                settingsToggleCard(
+                    settings.t("setting.creator_speaker_colors"),
+                    description: settings.t("setting.creator_speaker_colors_desc"),
+                    binding: settingsSavedBinding(\.useSyncCreatorSpeakerColors)
+                )
+                settingsCard(settings.t("section.speaker_colors")) {
+                    VStack(spacing: 12) {
+                        ForEach(AppSettings.speakerColorSlots) { slot in
+                            SpeakerColorRow(slot: slot)
+                                .environmentObject(settings)
+                        }
+                        settingsActionButton(settings.t("button.reset"), role: .destructive) {
+                            settings.resetSpeakerColors()
+                            model.showSavedToast(settings.t("toast.speaker_colors_reset"))
+                        }
+                    }
+                }
+            }
+
+            backgroundSettingsSection
+            trackBackgroundSettingsSection
+        }
+    }
+
+    private var playerSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
             settingsSection(settings.t("section.pip"), description: settings.t("section.pip_desc")) {
-                settingsToggleCard(settings.t("setting.pip_show_artwork"), description: settings.t("setting.pip_show_artwork_desc"), binding: pipShowArtworkBinding)
+                settingsToggleCard(
+                    settings.t("setting.pip_show_artwork"),
+                    description: settings.t("setting.pip_show_artwork_desc"),
+                    binding: pipShowArtworkBinding
+                )
                 settingsCard(settings.t("setting.pip_background"), description: settings.t("setting.pip_background_desc")) {
                     Picker("", selection: Binding(get: {
                         AppSettings.normalizePipBackgroundMode(settings.pipBackgroundMode)
@@ -7487,55 +7787,6 @@ struct SettingsView: View {
                 }
             }
 
-            settingsSection(settings.t("section.typography"), description: settings.t("section.typography_desc")) {
-                ForEach(AppSettings.typographySlots) { slot in
-                    settingsCard(slot.label) {
-                        VStack(spacing: 10) {
-                            HStack {
-                                Slider(value: typographySizeBinding(slot), in: 70...160, step: 1, onEditingChanged: { editing in
-                                    if !editing { model.showSavedToast(settings.t("toast.typography_saved")) }
-                                })
-                                Text("\(typographyStyle(slot).sizePercent)%")
-                                    .foregroundStyle(.white.opacity(0.68))
-                            }
-                            Picker(settings.t("field.weight"), selection: typographyWeightBinding(slot)) {
-                                Text(settings.t("typography.weight.regular")).tag(AppSettings.typoWeightRegular)
-                                Text(settings.t("typography.weight.semibold")).tag(AppSettings.typoWeightSemibold)
-                                Text(settings.t("typography.weight.bold")).tag(AppSettings.typoWeightBold)
-                            }
-                            .pickerStyle(.segmented)
-                        }
-                    }
-                }
-            }
-
-            settingsSection(settings.t("section.speaker_colors"), description: settings.t("section.speaker_colors_desc")) {
-                settingsToggleCard(
-                    settings.t("setting.creator_speaker_colors"),
-                    description: settings.t("setting.creator_speaker_colors_desc"),
-                    binding: settingsSavedBinding(\.useSyncCreatorSpeakerColors)
-                )
-                settingsCard(settings.t("section.speaker_colors")) {
-                    VStack(spacing: 12) {
-                        ForEach(AppSettings.speakerColorSlots) { slot in
-                            SpeakerColorRow(slot: slot)
-                                .environmentObject(settings)
-                        }
-                        settingsActionButton(settings.t("button.reset"), role: .destructive) {
-                            settings.resetSpeakerColors()
-                            model.showSavedToast(settings.t("toast.speaker_colors_reset"))
-                        }
-                    }
-                }
-            }
-
-            backgroundSettingsSection
-            trackBackgroundSettingsSection
-        }
-    }
-
-    private var fullscreenSettingsPage: some View {
-        VStack(alignment: .leading, spacing: 26) {
             settingsSection(settings.t("vinyl.mode"), description: settings.t("vinyl.settings.subtitle")) {
                 settingsCard(
                     settings.t("vinyl.settings.album_size"),
@@ -7698,6 +7949,79 @@ struct SettingsView: View {
                     .labelsHidden()
                     .settingsMenuSurface()
                 }
+                settingsToggleCard(
+                    settings.t("setting.cultural_annotations"),
+                    description: settings.t("setting.cultural_annotations_desc"),
+                    binding: culturalAnnotationsEnabledBinding
+                )
+                if settings.culturalAnnotationsEnabled {
+                    settingsCard(settings.t("setting.cultural_font_family")) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Picker("", selection: $settings.culturalAnnotationsFontFamily) {
+                                Text(settings.t("font.pretendard")).tag("pretendard")
+                                Text(settings.t("font.system")).tag("system")
+                                Text(settings.t("font.serif")).tag("serif")
+                                Text(settings.t("font.monospace")).tag("monospace")
+                            }
+                            .labelsHidden()
+                            .settingsMenuSurface()
+
+                            culturalAnnotationSlider(
+                                title: settings.t("setting.cultural_font_size"),
+                                value: culturalAnnotationFontSizeBinding,
+                                range: 10...28,
+                                valueText: "\(settings.culturalAnnotationsFontSize)px"
+                            )
+                            culturalAnnotationSlider(
+                                title: settings.t("setting.cultural_font_weight"),
+                                value: culturalAnnotationFontWeightBinding,
+                                range: 100...900,
+                                step: 100,
+                                valueText: "\(settings.culturalAnnotationsFontWeight)"
+                            )
+                            culturalAnnotationSlider(
+                                title: settings.t("setting.cultural_opacity"),
+                                value: culturalAnnotationOpacityBinding,
+                                range: 20...100,
+                                step: 5,
+                                valueText: "\(settings.culturalAnnotationsOpacity)%"
+                            )
+                        }
+                    }
+                    settingsCard("\(settings.t("vinyl.mode")) · \(settings.t("setting.cultural_font_family"))") {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Picker("", selection: $settings.culturalAnnotationsVinylFontFamily) {
+                                Text(settings.t("font.pretendard")).tag("pretendard")
+                                Text(settings.t("font.system")).tag("system")
+                                Text(settings.t("font.serif")).tag("serif")
+                                Text(settings.t("font.monospace")).tag("monospace")
+                            }
+                            .labelsHidden()
+                            .settingsMenuSurface()
+
+                            culturalAnnotationSlider(
+                                title: "\(settings.t("vinyl.mode")) · \(settings.t("setting.cultural_font_size"))",
+                                value: culturalAnnotationVinylFontSizeBinding,
+                                range: 10...28,
+                                valueText: "\(settings.culturalAnnotationsVinylFontSize)px"
+                            )
+                            culturalAnnotationSlider(
+                                title: "\(settings.t("vinyl.mode")) · \(settings.t("setting.cultural_font_weight"))",
+                                value: culturalAnnotationVinylFontWeightBinding,
+                                range: 100...900,
+                                step: 100,
+                                valueText: "\(settings.culturalAnnotationsVinylFontWeight)"
+                            )
+                            culturalAnnotationSlider(
+                                title: "\(settings.t("vinyl.mode")) · \(settings.t("setting.cultural_opacity"))",
+                                value: culturalAnnotationVinylOpacityBinding,
+                                range: 20...100,
+                                step: 5,
+                                valueText: "\(settings.culturalAnnotationsVinylOpacity)%"
+                            )
+                        }
+                    }
+                }
                 if let url = URL(string: selectedProvider.apiKeyURL), !selectedProvider.apiKeyURL.trimmed.isEmpty {
                     Link(settings.t("button.get_key"), destination: url)
                         .font(.pretendard(15, weight: .semibold))
@@ -7824,7 +8148,7 @@ struct SettingsView: View {
         }
     }
 
-    private var toolsSettingsPage: some View {
+    private var systemSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
             settingsSection(
                 settings.t("creator_privacy.section"),
@@ -8069,7 +8393,7 @@ struct SettingsView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.pretendard(23, weight: .bold))
+                .font(.pretendard(18, weight: .bold))
                 .foregroundStyle(.white)
             if !description.trimmed.isEmpty {
                 Text(description)
@@ -8092,7 +8416,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             if !title.trimmed.isEmpty {
                 Text(title)
-                    .font(.pretendard(16, weight: .semibold))
+                    .font(.pretendard(15, weight: .semibold))
                     .foregroundStyle(.white)
             }
             if !description.trimmed.isEmpty {
@@ -8105,14 +8429,14 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func settingsToggleCard(_ title: String, description: String = "", binding: Binding<Bool>) -> some View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 7) {
                 Text(title)
-                    .font(.pretendard(16, weight: .semibold))
+                    .font(.pretendard(15, weight: .semibold))
                     .foregroundStyle(.white)
                 if !description.trimmed.isEmpty {
                     Text(description)
@@ -8127,7 +8451,7 @@ struct SettingsView: View {
                 .fixedSize()
         }
         .padding(16)
-        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func settingsActionButton(_ title: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
@@ -8137,7 +8461,7 @@ struct SettingsView: View {
                 .foregroundStyle(role == .destructive ? Color(red: 1.0, green: 0.45, blue: 0.48) : .white)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 44)
-                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -8147,6 +8471,26 @@ struct SettingsView: View {
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .textFieldStyle(PlayerTextFieldStyle())
+    }
+
+    private func culturalAnnotationSlider(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double = 1,
+        valueText: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(title)
+                    .font(.pretendard(13, weight: .semibold))
+                Spacer()
+                Text(valueText)
+                    .font(.pretendard(12))
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+            Slider(value: value, in: range, step: step)
+        }
     }
 
     private var effectiveRuleSourceLang: String {
@@ -8224,6 +8568,58 @@ struct SettingsView: View {
                 settings.setProvider(value)
                 model.showSavedToast(settings.t("toast.provider_saved"))
             }
+        )
+    }
+
+    private var culturalAnnotationsEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.culturalAnnotationsEnabled },
+            set: { enabled in
+                settings.culturalAnnotationsEnabled = enabled
+                model.culturalAnnotationsSettingChanged(enabled: enabled)
+            }
+        )
+    }
+
+    private var culturalAnnotationFontSizeBinding: Binding<Double> {
+        Binding(
+            get: { Double(settings.culturalAnnotationsFontSize) },
+            set: { settings.culturalAnnotationsFontSize = AppSettings.clampCulturalFontSize(Int($0.rounded())) }
+        )
+    }
+
+    private var culturalAnnotationFontWeightBinding: Binding<Double> {
+        Binding(
+            get: { Double(settings.culturalAnnotationsFontWeight) },
+            set: { settings.culturalAnnotationsFontWeight = AppSettings.clampCulturalFontWeight(Int($0.rounded())) }
+        )
+    }
+
+    private var culturalAnnotationOpacityBinding: Binding<Double> {
+        Binding(
+            get: { Double(settings.culturalAnnotationsOpacity) },
+            set: { settings.culturalAnnotationsOpacity = AppSettings.clampCulturalOpacity(Int($0.rounded())) }
+        )
+    }
+
+    private var culturalAnnotationVinylFontSizeBinding: Binding<Double> {
+        Binding(
+            get: { Double(settings.culturalAnnotationsVinylFontSize) },
+            set: { settings.culturalAnnotationsVinylFontSize = AppSettings.clampCulturalFontSize(Int($0.rounded())) }
+        )
+    }
+
+    private var culturalAnnotationVinylFontWeightBinding: Binding<Double> {
+        Binding(
+            get: { Double(settings.culturalAnnotationsVinylFontWeight) },
+            set: { settings.culturalAnnotationsVinylFontWeight = AppSettings.clampCulturalFontWeight(Int($0.rounded())) }
+        )
+    }
+
+    private var culturalAnnotationVinylOpacityBinding: Binding<Double> {
+        Binding(
+            get: { Double(settings.culturalAnnotationsVinylOpacity) },
+            set: { settings.culturalAnnotationsVinylOpacity = AppSettings.clampCulturalOpacity(Int($0.rounded())) }
         )
     }
 
@@ -8438,7 +8834,7 @@ struct SettingsView: View {
 
     private var selectedRuleSourceLabel: String {
         if model.selectedRuleSourceLang == "auto" {
-            return "auto(\(model.effectiveDetectedLyricsSourceLang))"
+            return "\(settings.t("label.auto")) (\(model.effectiveDetectedLyricsSourceLang))"
         }
         let language = AppSettings.languageInfo(effectiveRuleSourceLang)
         return "\(language.nativeName) · \(language.name)"
@@ -8606,7 +9002,7 @@ private extension View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .frame(minHeight: 48)
-            .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 

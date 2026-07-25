@@ -40,7 +40,10 @@ enum AppI18n {
         "lyrics_provider.legal_notice",
         "repo.detail.provider_rich_timing",
         "spotify.step3.desc",
-        "spotify.step4.desc"
+        "spotify.step4.title",
+        "spotify.step4.desc",
+        "spotify.step5.title",
+        "spotify.step5.desc"
     ]
 
     private static let sharedFallbackKeys: [String: String] = [
@@ -641,7 +644,13 @@ enum AppI18n {
 
     static func t(_ lang: String?, _ key: String) -> String {
         let normalized = normalize(lang)
+        if let value = nonBlank(CulturalAnnotationI18n.value(language: normalized, key: key)) {
+            return value
+        }
         if iosOverrideKeys.contains(key) {
+            if let value = nonBlank(androidStrings[normalized]?[key]) {
+                return value
+            }
             if let value = nonBlank(extraStrings[normalized]?[key]) {
                 return value
             }
