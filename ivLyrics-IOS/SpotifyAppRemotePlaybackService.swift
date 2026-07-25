@@ -279,7 +279,8 @@ final class SpotifyAppRemotePlaybackService: NSObject, ObservableObject, SPTAppR
             spotifyDJContext: SpotifyPlaybackSnapshot.detectsSpotifyDJContext(
                 title: contextTitle,
                 uri: contextURI
-            )
+            ),
+            spotifyContextKnown: !contextTitle.isEmpty || !contextURI.trimmed.isEmpty
         )
     }
 

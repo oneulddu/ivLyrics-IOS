@@ -21,12 +21,17 @@ struct SpotifyDJLyricsTimeline {
         playing: Bool,
         spotifyDJContext: Bool,
         spotifyDJSegment: Bool,
+        spotifyContextKnown: Bool,
         uptime: TimeInterval
     ) -> Int64 {
         let safePlayerPositionMs = max(0, playerPositionMs)
         let safeUptime = max(0, uptime)
 
-        if spotifyDJContext || spotifyDJSegment {
+        if spotifyContextKnown && !spotifyDJContext && !spotifyDJSegment {
+            djSessionActiveUntil = 0
+            handoffPending = false
+            lyricsOffsetMs = 0
+        } else if spotifyDJContext || spotifyDJSegment {
             djSessionActiveUntil = safeUptime + Self.sessionRetentionSeconds
         }
         let djSessionActive = spotifyDJContext

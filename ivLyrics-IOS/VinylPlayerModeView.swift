@@ -1621,7 +1621,7 @@ private enum VinylArtworkAccent {
         let request = URLRequest(
             url: url,
             cachePolicy: .returnCacheDataElseLoad,
-            timeoutInterval: 0.32
+            timeoutInterval: 10
         )
         guard let (data, _) = try? await URLSession.shared.data(for: request),
               !Task.isCancelled,

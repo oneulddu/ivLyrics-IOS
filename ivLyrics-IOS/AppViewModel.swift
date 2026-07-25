@@ -231,6 +231,7 @@ final class AppViewModel: ObservableObject {
     private var spotifyDJLyricsTimeline = SpotifyDJLyricsTimeline()
     private var spotifyDJLyricsOffsetMs: Int64 = 0
     private var currentSpotifyDJContext = false
+    private var currentSpotifyContextKnown = false
     private var automaticUpdateCheckStarted = false
     private let defaults = UserDefaults.standard
     private let keyLastAutoUpdateCheckMs = "last_auto_update_check_ms"
@@ -2238,7 +2239,8 @@ final class AppViewModel: ObservableObject {
                     playing: playback.playing,
                     fetchedAt: Date(),
                     deviceName: playback.deviceName,
-                    spotifyDJContext: playback.spotifyDJContext
+                    spotifyDJContext: playback.spotifyDJContext,
+                    spotifyContextKnown: playback.spotifyContextKnown
                 ),
                 loadLyricsIfNeeded: false
             )
@@ -2268,10 +2270,12 @@ final class AppViewModel: ObservableObject {
         inputIsrc = incoming.isrc
         inputDuration = formatDurationInput(incoming.durationMs)
         currentSpotifyDJContext = playback.spotifyDJContext
+        currentSpotifyContextKnown = playback.spotifyContextKnown
         updateSpotifyDJLyricsTimeline(
             track: incoming,
             playerPositionMs: playback.progressMs,
             spotifyDJContext: playback.spotifyDJContext,
+            spotifyContextKnown: playback.spotifyContextKnown,
             uptime: uptime
         )
         currentTrack = incoming
@@ -2941,6 +2945,7 @@ final class AppViewModel: ObservableObject {
                         track: track,
                         playerPositionMs: position,
                         spotifyDJContext: self.currentSpotifyDJContext,
+                        spotifyContextKnown: self.currentSpotifyContextKnown,
                         uptime: uptime
                     )
                 }
@@ -2960,6 +2965,7 @@ final class AppViewModel: ObservableObject {
         track: TrackSnapshot,
         playerPositionMs: Int64,
         spotifyDJContext: Bool,
+        spotifyContextKnown: Bool,
         uptime: TimeInterval
     ) {
         let previousOffsetMs = spotifyDJLyricsOffsetMs
@@ -2969,6 +2975,7 @@ final class AppViewModel: ObservableObject {
             playing: track.playing,
             spotifyDJContext: spotifyDJContext,
             spotifyDJSegment: Self.isSpotifyDJSegment(track),
+            spotifyContextKnown: spotifyContextKnown,
             uptime: uptime
         )
         spotifyDJLyricsOffsetMs = max(0, lyricsPositionMs - playerPositionMs)
@@ -2981,6 +2988,7 @@ final class AppViewModel: ObservableObject {
         spotifyDJLyricsTimeline.reset()
         spotifyDJLyricsOffsetMs = 0
         currentSpotifyDJContext = false
+        currentSpotifyContextKnown = false
     }
 
     private static func isSpotifyDJSegment(_ track: TrackSnapshot) -> Bool {
