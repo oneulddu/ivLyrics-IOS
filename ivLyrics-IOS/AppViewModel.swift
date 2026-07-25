@@ -79,6 +79,9 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var creatorPrivacyRequestInFlight = false
     @Published private(set) var creatorPrivacyLoginInProgress = false
     @Published private(set) var aiLyricsGenerating = false
+    @Published private(set) var culturalAnnotations: [CulturalAnnotation] = []
+    @Published private(set) var culturalAnnotationsLoading = false
+    @Published private(set) var lyricsLoadingProviderName = ""
     @Published private(set) var lyricsSupplementPronunciationLoading = false
     @Published private(set) var lyricsSupplementTranslationLoading = false
     @Published private(set) var lyricsSupplementFuriganaLoading = false
@@ -88,6 +91,46 @@ final class AppViewModel: ObservableObject {
     @Published var updateDialogPresented = false
     @Published var initialSetupPresented = false
     @Published var onboardingStep = 0
+
+    var lyricsLoadingText: String {
+        let providerName = lyricsLoadingProviderName.trimmed
+        return providerName.isEmpty
+            ? settings.t("status.lyrics_loading")
+            : settings.tf("status.lyrics_loading_provider_format", providerName)
+    }
+
+    var aiTranslationLoadingText: String {
+        aiProviderLoadingText(
+            formatKey: "loading.translation_provider_format",
+            fallbackKey: "loading.translation"
+        )
+    }
+
+    var aiPronunciationLoadingText: String {
+        aiProviderLoadingText(
+            formatKey: "loading.pronunciation_provider_format",
+            fallbackKey: "loading.pronunciation"
+        )
+    }
+
+    var aiLyricsLoadingText: String {
+        aiProviderLoadingText(
+            formatKey: "status.ai_generating_provider_format",
+            fallbackKey: "status.ai_generating"
+        )
+    }
+
+    var culturalAnnotationsLoadingText: String {
+        settings.t("loading.cultural_annotations")
+    }
+
+    var tmiLoadingText: String {
+        aiProviderLoadingText(
+            formatKey: "tmi.loading_provider_format",
+            fallbackKey: "tmi.loading"
+        )
+    }
+
     let playbackClock = PlaybackClock()
     private(set) var nowPositionMs: Int64 {
         get { playbackClock.nowPositionMs }
@@ -152,6 +195,8 @@ final class AppViewModel: ObservableObject {
     private let pollinationsAuthClient = PollinationsAuthClient()
     private let creatorAccountClient = CreatorAccountClient()
     private let updateChecker = UpdateChecker()
+    private var culturalAnnotationTask: Task<Void, Never>?
+    private var culturalAnnotationRequestKey = ""
     private let creatorProfileEndpoint = "https://lyrics.api.ivl.is/user/creator-profile"
     private let syncDataSpotifyOrigin = "https://xpui.app.spotify.com"
     private let syncDataSpotifyReferer = "https://xpui.app.spotify.com/"
@@ -183,6 +228,10 @@ final class AppViewModel: ObservableObject {
     private var lastSeekCommandUptimeMs: Int64 = 0
     private var lastSeekCommandPositionMs: Int64 = -1
     private var spotifyPlaybackInteractionGuard = SpotifyPlaybackInteractionGuard()
+    private var spotifyDJLyricsTimeline = SpotifyDJLyricsTimeline()
+    private var spotifyDJLyricsOffsetMs: Int64 = 0
+    private var currentSpotifyDJContext = false
+    private var currentSpotifyContextKnown = false
     private var automaticUpdateCheckStarted = false
     private let defaults = UserDefaults.standard
     private let keyLastAutoUpdateCheckMs = "last_auto_update_check_ms"
@@ -386,11 +435,17 @@ final class AppViewModel: ObservableObject {
     }
 
     var adjustedPositionMs: Int64 {
-        let adjusted = nowPositionMs + Int64(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
-        if durationMs > 0 {
-            return max(0, min(durationMs, adjusted))
+        let adjusted = nowPositionMs
+            + spotifyDJLyricsOffsetMs
+            + Int64(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
+        if lyricsDurationMs > 0 {
+            return max(0, min(lyricsDurationMs, adjusted))
         }
         return max(0, adjusted)
+    }
+
+    var lyricsDurationMs: Int64 {
+        durationMs > 0 ? durationMs + spotifyDJLyricsOffsetMs : 0
     }
 
     var firstLyricTimeMs: Int64 {
@@ -427,7 +482,8 @@ final class AppViewModel: ObservableObject {
     func applyDebugLyricsLoadingState() {
         cancelLyricsLoadTask()
         status = .loading
-        let loadingResult = LyricsResult.empty(settings.t("status.lyrics_loading"))
+        lyricsLoadingProviderName = "LRCLIB"
+        let loadingResult = LyricsResult.empty(lyricsLoadingText)
         baseLyricsResult = loadingResult
         lyricsResult = loadingResult
     }
@@ -478,6 +534,7 @@ final class AppViewModel: ObservableObject {
             positionMs: 0,
             playing: false
         )
+        resetSpotifyDJLyricsTimeline()
         currentTrack = track
         nowPositionMs = 0
         selectedRuleSourceLang = "auto"
@@ -538,6 +595,7 @@ final class AppViewModel: ObservableObject {
                     playing: false,
                     artworkURL: resolved.artworkURL
                 )
+                resetSpotifyDJLyricsTimeline()
                 currentTrack = track
                 nowPositionMs = 0
                 selectedRuleSourceLang = "auto"
@@ -709,6 +767,7 @@ final class AppViewModel: ObservableObject {
         spotifyLivePolling = false
         spotifyAppRemoteConnected = false
         spotifyPlaybackInteractionGuard.reset()
+        resetSpotifyDJLyricsTimeline()
         spotifyAppRemotePlaybackService.stop()
         appendLog("spotify live: polling stopped")
     }
@@ -932,10 +991,11 @@ final class AppViewModel: ObservableObject {
         }
         cancelLyricsLoadTask()
         status = .loading
+        lyricsLoadingProviderName = ""
         logs = []
         manualCandidates = []
         metadataTranslation = nil
-        let loadingResult = LyricsResult.empty(settings.t("status.lyrics_loading"))
+        let loadingResult = LyricsResult.empty(lyricsLoadingText)
         baseLyricsResult = loadingResult
         lyricsResult = loadingResult
         resetYouTubeBackgroundForTrack()
@@ -1145,7 +1205,9 @@ final class AppViewModel: ObservableObject {
     func seek(toLyricsTimeMs lyricsTimeMs: Int64) {
         guard var track = currentTrack else { return }
         let duration = max(0, track.durationMs)
-        let target = lyricsTimeMs - Int64(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
+        let target = lyricsTimeMs
+            - spotifyDJLyricsOffsetMs
+            - Int64(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
         let position = duration > 0 ? max(0, min(duration, target)) : max(0, target)
         seekPlayer(to: position, track: &track)
         lyricsFocusRequestRevision &+= 1
@@ -1155,6 +1217,11 @@ final class AppViewModel: ObservableObject {
         track = track.withPlayback(positionMs: position, playing: track.playing)
         currentTrack = track
         nowPositionMs = position
+        spotifyDJLyricsTimeline.registerExplicitSeek(
+            trackKey: track.stableKey,
+            playerPositionMs: position,
+            uptime: ProcessInfo.processInfo.systemUptime
+        )
         guard shouldSendSeekCommand(target: position) else { return }
         if spotifyAppRemotePlaybackService.connected || spotifyLivePolling {
             spotifyPlaybackInteractionGuard.registerSeek(
@@ -1298,8 +1365,9 @@ final class AppViewModel: ObservableObject {
         guard let track = currentTrack else { return }
         cancelLyricsLoadTask()
         status = .loading
+        lyricsLoadingProviderName = "LRCLIB"
         manualLrclibStatus = settings.t("lyrics.lrclib_search.selecting")
-        let loadingResult = LyricsResult.empty(settings.t("status.lyrics_loading"))
+        let loadingResult = LyricsResult.empty(lyricsLoadingText)
         baseLyricsResult = loadingResult
         lyricsResult = loadingResult
         let requestID = lyricsLoadRequestID
@@ -1316,6 +1384,7 @@ final class AppViewModel: ObservableObject {
                 let final = await applyLyricsSupplements(track: track, base: base, bypassCache: false)
                 guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else { return }
                 lyricsResult = final
+                lyricsLoadingProviderName = ""
                 status = .loaded
                 manualLrclibStatus = settings.t("lyrics.lrclib_search.loaded")
                 showSavedToast(manualLrclibStatus)
@@ -1324,6 +1393,7 @@ final class AppViewModel: ObservableObject {
             } catch {
                 guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else { return }
                 let detail = error.localizedDescription.trimmed.isEmpty ? "unknown error" : error.localizedDescription.trimmed
+                lyricsLoadingProviderName = ""
                 manualLrclibStatus = settings.tf("lyrics.lrclib_search.error_format", detail)
                 status = .failed(detail)
                 showSavedToast(manualLrclibStatus)
@@ -1363,6 +1433,9 @@ final class AppViewModel: ObservableObject {
             showSavedToast(settings.t("toast.current_track_missing"))
             return
         }
+        culturalAnnotationTask?.cancel()
+        culturalAnnotations = []
+        culturalAnnotationsLoading = false
         furiganaRepository.clearTrackCache(track.stableKey)
         let cacheIsrc = IvLyricsUtilities.firstNonEmpty(baseLyricsResult.isrc, lyricsResult.isrc, track.isrc)
         Task { @MainActor [weak self] in
@@ -1378,6 +1451,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func clearAllCaches() {
+        culturalAnnotationTask?.cancel()
+        culturalAnnotations = []
+        culturalAnnotationsLoading = false
         furiganaRepository.clearCache()
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1391,6 +1467,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func clearAiCaches() {
+        culturalAnnotationTask?.cancel()
+        culturalAnnotations = []
+        culturalAnnotationsLoading = false
         furiganaRepository.clearCache()
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1434,6 +1513,37 @@ final class AppViewModel: ObservableObject {
             return
         }
         requestMetadataTranslation(track: track, base: baseLyricsResult, bypassCache: true)
+    }
+
+    func culturalAnnotationsSettingChanged(enabled: Bool) {
+        culturalAnnotationTask?.cancel()
+        culturalAnnotationTask = nil
+        culturalAnnotationRequestKey = ""
+        culturalAnnotations = []
+        culturalAnnotationsLoading = false
+        guard enabled else { return }
+        regenerateCulturalAnnotations()
+    }
+
+    func regenerateCulturalAnnotations() {
+        culturalAnnotationTask?.cancel()
+        culturalAnnotationRequestKey = ""
+        culturalAnnotations = []
+        culturalAnnotationsLoading = false
+        guard settings.culturalAnnotationsEnabled,
+              let track = currentTrack,
+              !baseLyricsResult.lines.isEmpty else {
+            return
+        }
+        let base = baseLyricsResult
+        culturalAnnotationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.loadCulturalAnnotationsIfNeeded(
+                track: track,
+                base: base,
+                bypassCache: true
+            )
+        }
     }
 
     func japaneseFuriganaSettingChanged(enabled: Bool) {
@@ -1972,6 +2082,13 @@ final class AppViewModel: ObservableObject {
                 onCachedLyricsLoaded: { [weak self] preview in
                     self?.applyCachedLyricsPreview(preview, track: track, requestID: requestID)
                 },
+                onProviderLoading: { [weak self] providerName in
+                    self?.applyLyricsProviderLoading(
+                        providerName,
+                        track: track,
+                        requestID: requestID
+                    )
+                },
                 onSpotifyMetadataResolved: { [weak self] metadata in
                     self?.applyEarlySpotifyLyricsMetadata(metadata)
                 }
@@ -2005,6 +2122,7 @@ final class AppViewModel: ObservableObject {
             }
             trackOffsetMs = settings.trackSyncOffsetMs(loaded.trackKey)
             videoOffsetMs = settings.trackVideoSyncOffsetMs(loaded.trackKey)
+            lyricsLoadingProviderName = ""
             status = .loaded
             appendLog("lyrics base ready: lines=\(baseResult.lines.count); supplements continue independently")
             await Task.yield()
@@ -2017,6 +2135,7 @@ final class AppViewModel: ObservableObject {
             await loadYouTubeIfNeeded(track: resolvedTrack, result: finalResult)
         } catch {
             guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey), let failedTrack = currentTrack else { return }
+            lyricsLoadingProviderName = ""
             if !baseLyricsResult.lines.isEmpty {
                 status = .loaded
                 appendLog("lyrics background sync-data recheck failed: \(error.localizedDescription); cached lyrics kept")
@@ -2075,8 +2194,24 @@ final class AppViewModel: ObservableObject {
         guard !cached.lines.isEmpty else { return }
         baseLyricsResult = cached
         lyricsResult = cached
+        lyricsLoadingProviderName = ""
         status = .loaded
         appendLog("lyrics cache ready: lines=\(cached.lines.count); sync-data recheck continues in background")
+    }
+
+    private func applyLyricsProviderLoading(
+        _ providerName: String,
+        track: TrackSnapshot,
+        requestID: UUID
+    ) {
+        guard status == .loading,
+              isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else {
+            return
+        }
+        lyricsLoadingProviderName = providerName.trimmed
+        let loadingResult = LyricsResult.empty(lyricsLoadingText)
+        baseLyricsResult = loadingResult
+        lyricsResult = loadingResult
     }
 
     private func hydrateSpotifyAppRemoteMetadataIfNeeded(_ playback: SpotifyPlaybackSnapshot) {
@@ -2108,7 +2243,9 @@ final class AppViewModel: ObservableObject {
                     progressMs: progress,
                     playing: playback.playing,
                     fetchedAt: Date(),
-                    deviceName: playback.deviceName
+                    deviceName: playback.deviceName,
+                    spotifyDJContext: playback.spotifyDJContext,
+                    spotifyContextKnown: playback.spotifyContextKnown
                 ),
                 loadLyricsIfNeeded: false
             )
@@ -2116,10 +2253,16 @@ final class AppViewModel: ObservableObject {
     }
 
     private func applySpotifyPlayback(_ playback: SpotifyPlaybackSnapshot, loadLyricsIfNeeded: Bool) {
+#if DEBUG
+        if ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_LYRICS_LOADING"] == "1" {
+            return
+        }
+#endif
+        let uptime = ProcessInfo.processInfo.systemUptime
         let playback = spotifyPlaybackInteractionGuard.reconcile(
             playback,
             currentTrack: currentTrack,
-            uptime: ProcessInfo.processInfo.systemUptime
+            uptime: uptime
         )
         let incoming = playback.track
         let incomingKey = incoming.stableKey
@@ -2131,6 +2274,15 @@ final class AppViewModel: ObservableObject {
         inputSpotifyId = incoming.trackId
         inputIsrc = incoming.isrc
         inputDuration = formatDurationInput(incoming.durationMs)
+        currentSpotifyDJContext = playback.spotifyDJContext
+        currentSpotifyContextKnown = playback.spotifyContextKnown
+        updateSpotifyDJLyricsTimeline(
+            track: incoming,
+            playerPositionMs: playback.progressMs,
+            spotifyDJContext: playback.spotifyDJContext,
+            spotifyContextKnown: playback.spotifyContextKnown,
+            uptime: uptime
+        )
         currentTrack = incoming
         nowPositionMs = playback.progressMs
         let nextTrackOffsetMs = settings.trackSyncOffsetMs(incomingKey)
@@ -2148,7 +2300,10 @@ final class AppViewModel: ObservableObject {
             resetYouTubeBackgroundForTrack()
             appendLog("spotify live track: \(incoming.title) / \(incoming.artist)" + (playback.deviceName.isEmpty ? "" : " / \(playback.deviceName)"))
             cancelLyricsLoadTask()
-            let loadingResult = LyricsResult.empty(settings.t(loadLyricsIfNeeded ? "status.lyrics_loading" : "status.lyrics_waiting"))
+            lyricsLoadingProviderName = ""
+            let loadingResult = LyricsResult.empty(
+                loadLyricsIfNeeded ? lyricsLoadingText : settings.t("status.lyrics_waiting")
+            )
             baseLyricsResult = loadingResult
             lyricsResult = loadingResult
             status = loadLyricsIfNeeded ? .loading : .idle
@@ -2242,8 +2397,51 @@ final class AppViewModel: ObservableObject {
     private func applyLyricsSupplements(track: TrackSnapshot, base: LyricsResult, bypassCache: Bool) async -> LyricsResult {
         async let aiResult = applySupplements(track: track, base: base, bypassCache: bypassCache)
         async let furiganaResult = loadFuriganaIfNeeded(track: track, base: base, bypassCache: bypassCache)
-        let (supplemented, furigana) = await (aiResult, furiganaResult)
+        async let culturalResult: Void = loadCulturalAnnotationsIfNeeded(
+            track: track,
+            base: base,
+            bypassCache: bypassCache
+        )
+        let (supplemented, furigana, _) = await (aiResult, furiganaResult, culturalResult)
         return mergeFuriganaIntoResult(supplemented, furiganaSource: furigana)
+    }
+
+    private func loadCulturalAnnotationsIfNeeded(
+        track: TrackSnapshot,
+        base: LyricsResult,
+        bypassCache: Bool
+    ) async {
+        let snapshot = settings.snapshot
+        guard snapshot.culturalAnnotationsEnabled,
+              !base.lines.isEmpty,
+              snapshot.hasApiKey,
+              !snapshot.model.trimmed.isEmpty else {
+            culturalAnnotationRequestKey = ""
+            culturalAnnotations = []
+            culturalAnnotationsLoading = false
+            return
+        }
+        let trackKey = track.stableKey
+        let sourceLang = effectiveSelectedSourceLang(lines: base.lines)
+        let requestToken = UUID().uuidString
+        culturalAnnotationRequestKey = requestToken
+        culturalAnnotationsLoading = true
+        let response = await aiRepository.loadCulturalAnnotations(
+            track: track,
+            baseResult: base,
+            settings: snapshot,
+            sourceLangOverride: sourceLang,
+            bypassCache: bypassCache
+        )
+        if Task.isCancelled { return }
+        appendLogs(response.logs)
+        guard currentTrack?.stableKey == trackKey,
+              culturalAnnotationRequestKey == requestToken,
+              settings.culturalAnnotationsEnabled else {
+            return
+        }
+        culturalAnnotations = response.annotations
+        culturalAnnotationsLoading = false
     }
 
     private func applySupplements(track: TrackSnapshot, base: LyricsResult, bypassCache: Bool) async -> LyricsResult {
@@ -2454,12 +2652,25 @@ final class AppViewModel: ObservableObject {
         lyricsLoadRequestID = UUID()
         loadTask?.cancel()
         loadTask = nil
+        culturalAnnotationTask?.cancel()
+        culturalAnnotationTask = nil
+        culturalAnnotationRequestKey = ""
+        culturalAnnotations = []
+        culturalAnnotationsLoading = false
         metadataTranslationTask?.cancel()
         metadataTranslationTask = nil
         furiganaRefreshTask?.cancel()
         furiganaRefreshTask = nil
+        lyricsLoadingProviderName = ""
         resetCurrentFurigana()
         resetLyricsSupplementLoading()
+    }
+
+    private func aiProviderLoadingText(formatKey: String, fallbackKey: String) -> String {
+        let providerName = settings.snapshot.provider.label.trimmed
+        return providerName.isEmpty
+            ? settings.t(fallbackKey)
+            : settings.tf(formatKey, providerName)
     }
 
     private func isLyricsLoadCurrent(_ requestID: UUID, trackKey: String) -> Bool {
@@ -2732,7 +2943,17 @@ final class AppViewModel: ObservableObject {
         let playbackTimer = Timer(timeInterval: Self.playbackClockInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let position = self.currentTrack?.positionNow() ?? 0
+                let uptime = ProcessInfo.processInfo.systemUptime
+                let position = self.currentTrack?.positionNow(uptime: uptime) ?? 0
+                if let track = self.currentTrack {
+                    self.updateSpotifyDJLyricsTimeline(
+                        track: track,
+                        playerPositionMs: position,
+                        spotifyDJContext: self.currentSpotifyDJContext,
+                        spotifyContextKnown: self.currentSpotifyContextKnown,
+                        uptime: uptime
+                    )
+                }
                 let positionChanged = position != self.nowPositionMs
                 if positionChanged {
                     self.nowPositionMs = position
@@ -2743,6 +2964,42 @@ final class AppViewModel: ObservableObject {
         playbackTimer.tolerance = Self.playbackClockTolerance
         RunLoop.main.add(playbackTimer, forMode: .common)
         timer = playbackTimer
+    }
+
+    private func updateSpotifyDJLyricsTimeline(
+        track: TrackSnapshot,
+        playerPositionMs: Int64,
+        spotifyDJContext: Bool,
+        spotifyContextKnown: Bool,
+        uptime: TimeInterval
+    ) {
+        let previousOffsetMs = spotifyDJLyricsOffsetMs
+        let lyricsPositionMs = spotifyDJLyricsTimeline.update(
+            trackKey: track.stableKey,
+            playerPositionMs: playerPositionMs,
+            playing: track.playing,
+            spotifyDJContext: spotifyDJContext,
+            spotifyDJSegment: Self.isSpotifyDJSegment(track),
+            spotifyContextKnown: spotifyContextKnown,
+            uptime: uptime
+        )
+        spotifyDJLyricsOffsetMs = max(0, lyricsPositionMs - playerPositionMs)
+        if spotifyDJLyricsOffsetMs > 0, spotifyDJLyricsOffsetMs != previousOffsetMs {
+            appendLog("spotify DJ: lyrics timeline corrected by \(spotifyDJLyricsOffsetMs)ms")
+        }
+    }
+
+    private func resetSpotifyDJLyricsTimeline() {
+        spotifyDJLyricsTimeline.reset()
+        spotifyDJLyricsOffsetMs = 0
+        currentSpotifyDJContext = false
+        currentSpotifyContextKnown = false
+    }
+
+    private static func isSpotifyDJSegment(_ track: TrackSnapshot) -> Bool {
+        guard track.artist.trimmed.lowercased() == "dj x" else { return false }
+        let title = track.title.trimmed.lowercased()
+        return title == "welcome" || title == "up next"
     }
 
     private func updatePictureInPictureState(force: Bool = false) {
