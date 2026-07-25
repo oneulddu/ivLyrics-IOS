@@ -645,6 +645,8 @@ struct VinylPlayerModeView: View {
     private func refreshCurrentTrackAsset() {
         guard let current = model.currentTrack else { return }
         if incomingTrack?.stableKey == current.stableKey {
+            incomingTrack = current
+            loadAccent(for: current)
             return
         } else if displayedTrack?.stableKey == current.stableKey {
             displayedTrack = current
