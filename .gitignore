@@ -10,6 +10,9 @@ xcuserdata/
 *.xccheckout
 *.moved-aside
 
+# Machine-specific Xcode signing
+/Config/Local.xcconfig
+
 # Xcode build output
 DerivedData/
 build/

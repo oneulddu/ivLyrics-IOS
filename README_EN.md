@@ -65,9 +65,12 @@ The latest unsigned IPA can also be downloaded directly from [GitHub Releases](h
 ### Run with Xcode
 
 1. Clone this repository.
-2. Open `ivLyrics-IOS.xcodeproj` in Xcode.
-3. Configure your developer account, bundle ID, and Spotify API settings for your local environment.
-4. Run the app on a simulator or iOS device.
+2. Copy `Config/Local.xcconfig.example` to `Config/Local.xcconfig` and replace `YOUR_TEAM_ID` with your Apple development team ID.
+3. Open `ivLyrics-IOS.xcodeproj` in Xcode.
+4. Configure your developer account, bundle ID, and Spotify API settings for your local environment.
+5. Run the app on a simulator or iOS device.
+
+`Config/Local.xcconfig` is ignored by Git, so the team ID stays local while project-file updates continue to apply normally.
 
 ## Lyrics Page Tips
 

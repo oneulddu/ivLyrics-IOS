@@ -65,9 +65,12 @@ AltStore 설치 과정은 OS, Apple ID, 개발자 모드 및 네트워크 환경
 ### Xcode로 실행
 
 1. 이 저장소를 클론합니다.
-2. Xcode에서 `ivLyrics-IOS.xcodeproj`를 엽니다.
-3. 개발자 계정, 번들 ID, Spotify API 설정을 로컬 환경에 맞게 지정합니다.
-4. 시뮬레이터 또는 iOS 기기에서 실행합니다.
+2. `Config/Local.xcconfig.example`을 `Config/Local.xcconfig`로 복사하고 `YOUR_TEAM_ID`를 Apple 개발 팀 ID로 바꿉니다.
+3. Xcode에서 `ivLyrics-IOS.xcodeproj`를 엽니다.
+4. 개발자 계정, 번들 ID, Spotify API 설정을 로컬 환경에 맞게 지정합니다.
+5. 시뮬레이터 또는 iOS 기기에서 실행합니다.
+
+`Config/Local.xcconfig`는 Git에서 무시되므로, 팀 ID를 유지하면서도 원격 프로젝트 파일 업데이트를 그대로 받을 수 있습니다.
 
 ## 가사 페이지 팁
 

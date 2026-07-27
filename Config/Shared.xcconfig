@@ -1,0 +1,2 @@
+// Shared target settings. Keep machine-specific signing values in Local.xcconfig.
+#include? "Local.xcconfig"
