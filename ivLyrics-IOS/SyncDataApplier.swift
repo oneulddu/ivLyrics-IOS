@@ -3,6 +3,11 @@ import Foundation
 enum SyncDataApplier {
     private static let durationOffsetMinDiffMs: Int64 = 500
     private static let durationFrontOffsetRatio = 0.3
+    private static let maxStyleRangesPerLine = 256
+    private static let validStyleKinds: Set<String> = [
+        "vocal", "effect", "adlib", "pulse", "wave", "sparkle", "echo", "whisper",
+        "bounce", "sway", "glow", "glitch", "flicker", "float", "blur", "pop"
+    ]
 
     struct ApplyResult: Sendable {
         var lines: [LyricsLine]
@@ -13,7 +18,13 @@ enum SyncDataApplier {
         }
     }
 
-    static func applyWithDiagnostics(baseLyrics: [LyricsLine], syncBody: [String: Any], track: TrackSnapshot?) -> ApplyResult {
+    static func applyWithDiagnostics(
+        baseLyrics: [LyricsLine],
+        syncBody: [String: Any],
+        track: TrackSnapshot?,
+        currentProvider: String = "",
+        currentLrclibId: Int64 = 0
+    ) -> ApplyResult {
         guard !baseLyrics.isEmpty else {
             return .empty("missing base lyrics or sync body")
         }
@@ -52,10 +63,19 @@ enum SyncDataApplier {
             let expectedFingerprint = stringValue(source["lyricsFingerprint"])
             if !expectedFingerprint.isEmpty {
                 let actual = IvLyricsUtilities.lyricsFingerprint(IvLyricsUtilities.joinLinesForFingerprint(baseLines))
-                guard expectedFingerprint == actual else {
-                    return .empty("source fingerprint mismatch: expected=\(expectedFingerprint) actual=\(actual)")
+                if expectedFingerprint != actual {
+                    guard canApplyLrclibFingerprintFallback(
+                        source: source,
+                        currentProvider: currentProvider,
+                        currentLrclibId: currentLrclibId,
+                        hasExactLineShape: hasSourceLineShape
+                    ) else {
+                        return .empty("source fingerprint mismatch: expected=\(expectedFingerprint) actual=\(actual)")
+                    }
+                    diagnostics.append("source fingerprint compatibility fallback: provider=lrclib / lrclibId=\(currentLrclibId) / exactLineShape=true")
+                } else {
+                    diagnostics.append("source fingerprint matched: \(actual)")
                 }
-                diagnostics.append("source fingerprint matched: \(actual)")
             }
         }
 
@@ -144,6 +164,27 @@ enum SyncDataApplier {
         return ApplyResult(lines: result, diagnostics: diagnostics)
     }
 
+    private static func canApplyLrclibFingerprintFallback(
+        source: [String: Any],
+        currentProvider: String,
+        currentLrclibId: Int64,
+        hasExactLineShape: Bool
+    ) -> Bool {
+        guard hasExactLineShape, currentLrclibId > 0 else { return false }
+        guard stringValue(source["provider"]).trimmed.lowercased() == "lrclib" else { return false }
+        guard currentProvider.trimmed.lowercased() == "lrclib" else { return false }
+        return sourceLrclibId(source) == currentLrclibId
+    }
+
+    private static func sourceLrclibId(_ source: [String: Any]) -> Int64 {
+        let value = source["lrclibId"] ?? source["id"]
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber, !isJSONBoolean(value) { return value.int64Value }
+        if let value = value as? String { return Int64(value.trimmed) ?? 0 }
+        return 0
+    }
+
     private static func buildLineSyllables(line: SyncLine, lineText: String, lineEndMs: Int64, lastCharMaxDuration: Double) -> TimedSyllables {
         let chars = IvLyricsUtilities.splitChars(lineText)
         let charCount = min(line.chars.count, chars.count)
@@ -158,14 +199,107 @@ enum SyncDataApplier {
             let charEndMs: Int64
             if charIndex < charCount - 1 {
                 charEndMs = secondsToMs(line.chars[charIndex + 1])
+            } else if line.granularity == "line" {
+                charEndMs = lineEndMs
+                adjustedEndMs = lineEndMs
             } else {
                 let naturalEndMs = secondsToMs(line.chars[charIndex] + lastCharMaxDuration)
                 charEndMs = min(lineEndMs, naturalEndMs)
                 adjustedEndMs = charEndMs
             }
-            syllables.append(LyricsLine.Syllable(text: chars[charIndex], startTimeMs: charStartMs, endTimeMs: charEndMs))
+            syllables.append(styledSyllable(
+                text: chars[charIndex],
+                startTimeMs: charStartMs,
+                endTimeMs: charEndMs,
+                absoluteIndex: line.start + charIndex,
+                styleRanges: line.styleRanges
+            ))
         }
-        return TimedSyllables(syllables: syllables, endTimeMs: adjustedEndMs)
+        return TimedSyllables(
+            syllables: collapseSyllables(syllables, granularity: line.granularity, endTimeMs: adjustedEndMs),
+            endTimeMs: adjustedEndMs
+        )
+    }
+
+    private static func collapseSyllables(_ source: [LyricsLine.Syllable], granularity: String, endTimeMs: Int64) -> [LyricsLine.Syllable] {
+        let normalized = normalizeGranularity(granularity)
+        guard !source.isEmpty, normalized != "character" else { return source }
+        var grouped: [LyricsLine.Syllable] = []
+        for syllable in source {
+            let startTimeMs = normalized == "line" ? source[0].startTimeMs : syllable.startTimeMs
+            if let previous = grouped.last,
+               (normalized == "line" || previous.startTimeMs == startTimeMs),
+               previous.styleKey == syllable.styleKey {
+                grouped[grouped.count - 1] = previous.copying(
+                    text: previous.text + syllable.text,
+                    endTimeMs: max(previous.endTimeMs, syllable.endTimeMs),
+                    sourceGranularity: normalized == "word" ? "word" : previous.sourceGranularity
+                )
+            } else {
+                grouped.append(syllable.copying(
+                    startTimeMs: startTimeMs,
+                    sourceGranularity: normalized == "word" ? "word" : syllable.sourceGranularity
+                ))
+            }
+        }
+        for index in grouped.indices {
+            let syllable = grouped[index]
+            var groupEndMs = endTimeMs
+            if normalized == "word" {
+                var nextIndex = index + 1
+                while nextIndex < grouped.count,
+                      grouped[nextIndex].startTimeMs <= syllable.startTimeMs {
+                    nextIndex += 1
+                }
+                if nextIndex < grouped.count {
+                    groupEndMs = grouped[nextIndex].startTimeMs
+                }
+            }
+            grouped[index] = syllable.copying(endTimeMs: max(syllable.startTimeMs, groupEndMs))
+        }
+        return grouped
+    }
+
+    private static func styledSyllable(
+        text: String,
+        startTimeMs: Int64,
+        endTimeMs: Int64,
+        absoluteIndex: Int,
+        styleRanges: [StyleRange]
+    ) -> LyricsLine.Syllable {
+        guard !styleRanges.isEmpty else {
+            return LyricsLine.Syllable(text: text, startTimeMs: startTimeMs, endTimeMs: endTimeMs)
+        }
+        guard let style = findStyleRange(styleRanges, absoluteIndex: absoluteIndex) else {
+            return LyricsLine.Syllable(text: text, startTimeMs: startTimeMs, endTimeMs: endTimeMs)
+        }
+        return LyricsLine.Syllable(
+            text: text,
+            startTimeMs: startTimeMs,
+            endTimeMs: endTimeMs,
+            inlineStyle: true,
+            styleKind: style.kind,
+            styleSpeaker: style.speaker,
+            styleSpeakerColor: style.speakerColor,
+            styleSpeakerFallback: style.speakerFallback
+        )
+    }
+
+    private static func findStyleRange(_ ranges: [StyleRange], absoluteIndex: Int) -> StyleRange? {
+        var low = 0
+        var high = ranges.count - 1
+        while low <= high {
+            let middle = (low + high) / 2
+            let range = ranges[middle]
+            if absoluteIndex < range.start {
+                high = middle - 1
+            } else if absoluteIndex > range.end {
+                low = middle + 1
+            } else {
+                return range
+            }
+        }
+        return nil
     }
 
     private static func buildVocalParts(line: SyncLine, fullChars: [String], fallbackEndMs: Int64, lastCharMaxDuration: Double) -> [LyricsLine.VocalPart] {
@@ -182,7 +316,11 @@ enum SyncDataApplier {
                 let joinMode = rangeIndex - 1 < part.join.count ? part.join[rangeIndex - 1] : 1
                 if joinMode == 1 || joinMode == 2 {
                     let previousTime = syllables.last?.endTimeMs ?? secondsToMs(part.chars[min(max(0, partCharIndex), part.chars.count - 1)])
-                    syllables.append(LyricsLine.Syllable(text: " ", startTimeMs: previousTime, endTimeMs: previousTime))
+                    syllables.append(LyricsLine.Syllable(
+                        text: " ",
+                        startTimeMs: previousTime,
+                        endTimeMs: previousTime
+                    ))
                 }
             }
 
@@ -196,14 +334,22 @@ enum SyncDataApplier {
                 let charEndMs: Int64
                 if partCharIndex + 1 < part.chars.count {
                     charEndMs = secondsToMs(part.chars[partCharIndex + 1])
+                } else if part.granularity == "line" {
+                    charEndMs = fallbackEndMs
                 } else {
                     charEndMs = min(fallbackEndMs, charStartMs + Int64((lastCharMaxDuration * 1000).rounded()))
                 }
-                syllables.append(LyricsLine.Syllable(text: fullChars[sourceIndex], startTimeMs: charStartMs, endTimeMs: charEndMs))
+                syllables.append(styledSyllable(
+                    text: fullChars[sourceIndex],
+                    startTimeMs: charStartMs,
+                    endTimeMs: charEndMs,
+                    absoluteIndex: sourceIndex,
+                    styleRanges: line.styleRanges
+                ))
                 partCharIndex += 1
             }
         }
-        let trimmed = trimWhitespaceSyllables(syllables)
+        let trimmed = trimWhitespaceSyllables(collapseSyllables(syllables, granularity: part.granularity, endTimeMs: fallbackEndMs))
         guard !trimmed.isEmpty else { return nil }
         let text = trimmed.map(\.text).joined()
         return LyricsLine.VocalPart(
@@ -222,14 +368,19 @@ enum SyncDataApplier {
         rawLines.compactMap { rawValue in
             guard let rawLine = rawValue as? [String: Any] else { return nil }
             let parallel = parseParallel(rawLine["parallel"] as? [String: Any])
+            let start = intValue(rawLine["start"], fallback: -1)
+            let end = intValue(rawLine["end"], fallback: -1)
+            let granularity = normalizeGranularity(stringValue(rawLine["granularity"]))
             return SyncLine(
-                start: intValue(rawLine["start"], fallback: -1),
-                end: intValue(rawLine["end"], fallback: -1),
-                chars: readDoubleArray(rawLine["chars"]),
+                start: start,
+                end: end,
+                chars: readCompactTiming(rawLine, expectedLength: end - start + 1, granularity: granularity),
+                granularity: granularity,
                 speaker: stringValue(rawLine["speaker"]),
                 speakerColor: speakerMetadataValue(rawLine, wireKey: "speaker-color", legacyKey: "speakerColor"),
                 speakerFallback: speakerMetadataValue(rawLine, wireKey: "speaker-fallback", legacyKey: "speakerFallback"),
                 kind: IvLyricsUtilities.firstNonEmpty(stringValue(rawLine["kind"]), "vocal"),
+                styleRanges: readStyleRanges(rawLine["styleRanges"], lineStart: start, lineEnd: end),
                 parts: parallel.parts,
                 hiddenRanges: parallel.hiddenRanges
             )
@@ -247,7 +398,8 @@ enum SyncDataApplier {
         let parts = rawParts.compactMap { rawValue -> ParallelPart? in
             guard let rawPart = rawValue as? [String: Any] else { return nil }
             let ranges = readRanges(rawPart["ranges"])
-            let chars = readDoubleArray(rawPart["chars"])
+            let granularity = normalizeGranularity(stringValue(rawPart["granularity"]))
+            let chars = readCompactTiming(rawPart, expectedLength: countRangeChars(ranges), granularity: granularity)
             guard !ranges.isEmpty, !chars.isEmpty else { return nil }
             return ParallelPart(
                 id: stringValue(rawPart["id"]),
@@ -256,12 +408,111 @@ enum SyncDataApplier {
                 speakerColor: speakerMetadataValue(rawPart, wireKey: "speaker-color", legacyKey: "speakerColor"),
                 speakerFallback: speakerMetadataValue(rawPart, wireKey: "speaker-fallback", legacyKey: "speakerFallback"),
                 kind: IvLyricsUtilities.firstNonEmpty(stringValue(rawPart["kind"]), "vocal"),
+                granularity: granularity,
                 ranges: ranges,
                 join: readIntArray(rawPart["join"]),
                 chars: chars
             )
         }
         return Parallel(parts: parts, hiddenRanges: hiddenRanges)
+    }
+
+    private static func normalizeGranularity(_ value: String) -> String {
+        let normalized = value.trimmed.lowercased()
+        return normalized == "line" || normalized == "word" ? normalized : "character"
+    }
+
+    private static func readStyleRanges(_ raw: Any?, lineStart: Int, lineEnd: Int) -> [StyleRange] {
+        guard let values = raw as? [Any] else { return [] }
+        var result: [StyleRange] = []
+        var previousEnd = lineStart - 1
+        for rawValue in values {
+            if result.count >= maxStyleRangesPerLine { break }
+            guard let value = rawValue as? [String: Any] else { continue }
+            let start = intValue(value["start"], fallback: -1)
+            let end = intValue(value["end"], fallback: -1)
+            let rawKind = stringValue(value["kind"]).trimmed.lowercased()
+            let kind = validStyleKinds.contains(rawKind) ? rawKind : ""
+            var speaker = normalizeStyleSpeaker(stringValue(value["speaker"]))
+            let speakerColor = normalizeStyleSpeakerColor(
+                speakerMetadataValue(value, wireKey: "speaker-color", legacyKey: "speakerColor")
+            )
+            let speakerFallback = normalizeStyleSpeakerFallback(
+                speakerMetadataValue(value, wireKey: "speaker-fallback", legacyKey: "speakerFallback")
+            )
+            if isCustomStyleSpeaker(speaker), speakerColor.isEmpty { speaker = "" }
+            guard start >= lineStart,
+                  end <= lineEnd,
+                  end >= start,
+                  start > previousEnd,
+                  !kind.isEmpty || !speaker.isEmpty else { continue }
+            result.append(StyleRange(
+                start: start,
+                end: end,
+                kind: kind,
+                speaker: speaker,
+                speakerColor: speaker.isEmpty ? "" : speakerColor,
+                speakerFallback: speaker.isEmpty ? "" : speakerFallback
+            ))
+            previousEnd = end
+        }
+        return result
+    }
+
+    private static func normalizeStyleSpeaker(_ value: String) -> String {
+        let speaker = value
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .uppercased()
+        if speaker == "NORMAL" || speaker == "CUSTOM" { return speaker }
+        let components = speaker.split(separator: " ").map(String.init)
+        guard components.count == 2, ["MALE", "FEMALE", "DUET"].contains(components[0]) else { return "" }
+        if components[1] == "CUSTOM" { return speaker }
+        return Int(components[1]).map { (1...5).contains($0) } == true ? speaker : ""
+    }
+
+    private static func isCustomStyleSpeaker(_ speaker: String) -> Bool {
+        speaker == "CUSTOM" || speaker.hasSuffix(" CUSTOM")
+    }
+
+    private static func normalizeStyleSpeakerColor(_ value: String) -> String {
+        let color = value.trimmed.lowercased()
+        guard color.count == 7, color.first == "#" else { return "" }
+        return color.dropFirst().allSatisfy { $0.isHexDigit } ? color : ""
+    }
+
+    private static func normalizeStyleSpeakerFallback(_ value: String) -> String {
+        let fallback = value
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .uppercased()
+        return ["MALE 1", "FEMALE 1", "DUET 1"].contains(fallback) ? fallback : ""
+    }
+
+    private static func readCompactTiming(_ object: [String: Any], expectedLength: Int, granularity: String) -> [Double] {
+        let chars = readDoubleArray(object["chars"])
+        guard chars.isEmpty, expectedLength > 0 else { return chars }
+        if granularity == "line", let time = doubleValue(object["timing"]) {
+            return Array(repeating: time, count: expectedLength)
+        }
+        guard granularity == "word", let rawTiming = object["timing"] as? [Any], !rawTiming.isEmpty else { return [] }
+        var expanded = Array<Double?>(repeating: nil, count: expectedLength)
+        var start = 0
+        for rawMark in rawTiming {
+            guard let mark = rawMark as? [Any], mark.count == 2,
+                  let time = doubleValue(mark[1]) else { return [] }
+            let end = intValue(mark[0], fallback: -1)
+            guard doubleValue(mark[0]).map({ $0 == Double(end) }) == true,
+                  end >= start, end < expectedLength else { return [] }
+            for index in start...end { expanded[index] = time }
+            start = end + 1
+        }
+        guard start == expectedLength else { return [] }
+        return expanded.compactMap { $0 }
     }
 
     private static func normalizeParallelParts(_ lines: [SyncLine], fullChars: [String]) -> [SyncLine] {
@@ -334,6 +585,7 @@ enum SyncDataApplier {
                 speakerColor: part.speakerColor,
                 speakerFallback: part.speakerFallback,
                 kind: part.kind,
+                granularity: part.granularity,
                 ranges: [range],
                 join: [],
                 chars: Array(part.chars[charOffset..<(charOffset + charCount)])
@@ -391,10 +643,12 @@ enum SyncDataApplier {
                 start: max(0, line.start - charOffset),
                 end: max(0, line.end - charOffset),
                 chars: line.chars,
+                granularity: line.granularity,
                 speaker: line.speaker,
                 speakerColor: line.speakerColor,
                 speakerFallback: line.speakerFallback,
                 kind: line.kind,
+                styleRanges: shiftStyleRanges(line.styleRanges, charOffset: charOffset),
                 parts: parts,
                 hiddenRanges: shiftRanges(line.hiddenRanges, charOffset: charOffset).ranges
             )
@@ -427,16 +681,32 @@ enum SyncDataApplier {
         return ShiftedRanges(ranges: shifted, removedLeadingChars: removedLeadingChars)
     }
 
+    private static func shiftStyleRanges(_ ranges: [StyleRange], charOffset: Int) -> [StyleRange] {
+        ranges.compactMap { range in
+            guard range.end >= charOffset else { return nil }
+            return StyleRange(
+                start: max(0, range.start - charOffset),
+                end: max(0, range.end - charOffset),
+                kind: range.kind,
+                speaker: range.speaker,
+                speakerColor: range.speakerColor,
+                speakerFallback: range.speakerFallback
+            )
+        }
+    }
+
     private static func shiftSyncTimes(_ lines: [SyncLine], offsetSeconds: Double) -> [SyncLine] {
         lines.map { line in
             SyncLine(
                 start: line.start,
                 end: line.end,
                 chars: shiftTimes(line.chars, offsetSeconds: offsetSeconds),
+                granularity: line.granularity,
                 speaker: line.speaker,
                 speakerColor: line.speakerColor,
                 speakerFallback: line.speakerFallback,
                 kind: line.kind,
+                styleRanges: line.styleRanges,
                 parts: line.parts.map { $0.withChars(shiftTimes($0.chars, offsetSeconds: offsetSeconds)) },
                 hiddenRanges: line.hiddenRanges
             )
@@ -668,10 +938,12 @@ enum SyncDataApplier {
         var start: Int
         var end: Int
         var chars: [Double]
+        var granularity: String
         var speaker: String
         var speakerColor: String
         var speakerFallback: String
         var kind: String
+        var styleRanges: [StyleRange]
         var parts: [ParallelPart]
         var hiddenRanges: [RangeValue]
 
@@ -680,10 +952,12 @@ enum SyncDataApplier {
                 start: start,
                 end: end,
                 chars: chars,
+                granularity: granularity,
                 speaker: speaker,
                 speakerColor: speakerColor,
                 speakerFallback: speakerFallback,
                 kind: kind,
+                styleRanges: styleRanges,
                 parts: nextParts,
                 hiddenRanges: hiddenRanges
             )
@@ -702,6 +976,7 @@ enum SyncDataApplier {
         var speakerColor: String
         var speakerFallback: String
         var kind: String
+        var granularity: String
         var ranges: [RangeValue]
         var join: [Int]
         var chars: [Double]
@@ -714,6 +989,7 @@ enum SyncDataApplier {
                 speakerColor: speakerColor,
                 speakerFallback: speakerFallback,
                 kind: kind,
+                granularity: granularity,
                 ranges: nextRanges,
                 join: join,
                 chars: nextChars
@@ -728,6 +1004,7 @@ enum SyncDataApplier {
                 speakerColor: speakerColor,
                 speakerFallback: speakerFallback,
                 kind: kind,
+                granularity: granularity,
                 ranges: ranges,
                 join: join,
                 chars: nextChars
@@ -739,6 +1016,15 @@ enum SyncDataApplier {
         var start: Int
         var end: Int
         var count: Int { max(0, end - start + 1) }
+    }
+
+    private struct StyleRange {
+        var start: Int
+        var end: Int
+        var kind: String
+        var speaker: String
+        var speakerColor: String
+        var speakerFallback: String
     }
 
     private struct ShiftedRanges {

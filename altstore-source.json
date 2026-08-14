@@ -20,6 +20,136 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.3.1",
+          "buildVersion": "40",
+          "date": "2026-08-14",
+          "localizedDescription": "v1.3.1은 가사 내 인라인 범위 표시의 안정성을 개선한 업데이트입니다. 또한 앱 릴리스 버전 정보를 1.3.1(빌드 40)로 준비하고, 이전 v1.3.0의 AltStore 배포 메타데이터를 정비했습니다.\n\nv1.3.1 improves the stability of inline range rendering in lyrics. It also prepares the app’s release metadata for version 1.3.1 (build 40) and tidies AltStore distribution metadata for the prior v1.3.0 release.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.3.1/ivLyrics-IOS-v1.3.1-unsigned.ipa",
+          "size": 7223145,
+          "sha256": "90c13a5234303e94d1a8d6cad2407b16a3034385f982d4bcd149aa10a44ecbbc",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.3.0",
+          "buildVersion": "39",
+          "date": "2026-08-13",
+          "localizedDescription": "v1.3.0은 PC에서 제작한 최신 노래방 싱크를 iPhone과 iPad에서도 더 풍부하고 정확하게 보여줍니다. 글자 구간별 보컬 표현, 일본어 단어 구분, 짧은 연주 구간 처리와 중복 번역 정리가 메인 화면과 Picture in Picture 경험 전반에 반영됩니다.\n\nv1.3.0 brings richer and more accurate rendering of the latest PC-authored karaoke sync data to iPhone and iPad. Range-based vocal styling, better Japanese word boundaries, cleaner short instrumental cues, and duplicate supplementary lyric cleanup carry across the main view and Picture in Picture.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.3.0/ivLyrics-IOS-v1.3.0-unsigned.ipa",
+          "size": 7223691,
+          "sha256": "29cf570734301d16dd623c5f127c360b8917667db468ce1e39f668480097dc88",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.2.2",
+          "buildVersion": "38",
+          "date": "2026-08-10",
+          "localizedDescription": "v1.2.2는 가사 제공처의 연주곡 표기를 인식하고, 가사 동기화 보정 정확도를 개선합니다. AI 가사 조사에는 일반 텍스트 가사 사용과 모델 제한 처리가 적용되었습니다. 또한 배포 카탈로그 메타데이터와 출시용 프로젝트 구성이 정리되었습니다.\n\nv1.2.2 recognizes instrumental markers used by lyric providers and improves lyric synchronization correction accuracy. AI lyric research now uses plain-text lyrics and accounts for model limits. Distribution catalog metadata and release project configuration were also cleaned up.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.2.2/ivLyrics-IOS-v1.2.2-unsigned.ipa",
+          "size": 7135160,
+          "sha256": "c9dbb45e4e8cc156fd6e9969df4e6d00e10a2797303558b045f38841f7a7fdfb",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.2.1",
+          "buildVersion": "37",
+          "date": "2026-08-10",
+          "localizedDescription": "ivLyrics iOS 1.2.1은 편집형 리서치 경험을 추가하고, 가사 Picture in Picture 렌더링 및 캐시 관리를 개선합니다. 자격 증명을 Keychain으로 이전하고 작업 정리, 현지화, 릴리스 검증을 강화해 앱의 보안성과 안정성도 높였습니다.\n\nivLyrics iOS 1.2.1 adds an editorial research experience and improves lyrics Picture in Picture rendering and cache management. It also strengthens security, lifecycle handling, localization, and release validation for a more reliable app experience.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.2.1/ivLyrics-IOS-v1.2.1-unsigned.ipa",
+          "size": 7125018,
+          "sha256": "7347f8785ae8b8d23f1fafb856e5e073cbbf659213b388faea0cd2a897a04740",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.2.0",
+          "buildVersion": "36",
+          "date": "2026-08-09",
+          "localizedDescription": "v1.2.0에서는 별도 API 키 없이 가사 메타데이터를 번역할 수 있도록 AI 번역 흐름을 확장했습니다. 앱의 번역 처리와 화면 연동이 함께 개선되어, 지원되는 키리스 제공자를 통해 메타데이터 번역 결과를 사용할 수 있습니다. 또한 배포 소스의 이전 v1.1.11 IPA 메타데이터를 실제 파일 정보에 맞게 정정했습니다.\n\nv1.2.0 expands the AI translation flow so lyric metadata can be translated without a separate API key. Translation handling and UI integration were updated together, allowing metadata translation results to be used through supported keyless providers. The distribution-source metadata for the previous v1.1.11 IPA was also corrected to match the actual file.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.2.0/ivLyrics-IOS-v1.2.0-unsigned.ipa",
+          "size": 7019188,
+          "sha256": "b738d89b4ba2239189f7c494e3709fd8336df7fac725e7aae666f80e15bfc2d3",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.11",
+          "buildVersion": "35",
+          "date": "2026-08-09",
+          "localizedDescription": "v1.1.11은 가사 번역 제공업체 선택과 언어 설정을 하나의 흐름으로 정리하고, 주 언어에 맞는 제공업체 안내를 추가했습니다. 모든 지원 언어의 번역 문구도 다듬어 설정과 안내 화면의 표현을 개선했습니다. 또한 배포 안내와 AltStore 소스 메타데이터를 정비했습니다.\n\nv1.1.11 consolidates lyric translation provider selection and language setup, and adds provider guidance based on the primary language. It also polishes translated copy across every supported locale to improve settings and guidance screens. Distribution documentation and AltStore source metadata have also been maintained.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.11/ivLyrics-IOS-v1.1.11-unsigned.ipa",
+          "size": 7014563,
+          "sha256": "054d8fe94f85e790c45170cc08050b49881e8ed5b13939959ce033d39f5723a7",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.10",
+          "buildVersion": "34",
+          "date": "2026-08-07",
+          "localizedDescription": "세로 화면에서 앨범 아트 가장자리가 잘리던 표시 문제가 개선되었습니다. 또한 AltStore 소스의 이전 v1.1.9 릴리스 메타데이터가 실제 IPA 정보에 맞게 정리되었습니다.\n\nAn issue that could clip album-art edges in portrait orientation has been improved. The AltStore source metadata for the earlier v1.1.9 release has also been aligned with the actual IPA information.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.10/ivLyrics-IOS-v1.1.10-unsigned.ipa",
+          "size": 6931973,
+          "sha256": "19ee128cb3acf04738da5ab287093ff7bee9976c1f1279c305b859d171a6ec0e",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.9",
+          "buildVersion": "33",
+          "date": "2026-08-07",
+          "localizedDescription": "v1.1.9는 가사 가라오케 애니메이션의 채움 및 바운스 타이밍을 조정해 재생 흐름과의 일치감을 높였습니다. 후원자 혜택과 클라우드 설정 동기화를 추가하고, 관련 설정 화면 및 다국어 문구를 확장했습니다. 또한 이전 v1.1.8 배포 항목의 IPA 메타데이터를 실제 값으로 정비했습니다.\n\nv1.1.9 adjusts karaoke lyric fill and bounce timing for closer alignment with playback. It adds supporter perks and cloud settings synchronization, along with expanded settings UI and localized text. It also corrects the IPA metadata for the prior v1.1.8 distribution entry.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.9/ivLyrics-IOS-v1.1.9-unsigned.ipa",
+          "size": 6931864,
+          "sha256": "05db95938d580fe9039dd657cef82d10fa2a68ab98845895276900bd888152ef",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.8",
+          "buildVersion": "32",
+          "date": "2026-08-07",
+          "localizedDescription": "v1.1.8에서는 제작자 장식 정보를 앱에 내장된 데이터로 사용하도록 개선했습니다. 가사 데이터와 함께 제작자 표시 정보를 처리해 별도 지원 클라이언트에 대한 의존성을 줄였습니다. 또한 AltStore 배포 소스의 v1.1.7 IPA 메타데이터를 실제 파일 정보에 맞게 정정했습니다.\n\nv1.1.8 improves creator decorations by using data embedded in the app's lyric-related models. Creator display information is handled together with lyric data, reducing reliance on a separate support client. The AltStore source metadata for the v1.1.7 IPA was also corrected to match the actual file.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.8/ivLyrics-IOS-v1.1.8-unsigned.ipa",
+          "size": 6887916,
+          "sha256": "6eb94d4bb150573ba9f8a007d3da767d048bf3aeb4b7e53605b3feb4e875d51f",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.7",
+          "buildVersion": "31",
+          "date": "2026-08-07",
+          "localizedDescription": "ivLyrics iOS 1.1.7에서는 후원 중인 크리에이터의 고유 색상을 앱에서 표시해 더 쉽게 알아볼 수 있도록 했습니다. 또한 릴리스 공지 자동화와 AltStore 배포 메타데이터 관리가 개선되었으며, 앱 내 재생 및 가사 기능의 동작에는 영향을 주지 않습니다.\n\nivLyrics iOS 1.1.7 displays the distinctive colors of creators you support, making them easier to recognize in the app. This release also improves release-announcement automation and AltStore distribution metadata maintenance, without changing in-app playback or lyrics behavior.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.7/ivLyrics-IOS-v1.1.7-unsigned.ipa",
+          "size": 6884940,
+          "sha256": "344c082f1d7f20d7c3ac9634ad1472ac5215f2a4916ad4ea0d1078bee7edd101",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.6",
+          "buildVersion": "30",
+          "date": "2026-08-04",
+          "localizedDescription": "iPhone과 iPad에서 앨범 이미지가 낮은 화질로 남거나 양옆이 잘리는 문제를 수정했습니다. Spotify Web API에서 받은 고화질 앨범 이미지 URL을 트랙별로 유지하고, 캐시된 곡을 다시 열 때도 낮은 화질 이미지로 되돌아가지 않습니다. 이미지 메타데이터를 일시적으로 받지 못하면 30초 뒤 다시 시도하며, 세로·가로·TMI·가사 PIP 화면은 앨범 전체가 보이는 aspect-fit 방식으로 표시합니다.\n\nFixed album artwork remaining low-resolution or being cropped on iPhone and iPad. High-resolution artwork URLs resolved through the Spotify Web API are preserved per track and reused when returning to cached songs. Temporarily unavailable artwork metadata is retried after 30 seconds, and portrait, landscape, TMI, and Lyrics Picture in Picture surfaces now use aspect-fit rendering so the complete cover remains visible.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.6/ivLyrics-IOS-v1.1.6-unsigned.ipa",
+          "size": 6864950,
+          "sha256": "33a962cda30dcc70ebd3221e15eabdea2a8b7ba8b3e3c3a782824d86877d09a7",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.5",
+          "buildVersion": "29",
+          "date": "2026-08-03",
+          "localizedDescription": "ivLyrics iOS 1.1.5는 앱의 주요 화면, 가사 메타데이터 메뉴, 재생용 LP 모드 및 상태 처리에 대한 업데이트를 포함합니다. 일부 현지화 문자열도 함께 조정되어 관련 화면에서 표시되는 텍스트가 갱신됩니다. 또한 이전 1.1.4 배포본의 AltStore 소스 메타데이터가 실제 파일 정보에 맞게 정정되었습니다.\n\nivLyrics iOS 1.1.5 includes updates to the app’s primary screens, lyrics metadata menu, LP playback mode, and state handling. Some localized strings were also adjusted, updating text shown in the affected screens. In addition, AltStore source metadata for the previous 1.1.4 distribution was corrected to match its actual file information.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.5/ivLyrics-IOS-v1.1.5-unsigned.ipa",
+          "size": 6860688,
+          "sha256": "fe195b1e76549d3e264eeaf7909a54b43002e178578058c78cc3f3735f9d88ea",
+          "minOSVersion": "17.0"
+        },
+        {
+          "version": "1.1.4",
+          "buildVersion": "28",
+          "date": "2026-08-03",
+          "localizedDescription": "ivLyrics iOS 1.1.4(빌드 28) 릴리스에는 앱 프로젝트 설정과 함께 화면 및 데이터 모델 코드 업데이트가 포함됩니다. 또한 릴리스 메타데이터 생성 한도를 확장하고, AltStore 소스의 이전 1.1.3 IPA 메타데이터를 실제 파일 정보와 일치하도록 정비했습니다.\n\nivLyrics iOS 1.1.4 (build 28) includes an app release update covering project settings as well as UI and data-model code. It also expands the release-note generation limit and aligns the AltStore source metadata for the earlier 1.1.3 IPA with its actual file information.",
+          "downloadURL": "https://github.com/ivLis-Studio/ivLyrics-IOS/releases/download/v1.1.4/ivLyrics-IOS-v1.1.4-unsigned.ipa",
+          "size": 6853655,
+          "sha256": "014260c44ca9dc603c36d65f6b92e23f7f97b5a4040f59e706a9a33719864e63",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.1.3",
           "buildVersion": "9",
           "date": "2026-07-25",
