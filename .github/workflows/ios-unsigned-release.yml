@@ -185,6 +185,7 @@ jobs:
           fi
 
       - name: Send iOS release notes to Discord
+        continue-on-error: true
         env:
           RELEASE_WEBHOOK_URL: ${{ secrets.RELEASE_NOTES_WEBHOOK_URL }}
           RELEASE_PLATFORM: ios
