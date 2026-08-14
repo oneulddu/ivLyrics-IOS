@@ -135,6 +135,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         title: String,
         artist: String,
         statusText: String,
+        lyricsLocale: String,
         settings: AppSettings.Snapshot
     ) {
         let nextState = RenderState(
@@ -144,6 +145,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             title: title,
             artist: artist,
             statusText: statusText,
+            lyricsLocale: lyricsLocale,
             showArtwork: settings.pipShowArtwork,
             orientation: settings.pipOrientation,
             backgroundMode: settings.pipBackgroundMode,
@@ -153,7 +155,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             solidColor: settings.backgroundSolidColor,
             syncedLyricsKaraokeAnimationEnabled: settings.syncedLyricsKaraokeAnimationEnabled,
             karaokeBounceEffectEnabled: settings.karaokeBounceEffectEnabled,
-            karaokeDataAsLineSynced: settings.karaokeDataAsLineSynced,
+            karaokeDisplayGranularity: settings.karaokeDisplayGranularity,
             useSyncCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
             typography: settings.typography,
             speakerColors: settings.speakerColors
@@ -197,7 +199,10 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         }
         let uptime = ProcessInfo.processInfo.systemUptime
         if active || startReason != nil {
-            if forceRender || state.positionMs != lastRenderedPositionMs || uptime - lastRenderUptime >= 1.0 {
+            let elapsed = uptime - lastRenderUptime
+            let positionFrameDue = state.positionMs != lastRenderedPositionMs
+                && elapsed >= state.preferredFrameInterval
+            if forceRender || positionFrameDue || elapsed >= 1.0 {
                 renderFrame()
             }
         } else if forceRender || !hasPrimedFrame || uptime - lastRenderUptime >= 1.0 {
@@ -452,13 +457,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private func renderFrame() {
         let size = state.renderSize
         guard size.width > 0, size.height > 0 else { return }
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let image = renderer.image { context in
-            drawFrame(in: CGRect(origin: .zero, size: size), context: context.cgContext)
-        }
-        guard let cgImage = image.cgImage,
-              let pixelBuffer = makePixelBuffer(width: Int(size.width), height: Int(size.height)) else { return }
-        draw(cgImage, into: pixelBuffer)
+        guard let pixelBuffer = makePixelBuffer(width: Int(size.width), height: Int(size.height)),
+              drawFrame(into: pixelBuffer) else { return }
         guard let sampleBuffer = makeSampleBuffer(pixelBuffer: pixelBuffer) else { return }
         if displayLayer.status == .failed {
             displayLayer.flush()
@@ -747,11 +747,12 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             fontSize: fontSize,
             speakerColors: state.speakerColors,
             useCreatorSpeakerColors: state.useSyncCreatorSpeakerColors,
-            karaokeDataAsLineSynced: state.karaokeDataAsLineSynced,
+            karaokeDisplayGranularity: state.karaokeDisplayGranularity,
             syncedLyricsKaraokeAnimationEnabled: state.syncedLyricsKaraokeAnimationEnabled,
             bounceEnabled: state.karaokeBounceEffectEnabled,
             typography: state.typography
         )
+        .environment(\.lyricsSegmentationLocale, state.lyricsLocale)
         .frame(width: rect.width, height: rect.height, alignment: state.swiftUIFrameAlignment)
 
         let renderer = ImageRenderer(content: content)
@@ -886,7 +887,9 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private func drawArtwork(_ image: UIImage, in rect: CGRect, cornerRadius: CGFloat, context: CGContext) {
         context.saveGState()
         UIBezierPath(roundedRect: rect, cornerRadius: cornerRadius).addClip()
-        drawAspectFill(image, in: rect, context: context)
+        UIColor(white: 0.12, alpha: 1).setFill()
+        UIRectFill(rect)
+        drawAspectFit(image, in: rect)
         context.restoreGState()
         UIColor.white.withAlphaComponent(0.12).setStroke()
         let path = UIBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: cornerRadius)
@@ -920,6 +923,14 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         context.clip(to: rect)
         image.draw(in: target)
         context.restoreGState()
+    }
+
+    private func drawAspectFit(_ image: UIImage, in rect: CGRect) {
+        guard image.size.width > 0, image.size.height > 0 else { return }
+        let scale = min(rect.width / image.size.width, rect.height / image.size.height)
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let target = CGRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height)
+        image.draw(in: target)
     }
 
     private func makePixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
@@ -968,7 +979,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         return pixelBuffer
     }
 
-    private func draw(_ image: CGImage, into pixelBuffer: CVPixelBuffer) {
+    private func drawFrame(into pixelBuffer: CVPixelBuffer) -> Bool {
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
         guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer),
@@ -980,18 +991,21 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
                 space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-              ) else { return }
-        // `image` is already a rasterized CGImage. Drawing it into the BGRA bitmap
-        // context writes its rows in the order consumed by CVPixelBuffer. Applying
-        // UIKit's flipped drawing transform here reverses those rows a second time
-        // and makes the sample-buffer video appear upside-down on device.
-        context.draw(image, in: CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer)))
+              ) else { return false }
+        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        context.translateBy(x: 0, y: height)
+        context.scaleBy(x: 1, y: -1)
+        UIGraphicsPushContext(context)
+        defer { UIGraphicsPopContext() }
+        drawFrame(in: CGRect(x: 0, y: 0, width: width, height: height), context: context)
+        return true
     }
 
     private func makeSampleBuffer(pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
         guard let videoFormatDescription else { return nil }
         var timing = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: 15),
+            duration: CMTime(value: 1, timescale: state.usesTimedKaraoke ? 30 : 12),
             presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
             decodeTimeStamp: .invalid
         )
@@ -1019,6 +1033,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         var title: String
         var artist: String
         var statusText: String
+        var lyricsLocale: String
         var showArtwork: Bool
         var orientation: String
         var backgroundMode: String
@@ -1028,7 +1043,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         var solidColor: String
         var syncedLyricsKaraokeAnimationEnabled: Bool
         var karaokeBounceEffectEnabled: Bool
-        var karaokeDataAsLineSynced: Bool
+        var karaokeDisplayGranularity: String
         var useSyncCreatorSpeakerColors: Bool
         var typography: AppSettings.TypographySettings
         var speakerColors: AppSettings.SpeakerColorSettings
@@ -1040,6 +1055,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             title: "ivLyrics",
             artist: "",
             statusText: "",
+            lyricsLocale: "auto",
             showArtwork: true,
             orientation: AppSettings.pipOrientationSquare,
             backgroundMode: AppSettings.pipBackgroundCover,
@@ -1049,7 +1065,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             solidColor: "#1e3a8a",
             syncedLyricsKaraokeAnimationEnabled: true,
             karaokeBounceEffectEnabled: true,
-            karaokeDataAsLineSynced: false,
+            karaokeDisplayGranularity: AppSettings.karaokeDisplayCharacter,
             useSyncCreatorSpeakerColors: true,
             typography: .defaults,
             speakerColors: .defaults
@@ -1117,6 +1133,23 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             return value.isEmpty ? nil : value
         }
 
+        var usesTimedKaraoke: Bool {
+            guard syncedLyricsKaraokeAnimationEnabled,
+                  AppSettings.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity)
+                    != AppSettings.karaokeDisplayLine,
+                  let line = activeLine?.line else { return false }
+            if line.syllables.contains(where: { $0.endTimeMs > $0.startTimeMs }) {
+                return true
+            }
+            return line.vocalParts.contains { part in
+                part.syllables.contains(where: { $0.endTimeMs > $0.startTimeMs })
+            }
+        }
+
+        var preferredFrameInterval: TimeInterval {
+            usesTimedKaraoke ? 1.0 / 30.0 : 1.0 / 12.0
+        }
+
         func renderIdentity(for line: ActiveLine?) -> String {
             var identity = track?.stableKey ?? ""
             identity.reserveCapacity(256)
@@ -1128,6 +1161,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             identity.append(artist)
             identity.append("|")
             identity.append(statusText)
+            identity.append("|")
+            identity.append(lyricsLocale)
             identity.append("|")
             identity.append(String(showArtwork))
             identity.append("|")
@@ -1147,7 +1182,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             identity.append("|")
             identity.append(String(karaokeBounceEffectEnabled))
             identity.append("|")
-            identity.append(String(karaokeDataAsLineSynced))
+            identity.append(AppSettings.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity))
             identity.append("|")
             identity.append(String(useSyncCreatorSpeakerColors))
             identity.append("|")
@@ -1210,6 +1245,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                   state.title == other.state.title,
                   state.artist == other.state.artist,
                   state.statusText == other.state.statusText,
+                  state.lyricsLocale == other.state.lyricsLocale,
                   state.showArtwork == other.state.showArtwork,
                   state.orientation == other.state.orientation,
                   state.backgroundMode == other.state.backgroundMode,
@@ -1219,7 +1255,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                   state.solidColor == other.state.solidColor,
                   state.syncedLyricsKaraokeAnimationEnabled == other.state.syncedLyricsKaraokeAnimationEnabled,
                   state.karaokeBounceEffectEnabled == other.state.karaokeBounceEffectEnabled,
-                  state.karaokeDataAsLineSynced == other.state.karaokeDataAsLineSynced,
+                  state.karaokeDisplayGranularity == other.state.karaokeDisplayGranularity,
                   state.useSyncCreatorSpeakerColors == other.state.useSyncCreatorSpeakerColors,
                   state.typography == other.state.typography,
                   state.speakerColors == other.state.speakerColors else {
@@ -1272,7 +1308,7 @@ struct PictureInPictureKaraokeContent: View {
     var fontSize: CGFloat
     var speakerColors: AppSettings.SpeakerColorSettings
     var useCreatorSpeakerColors: Bool
-    var karaokeDataAsLineSynced: Bool
+    var karaokeDisplayGranularity: String
     var syncedLyricsKaraokeAnimationEnabled: Bool
     var bounceEnabled: Bool
     var typography: AppSettings.TypographySettings = .defaults
@@ -1355,7 +1391,11 @@ struct PictureInPictureKaraokeContent: View {
         inactiveDistance: Double,
         effectRowSeed: Int = 0
     ) -> some View {
-        let timedSyllables = karaokeDataAsLineSynced ? [] : syllables
+        let displayGranularity = AppSettings.normalizeKaraokeDisplayGranularity(
+            karaokeDisplayGranularity
+        )
+        let hasInlineStyles = syllables.contains { $0.inlineStyle == true }
+        let timedSyllables = displayGranularity == AppSettings.karaokeDisplayLine && !hasInlineStyles ? [] : syllables
         let hasTimedSyllables = timedSyllables.contains { $0.endTimeMs > $0.startTimeMs }
         let activeColor = LyricSpeakerPalette.activeColor(
             speaker: speaker,
@@ -1376,6 +1416,7 @@ struct PictureInPictureKaraokeContent: View {
             text: text,
             rubyText: rubyText,
             syllables: hasTimedSyllables ? timedSyllables : [],
+            displayGranularity: displayGranularity,
             startTimeMs: startTimeMs,
             endTimeMs: endTimeMs,
             positionMs: positionMs,
@@ -1383,6 +1424,9 @@ struct PictureInPictureKaraokeContent: View {
             activeColor: activeColor,
             alignment: alignment,
             kind: kind,
+            speakerColors: speakerColors,
+            useCreatorSpeakerColors: useCreatorSpeakerColors,
+            speakerColorDistance: inactiveDistance,
             inactiveColor: inactiveColor,
             bounceEnabled: bounceEnabled,
             bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: fontSize),

@@ -8,6 +8,7 @@ final class AppSettings: ObservableObject {
 
     static let outputLangSameUI = "same_ui"
     static let defaultSourceLang = "default"
+    private static let firstLanguagePromptedKey = "first_language_prompted_v1"
     static let previewOriginal = "original"
     static let previewPronunciation = "pronunciation"
     static let previewTranslation = "translation"
@@ -49,6 +50,9 @@ final class AppSettings: ObservableObject {
     static let lyricsTypeKaraoke = "karaoke"
     static let lyricsTypeSynced = "synced"
     static let lyricsTypePlain = "plain"
+    static let karaokeDisplayCharacter = "character"
+    static let karaokeDisplayWord = "word"
+    static let karaokeDisplayLine = "line"
     static let vinylTonearmStyleS = "s"
     static let vinylTonearmStyleStraight = "straight"
     static let vinylTonearmStyleJ = "j"
@@ -56,6 +60,30 @@ final class AppSettings: ObservableObject {
     static let vinylTonearmFinishWhite = "white"
     static let vinylTonearmFinishSilver = "silver"
     static let vinylTonearmFinishBlack = "black"
+    private static let cloudSettingKeys: Set<String> = [
+        "provider", "ui_lang", "output_lang", "target_lang", "pronunciation_lang", "language_rules_v2",
+        "translation_enabled", "pronunciation_enabled", "bing_translate_enabled", "google_translate_enabled",
+        "ai_provider_order_v1", "ai_provider_enabled_v1",
+        "metadata_translation_enabled",
+        "japanese_furigana_enabled", "cultural_annotations_enabled", "cultural_annotations_font_family",
+        "cultural_annotations_font_size", "cultural_annotations_font_weight", "cultural_annotations_opacity",
+        "cultural_annotations_vinyl_font_family", "cultural_annotations_vinyl_font_size",
+        "cultural_annotations_vinyl_font_weight", "cultural_annotations_vinyl_opacity", "model", "max_tokens",
+        "temperature", "preview_mode", "preview_items", "auto_instrumental_break", "interlude_labels_enabled",
+        "synced_lyrics_karaoke_animation", "karaoke_bounce_effect", "karaoke_data_as_line_synced",
+        "karaoke_display_granularity_v1",
+        "use_sync_creator_speaker_colors", "lyrics_text_alignment", "keep_screen_on",
+        "landscape_auto_hide_controls", "landscape_center_no_lyrics", "pip_show_artwork", "pip_orientation",
+        "pip_background_mode", "pip_lyrics_text_alignment", "pip_lyrics_size_percent",
+        "pip_translation_size_percent", "vinyl_album_size_percent", "vinyl_record_size_percent",
+        "vinyl_animations_enabled", "vinyl_center_rotation_enabled", "vinyl_lyrics_enabled",
+        "vinyl_tonearm_style", "vinyl_tonearm_finish", "vinyl_tonearm_size_percent", "background_mode",
+        "background_brightness", "background_blur", "background_noise", "background_reduce_motion",
+        "background_solid_color", "background_video_scale", "lyrics_provider_order_v1",
+        "lyrics_provider_enabled_v1", "lyrics_provider_types_v1", "lyrics_prefer_sync_data_provider",
+        "lyrics_prefer_type_over_provider", "typography_settings_v1", "speaker_color_settings_v1",
+        "global_sync_offset_ms"
+    ]
 
     static let standardLyricsProviders: [StandardLyricsProvider] = [
         StandardLyricsProvider(
@@ -73,7 +101,7 @@ final class AppSettings: ObservableObject {
             author: "default",
             projectURL: PaxsenixLyricsProvider.projectURL,
             supportsNativeKaraoke: true,
-            supportsIvLyricsSync: false,
+            supportsIvLyricsSync: true,
             supportsSynced: true,
             supportsPlain: true
         ),
@@ -83,7 +111,7 @@ final class AppSettings: ObservableObject {
             author: "default",
             projectURL: LyricsPlusProvider.projectURL,
             supportsNativeKaraoke: true,
-            supportsIvLyricsSync: false,
+            supportsIvLyricsSync: true,
             supportsSynced: true,
             supportsPlain: true
         ),
@@ -94,7 +122,7 @@ final class AppSettings: ObservableObject {
             projectURL: "https://github.com/better-lyrics/unison",
             defaultEnabled: false,
             supportsNativeKaraoke: true,
-            supportsIvLyricsSync: false,
+            supportsIvLyricsSync: true,
             supportsSynced: true,
             supportsPlain: true
         )
@@ -111,6 +139,29 @@ final class AppSettings: ObservableObject {
         Provider(id: "pollinations", label: "Pollinations.ai", description: "Pollinations OpenAI 호환 API", defaultBaseUrl: "https://gen.pollinations.ai", defaultModel: "openai", apiKeyURL: "https://enter.pollinations.ai"),
         Provider(id: "paxsenix", label: "paxsenix", description: "OpenAI 호환 API 서버", defaultBaseUrl: PaxsenixAIProvider.baseURL, defaultModel: "", apiKeyURL: PaxsenixAIProvider.dashboardURL)
     ]
+    static let allAIProviders: [Provider] = [
+        Provider(
+            id: KeylessTranslationProviders.bingId,
+            label: KeylessTranslationProviders.bingLabel,
+            description: "",
+            defaultBaseUrl: "",
+            defaultModel: "",
+            apiKeyURL: "",
+            isKeyless: true,
+            defaultEnabled: true
+        ),
+        Provider(
+            id: KeylessTranslationProviders.googleId,
+            label: KeylessTranslationProviders.googleLabel,
+            description: "",
+            defaultBaseUrl: "",
+            defaultModel: "",
+            apiKeyURL: "",
+            isKeyless: true,
+            defaultEnabled: true
+        )
+    ] + providers
+    static let defaultAIProviderOrder = allAIProviders.map(\.id)
 
     static let languages: [Language] = [
         Language(code: "ko", name: "Korean", nativeName: "한국어", phoneticDescription: "Korean Hangul pronunciation, e.g. こんにちは -> 콘니치와"),
@@ -182,6 +233,8 @@ final class AppSettings: ObservableObject {
     @Published var outputLang: String { didSet { saveOutputLanguageFromPublished() } }
     @Published var translationEnabled: Bool { didSet { saveDefaultLanguageRuleFromPublished() } }
     @Published var pronunciationEnabled: Bool { didSet { saveDefaultLanguageRuleFromPublished() } }
+    @Published var bingTranslateEnabled: Bool { didSet { set("bing_translate_enabled", bingTranslateEnabled); syncLegacyKeylessProvider(KeylessTranslationProviders.bingId, enabled: bingTranslateEnabled) } }
+    @Published var googleTranslateEnabled: Bool { didSet { set("google_translate_enabled", googleTranslateEnabled); syncLegacyKeylessProvider(KeylessTranslationProviders.googleId, enabled: googleTranslateEnabled) } }
     @Published var metadataTranslationEnabled: Bool { didSet { set("metadata_translation_enabled", metadataTranslationEnabled) } }
     @Published var japaneseFuriganaEnabled: Bool { didSet { set("japanese_furigana_enabled", japaneseFuriganaEnabled) } }
     @Published var culturalAnnotationsEnabled: Bool { didSet { set("cultural_annotations_enabled", culturalAnnotationsEnabled) } }
@@ -193,19 +246,28 @@ final class AppSettings: ObservableObject {
     @Published var culturalAnnotationsVinylFontSize: Int { didSet { set("cultural_annotations_vinyl_font_size", Self.clampCulturalFontSize(culturalAnnotationsVinylFontSize)) } }
     @Published var culturalAnnotationsVinylFontWeight: Int { didSet { set("cultural_annotations_vinyl_font_weight", Self.clampCulturalFontWeight(culturalAnnotationsVinylFontWeight)) } }
     @Published var culturalAnnotationsVinylOpacity: Int { didSet { set("cultural_annotations_vinyl_opacity", Self.clampCulturalOpacity(culturalAnnotationsVinylOpacity)) } }
-    @Published var apiKeys: String { didSet { set("api_keys", apiKeys) } }
-    @Published var pollinationsAccessToken: String { didSet { set("pollinations_access_token", pollinationsAccessToken) } }
-    @Published var baseUrl: String { didSet { set("base_url", baseUrl) } }
-    @Published var model: String { didSet { set("model", model) } }
-    @Published var maxTokens: Int { didSet { set("max_tokens", max(256, maxTokens)) } }
-    @Published var temperature: Double { didSet { set("temperature", min(2, max(0, temperature))) } }
+    @Published var apiKeys: String { didSet { setSecure("api_keys", apiKeys); saveAIProviderProfileFromPublished() } }
+    @Published var pollinationsAccessToken: String { didSet { setSecure("pollinations_access_token", pollinationsAccessToken) } }
+    @Published var baseUrl: String { didSet { set("base_url", baseUrl); saveAIProviderProfileFromPublished() } }
+    @Published var model: String { didSet { set("model", model); saveAIProviderProfileFromPublished() } }
+    @Published var maxTokens: Int { didSet { set("max_tokens", max(256, maxTokens)); saveAIProviderProfileFromPublished() } }
+    @Published var temperature: Double { didSet { set("temperature", min(2, max(0, temperature))); saveAIProviderProfileFromPublished() } }
     @Published var previewMode: String { didSet { savePreviewModeFromPublished() } }
     @Published var previewItems: Int { didSet { set("preview_items", Self.normalizePreviewItems(previewItems)) } }
     @Published var autoInstrumentalBreakEnabled: Bool { didSet { set("auto_instrumental_break", autoInstrumentalBreakEnabled) } }
     @Published var interludeLabelsEnabled: Bool { didSet { set("interlude_labels_enabled", interludeLabelsEnabled) } }
     @Published var syncedLyricsKaraokeAnimationEnabled: Bool { didSet { set("synced_lyrics_karaoke_animation", syncedLyricsKaraokeAnimationEnabled) } }
     @Published var karaokeBounceEffectEnabled: Bool { didSet { set("karaoke_bounce_effect", karaokeBounceEffectEnabled) } }
-    @Published var karaokeDataAsLineSynced: Bool { didSet { set("karaoke_data_as_line_synced", karaokeDataAsLineSynced) } }
+    @Published var karaokeDisplayGranularity: String {
+        didSet {
+            let normalized = Self.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity)
+            set("karaoke_display_granularity_v1", normalized)
+            set("karaoke_data_as_line_synced", normalized == Self.karaokeDisplayLine)
+        }
+    }
+    var karaokeDataAsLineSynced: Bool {
+        Self.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity) == Self.karaokeDisplayLine
+    }
     @Published var useSyncCreatorSpeakerColors: Bool { didSet { set("use_sync_creator_speaker_colors", useSyncCreatorSpeakerColors) } }
     @Published var lyricsTextAlignment: String { didSet { set("lyrics_text_alignment", lyricsTextAlignment) } }
     @Published var keepScreenOn: Bool { didSet { set("keep_screen_on", keepScreenOn) } }
@@ -233,7 +295,7 @@ final class AppSettings: ObservableObject {
     @Published var backgroundSolidColor: String { didSet { set("background_solid_color", Self.normalizeHexColor(backgroundSolidColor, fallback: "#1e3a8a")); bumpBackgroundRevisionIfNeeded() } }
     @Published var backgroundVideoScale: Int { didSet { set("background_video_scale", Self.clampBackgroundVideoScale(backgroundVideoScale)); bumpBackgroundRevisionIfNeeded() } }
     @Published var spotifyClientId: String { didSet { set("spotify_client_id", spotifyClientId) } }
-    @Published var spotifyClientSecret: String { didSet { set("spotify_client_secret", spotifyClientSecret) } }
+    @Published var spotifyClientSecret: String { didSet { setSecure("spotify_client_secret", spotifyClientSecret) } }
     @Published var lyricsProviderModeRaw: String {
         didSet {
             set("lyrics_provider_mode", LyricsProviderMode.normalize(lyricsProviderModeRaw).rawValue)
@@ -267,6 +329,9 @@ final class AppSettings: ObservableObject {
     @Published private(set) var standardLyricsProviderTypes: [String: [String: Bool]] { didSet { saveStandardLyricsProviderSettingsIfNeeded() } }
     @Published var standardPreferSyncDataProvider: Bool { didSet { set("lyrics_prefer_sync_data_provider", standardPreferSyncDataProvider) } }
     @Published var standardPreferLyricsTypeOverProviderOrder: Bool { didSet { set("lyrics_prefer_type_over_provider", standardPreferLyricsTypeOverProviderOrder) } }
+    @Published private(set) var aiProviderOrder: [String] { didSet { saveAIProviderSettingsIfNeeded() } }
+    @Published private(set) var aiProviderEnabled: [String: Bool] { didSet { saveAIProviderSettingsIfNeeded() } }
+    @Published private(set) var aiProviderProfiles: [String: AIProviderProfile] { didSet { saveAIProviderSettingsIfNeeded() } }
     @Published private(set) var languageRulesRevision = 0
     @Published private(set) var backgroundSettingsRevision = 0
     @Published private(set) var typographyRevision = 0
@@ -275,6 +340,7 @@ final class AppSettings: ObservableObject {
     private let defaults: UserDefaults
     private var isBootstrapping = true
     private var isApplyingRuleState = false
+    private var isSwitchingAIProviderProfile = false
     private var cachedSnapshot: Snapshot?
     private var snapshotInvalidationCancellable: AnyCancellable?
     private static let lyricsProviderRemotePolicyCacheKey = "lyrics_provider_verified_remote_policy_v1"
@@ -286,6 +352,9 @@ final class AppSettings: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let provider = Self.providerById(defaults.string(forKey: "provider") ?? "gemini")
+        let loadedAIProviderProfiles = Self.loadAIProviderProfiles(defaults: defaults, selectedProvider: provider)
+        let selectedAIProviderProfile = loadedAIProviderProfiles[provider.id] ?? AIProviderProfile.defaults(for: provider)
+        let loadedAIProviderEnabled = Self.loadAIProviderEnabled(defaults: defaults, selectedProvider: provider)
         let loadedRuleConfig = Self.loadRuleConfig(defaults: defaults)
         let loadedOutputLang = Self.storedOutputLanguage(defaults: defaults, ruleConfig: loadedRuleConfig)
         let ruleConfig = loadedRuleConfig.withTarget(loadedOutputLang)
@@ -294,6 +363,8 @@ final class AppSettings: ObservableObject {
         outputLang = loadedOutputLang
         translationEnabled = ruleConfig.defaultRule.translationEnabled
         pronunciationEnabled = ruleConfig.defaultRule.pronunciationEnabled
+        bingTranslateEnabled = loadedAIProviderEnabled[KeylessTranslationProviders.bingId] ?? true
+        googleTranslateEnabled = loadedAIProviderEnabled[KeylessTranslationProviders.googleId] ?? true
         metadataTranslationEnabled = defaults.object(forKey: "metadata_translation_enabled") as? Bool ?? true
         japaneseFuriganaEnabled = defaults.object(forKey: "japanese_furigana_enabled") as? Bool ?? false
         culturalAnnotationsEnabled = defaults.object(forKey: "cultural_annotations_enabled") as? Bool ?? false
@@ -305,12 +376,15 @@ final class AppSettings: ObservableObject {
         culturalAnnotationsVinylFontSize = Self.clampCulturalFontSize(defaults.object(forKey: "cultural_annotations_vinyl_font_size") as? Int ?? 12)
         culturalAnnotationsVinylFontWeight = Self.clampCulturalFontWeight(defaults.object(forKey: "cultural_annotations_vinyl_font_weight") as? Int ?? 300)
         culturalAnnotationsVinylOpacity = Self.clampCulturalOpacity(defaults.object(forKey: "cultural_annotations_vinyl_opacity") as? Int ?? 60)
-        apiKeys = defaults.string(forKey: "api_keys") ?? ""
-        pollinationsAccessToken = defaults.string(forKey: "pollinations_access_token") ?? ""
-        baseUrl = defaults.string(forKey: "base_url")?.trimmed.isEmpty == false ? defaults.string(forKey: "base_url")! : provider.defaultBaseUrl
-        model = defaults.string(forKey: "model")?.trimmed.isEmpty == false ? defaults.string(forKey: "model")! : provider.defaultModel
-        maxTokens = max(256, defaults.object(forKey: "max_tokens") as? Int ?? 16000)
-        temperature = min(2, max(0, defaults.object(forKey: "temperature") as? Double ?? 0.3))
+        apiKeys = selectedAIProviderProfile.apiKeys
+        pollinationsAccessToken = SecureStringStore.shared.migratedString(
+            forKey: "pollinations_access_token",
+            legacyDefaults: defaults
+        ) ?? ""
+        baseUrl = selectedAIProviderProfile.baseUrl
+        model = selectedAIProviderProfile.model
+        maxTokens = selectedAIProviderProfile.maxTokens
+        temperature = selectedAIProviderProfile.temperature
         let loadedPreviewMode = Self.normalizePreviewMode(defaults.string(forKey: "preview_mode") ?? Self.previewOriginal)
         previewMode = loadedPreviewMode
         previewItems = Self.normalizePreviewItems(defaults.object(forKey: "preview_items") as? Int ?? Self.previewItemsForMode(loadedPreviewMode))
@@ -318,7 +392,12 @@ final class AppSettings: ObservableObject {
         interludeLabelsEnabled = defaults.object(forKey: "interlude_labels_enabled") as? Bool ?? true
         syncedLyricsKaraokeAnimationEnabled = defaults.object(forKey: "synced_lyrics_karaoke_animation") as? Bool ?? true
         karaokeBounceEffectEnabled = defaults.object(forKey: "karaoke_bounce_effect") as? Bool ?? true
-        karaokeDataAsLineSynced = defaults.object(forKey: "karaoke_data_as_line_synced") as? Bool ?? false
+        karaokeDisplayGranularity = Self.normalizeKaraokeDisplayGranularity(
+            defaults.string(forKey: "karaoke_display_granularity_v1")
+                ?? ((defaults.object(forKey: "karaoke_data_as_line_synced") as? Bool ?? false)
+                    ? Self.karaokeDisplayLine
+                    : Self.karaokeDisplayCharacter)
+        )
         useSyncCreatorSpeakerColors = defaults.object(forKey: "use_sync_creator_speaker_colors") as? Bool ?? true
         lyricsTextAlignment = Self.normalizeLyricsAlignment(defaults.string(forKey: "lyrics_text_alignment") ?? "left")
         keepScreenOn = defaults.object(forKey: "keep_screen_on") as? Bool ?? false
@@ -346,7 +425,10 @@ final class AppSettings: ObservableObject {
         backgroundSolidColor = Self.normalizeHexColor(defaults.string(forKey: "background_solid_color") ?? "#1e3a8a", fallback: "#1e3a8a")
         backgroundVideoScale = Self.clampBackgroundVideoScale(defaults.object(forKey: "background_video_scale") as? Int ?? 100)
         spotifyClientId = defaults.string(forKey: "spotify_client_id") ?? ""
-        spotifyClientSecret = defaults.string(forKey: "spotify_client_secret") ?? ""
+        spotifyClientSecret = SecureStringStore.shared.migratedString(
+            forKey: "spotify_client_secret",
+            legacyDefaults: defaults
+        ) ?? ""
         lyricsProviderModeRaw = LyricsProviderMode.normalize(defaults.string(forKey: "lyrics_provider_mode")).rawValue
         lyricsProviderEnabled = Set(defaults.stringArray(forKey: "lyrics_provider_enabled") ?? [LyricsProviderID.lrclib.rawValue])
         let normalizedLyricsProviderOrder = LyricsProviderAppContracts.canonicalProviderOrder(
@@ -369,6 +451,9 @@ final class AppSettings: ObservableObject {
         standardLyricsProviderTypes = Self.loadStandardLyricsProviderTypes(defaults: defaults)
         standardPreferSyncDataProvider = defaults.object(forKey: "lyrics_prefer_sync_data_provider") as? Bool ?? true
         standardPreferLyricsTypeOverProviderOrder = defaults.object(forKey: "lyrics_prefer_type_over_provider") as? Bool ?? true
+        aiProviderOrder = Self.loadAIProviderOrder(defaults: defaults)
+        aiProviderEnabled = loadedAIProviderEnabled
+        aiProviderProfiles = loadedAIProviderProfiles
         isBootstrapping = false
         snapshotInvalidationCancellable = objectWillChange.sink { [weak self] _ in
             self?.cachedSnapshot = nil
@@ -381,6 +466,98 @@ final class AppSettings: ObservableObject {
 
     func tf(_ key: String, _ arguments: CVarArg...) -> String {
         AppI18n.format(uiLang, key, arguments)
+    }
+
+    func exportCloudSettings() -> [String: Any] {
+        let stored = defaults.dictionaryRepresentation()
+        return Self.cloudSettingKeys.reduce(into: [String: Any]()) { result, key in
+            guard let value = stored[key],
+                  value is String || value is NSNumber || value is Bool else { return }
+            result[key] = value
+        }
+    }
+
+    func importCloudSettings(_ values: [String: Any]) {
+        for key in Self.cloudSettingKeys {
+            guard let value = values[key], !(value is NSNull),
+                  value is String || value is NSNumber || value is Bool else { continue }
+            defaults.set(value, forKey: key)
+        }
+
+        let loaded = AppSettings(defaults: defaults)
+        isSwitchingAIProviderProfile = true
+        providerId = loaded.providerId
+        uiLang = loaded.uiLang
+        outputLang = loaded.outputLang
+        translationEnabled = loaded.translationEnabled
+        pronunciationEnabled = loaded.pronunciationEnabled
+        bingTranslateEnabled = loaded.bingTranslateEnabled
+        googleTranslateEnabled = loaded.googleTranslateEnabled
+        metadataTranslationEnabled = loaded.metadataTranslationEnabled
+        japaneseFuriganaEnabled = loaded.japaneseFuriganaEnabled
+        culturalAnnotationsEnabled = loaded.culturalAnnotationsEnabled
+        culturalAnnotationsFontFamily = loaded.culturalAnnotationsFontFamily
+        culturalAnnotationsFontSize = loaded.culturalAnnotationsFontSize
+        culturalAnnotationsFontWeight = loaded.culturalAnnotationsFontWeight
+        culturalAnnotationsOpacity = loaded.culturalAnnotationsOpacity
+        culturalAnnotationsVinylFontFamily = loaded.culturalAnnotationsVinylFontFamily
+        culturalAnnotationsVinylFontSize = loaded.culturalAnnotationsVinylFontSize
+        culturalAnnotationsVinylFontWeight = loaded.culturalAnnotationsVinylFontWeight
+        culturalAnnotationsVinylOpacity = loaded.culturalAnnotationsVinylOpacity
+        aiProviderOrder = loaded.aiProviderOrder
+        aiProviderEnabled = loaded.aiProviderEnabled
+        aiProviderProfiles = loaded.aiProviderProfiles
+        apiKeys = loaded.apiKeys
+        baseUrl = loaded.baseUrl
+        model = loaded.model
+        maxTokens = loaded.maxTokens
+        temperature = loaded.temperature
+        previewMode = loaded.previewMode
+        previewItems = loaded.previewItems
+        autoInstrumentalBreakEnabled = loaded.autoInstrumentalBreakEnabled
+        interludeLabelsEnabled = loaded.interludeLabelsEnabled
+        syncedLyricsKaraokeAnimationEnabled = loaded.syncedLyricsKaraokeAnimationEnabled
+        karaokeBounceEffectEnabled = loaded.karaokeBounceEffectEnabled
+        karaokeDisplayGranularity = loaded.karaokeDisplayGranularity
+        useSyncCreatorSpeakerColors = loaded.useSyncCreatorSpeakerColors
+        lyricsTextAlignment = loaded.lyricsTextAlignment
+        keepScreenOn = loaded.keepScreenOn
+        landscapeAutoHideControls = loaded.landscapeAutoHideControls
+        landscapeCenterNoLyrics = loaded.landscapeCenterNoLyrics
+        pipShowArtwork = loaded.pipShowArtwork
+        pipOrientation = loaded.pipOrientation
+        pipBackgroundMode = loaded.pipBackgroundMode
+        pipLyricsTextAlignment = loaded.pipLyricsTextAlignment
+        pipLyricsSizePercent = loaded.pipLyricsSizePercent
+        pipTranslationSizePercent = loaded.pipTranslationSizePercent
+        vinylAlbumSizePercent = loaded.vinylAlbumSizePercent
+        vinylRecordSizePercent = loaded.vinylRecordSizePercent
+        vinylAnimationsEnabled = loaded.vinylAnimationsEnabled
+        vinylCenterRotationEnabled = loaded.vinylCenterRotationEnabled
+        vinylLyricsEnabled = loaded.vinylLyricsEnabled
+        vinylTonearmStyle = loaded.vinylTonearmStyle
+        vinylTonearmFinish = loaded.vinylTonearmFinish
+        vinylTonearmSizePercent = loaded.vinylTonearmSizePercent
+        backgroundMode = loaded.backgroundMode
+        backgroundBrightness = loaded.backgroundBrightness
+        backgroundBlur = loaded.backgroundBlur
+        backgroundNoiseEnabled = loaded.backgroundNoiseEnabled
+        backgroundReduceMotionEnabled = loaded.backgroundReduceMotionEnabled
+        backgroundSolidColor = loaded.backgroundSolidColor
+        backgroundVideoScale = loaded.backgroundVideoScale
+        standardLyricsProviderOrder = loaded.standardLyricsProviderOrder
+        standardLyricsProviderEnabled = loaded.standardLyricsProviderEnabled
+        standardLyricsProviderTypes = loaded.standardLyricsProviderTypes
+        standardPreferSyncDataProvider = loaded.standardPreferSyncDataProvider
+        standardPreferLyricsTypeOverProviderOrder = loaded.standardPreferLyricsTypeOverProviderOrder
+        isSwitchingAIProviderProfile = false
+        cachedTypographySettings = nil
+        cachedSpeakerColorSettings = nil
+        cachedSnapshot = nil
+        languageRulesRevision += 1
+        backgroundSettingsRevision += 1
+        typographyRevision += 1
+        speakerColorRevision += 1
     }
 
     var snapshot: Snapshot {
@@ -402,6 +579,11 @@ final class AppSettings: ObservableObject {
             languageRules: ruleConfig.languageRules,
             translationEnabled: ruleConfig.defaultRule.translationEnabled,
             pronunciationEnabled: ruleConfig.defaultRule.pronunciationEnabled,
+            bingTranslateEnabled: bingTranslateEnabled,
+            googleTranslateEnabled: googleTranslateEnabled,
+            aiProviderOrder: aiProviderOrder,
+            aiProviderEnabled: aiProviderEnabled,
+            aiProviderProfiles: aiProviderProfiles,
             metadataTranslationEnabled: metadataTranslationEnabled,
             japaneseFuriganaEnabled: japaneseFuriganaEnabled,
             culturalAnnotationsEnabled: culturalAnnotationsEnabled,
@@ -425,7 +607,7 @@ final class AppSettings: ObservableObject {
             interludeLabelsEnabled: interludeLabelsEnabled,
             syncedLyricsKaraokeAnimationEnabled: syncedLyricsKaraokeAnimationEnabled,
             karaokeBounceEffectEnabled: karaokeBounceEffectEnabled,
-            karaokeDataAsLineSynced: karaokeDataAsLineSynced,
+            karaokeDisplayGranularity: Self.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity),
             useSyncCreatorSpeakerColors: useSyncCreatorSpeakerColors,
             lyricsTextAlignment: lyricsTextAlignment,
             keepScreenOn: keepScreenOn,
@@ -464,9 +646,44 @@ final class AppSettings: ObservableObject {
 
     func setProvider(_ id: String) {
         let provider = Self.providerById(id)
+        guard provider.id != providerId else { return }
+        saveAIProviderProfileFromPublished()
+        isSwitchingAIProviderProfile = true
         providerId = provider.id
-        baseUrl = provider.defaultBaseUrl
-        model = provider.defaultModel
+        let profile = aiProviderProfiles[provider.id] ?? AIProviderProfile.defaults(for: provider)
+        apiKeys = profile.apiKeys
+        baseUrl = profile.baseUrl
+        model = profile.model
+        maxTokens = profile.maxTokens
+        temperature = profile.temperature
+        isSwitchingAIProviderProfile = false
+    }
+
+    func setAIProviderEnabled(_ providerId: String, enabled: Bool) {
+        guard let provider = Self.aiProviderById(providerId) else { return }
+        aiProviderEnabled[provider.id] = enabled
+        if provider.id == KeylessTranslationProviders.bingId {
+            bingTranslateEnabled = enabled
+        } else if provider.id == KeylessTranslationProviders.googleId {
+            googleTranslateEnabled = enabled
+        }
+    }
+
+    func moveAIProvider(_ providerId: String, offset: Int) {
+        guard let index = aiProviderOrder.firstIndex(of: providerId) else { return }
+        let target = index + offset
+        guard aiProviderOrder.indices.contains(target) else { return }
+        aiProviderOrder.move(fromOffsets: IndexSet(integer: index), toOffset: target > index ? target + 1 : target)
+    }
+
+    func moveAIProvider(_ providerId: String, relativeTo targetId: String, after: Bool) {
+        guard providerId != targetId,
+              let sourceIndex = aiProviderOrder.firstIndex(of: providerId),
+              let targetIndex = aiProviderOrder.firstIndex(of: targetId) else { return }
+        aiProviderOrder.remove(at: sourceIndex)
+        let adjustedTarget = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+        let insertionIndex = min(aiProviderOrder.count, max(0, adjustedTarget + (after ? 1 : 0)))
+        aiProviderOrder.insert(providerId, at: insertionIndex)
     }
 
     var lyricsProviderSettingsSnapshot: LyricsProviderSettingsSnapshot {
@@ -688,6 +905,36 @@ final class AppSettings: ObservableObject {
         defaults.set(defaultRule.targetLang, forKey: "output_lang")
         applyDefaultRuleState(defaultRule)
         languageRulesRevision += 1
+    }
+
+    func shouldPromptForFirstLanguage(_ sourceLang: String) -> Bool {
+        let source = Self.normalizeSourceLanguageKey(sourceLang)
+        guard source != Self.defaultSourceLang,
+              !["auto", "unknown", "und"].contains(source.lowercased()) else {
+            return false
+        }
+        let current = snapshot
+        if current.languageRules[source] != nil {
+            return false
+        }
+        if let separator = source.firstIndex(of: "-"),
+           current.languageRules[String(source[..<separator])] != nil {
+            return false
+        }
+        let prompted = Set(defaults.stringArray(forKey: Self.firstLanguagePromptedKey) ?? [])
+        if prompted.contains(source.lowercased()) {
+            return false
+        }
+        return !Self.isSameLanguage(source, current.resolveTargetLanguage(sourceLang: source))
+    }
+
+    func markFirstLanguagePrompted(_ sourceLang: String) {
+        let source = Self.normalizeSourceLanguageKey(sourceLang).lowercased()
+        guard source != Self.defaultSourceLang, !source.isEmpty else { return }
+        var prompted = Set(defaults.stringArray(forKey: Self.firstLanguagePromptedKey) ?? [])
+        if prompted.insert(source).inserted {
+            defaults.set(prompted.sorted(), forKey: Self.firstLanguagePromptedKey)
+        }
     }
 
     func resetLanguageRule(sourceLang: String) {
@@ -1016,6 +1263,41 @@ final class AppSettings: ObservableObject {
         recordLyricsProviderPolicyChange()
     }
 
+    private func saveAIProviderProfileFromPublished() {
+        guard !isBootstrapping, !isSwitchingAIProviderProfile else { return }
+        let provider = Self.providerById(providerId)
+        aiProviderProfiles[provider.id] = AIProviderProfile(
+            apiKeys: apiKeys,
+            baseUrl: baseUrl.trimmed.isEmpty ? provider.defaultBaseUrl : baseUrl,
+            model: model,
+            maxTokens: max(256, maxTokens),
+            temperature: min(2, max(0, temperature))
+        )
+    }
+
+    private func syncLegacyKeylessProvider(_ providerId: String, enabled: Bool) {
+        guard !isBootstrapping, aiProviderEnabled[providerId] != enabled else { return }
+        aiProviderEnabled[providerId] = enabled
+    }
+
+    private func saveAIProviderSettingsIfNeeded() {
+        guard !isBootstrapping else { return }
+        let order = Self.normalizedAIProviderOrder(aiProviderOrder)
+        let enabled = Self.normalizedAIProviderEnabled(aiProviderEnabled)
+        if let data = try? JSONEncoder().encode(order), let raw = String(data: data, encoding: .utf8) {
+            defaults.set(raw, forKey: "ai_provider_order_v1")
+        }
+        if let data = try? JSONEncoder().encode(enabled), let raw = String(data: data, encoding: .utf8) {
+            defaults.set(raw, forKey: "ai_provider_enabled_v1")
+        }
+        if let data = try? JSONEncoder().encode(aiProviderProfiles),
+           let raw = String(data: data, encoding: .utf8),
+           SecureStringStore.shared.set(raw, forKey: "ai_provider_profiles_v1") {
+            defaults.removeObject(forKey: "ai_provider_profiles_v1")
+        }
+        cachedSnapshot = nil
+    }
+
     private func bumpBackgroundRevisionIfNeeded() {
         guard !isBootstrapping else { return }
         backgroundSettingsRevision += 1
@@ -1044,6 +1326,13 @@ final class AppSettings: ObservableObject {
         defaults.set(value, forKey: key)
     }
 
+    private func setSecure(_ key: String, _ value: String) {
+        guard !isBootstrapping else { return }
+        if SecureStringStore.shared.set(value, forKey: key) {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
     private func set(_ key: String, _ value: Bool) {
         guard !isBootstrapping else { return }
         defaults.set(value, forKey: key)
@@ -1065,6 +1354,102 @@ final class AppSettings: ObservableObject {
 
     static func standardLyricsProviderById(_ id: String) -> StandardLyricsProvider? {
         standardLyricsProviders.first { $0.id == id.trimmed.lowercased() }
+    }
+
+    static func aiProviderById(_ id: String) -> Provider? {
+        allAIProviders.first { $0.id == id.trimmed.lowercased() }
+    }
+
+    static func normalizedAIProviderOrder(_ values: [String]) -> [String] {
+        let known = Set(defaultAIProviderOrder)
+        var seen = Set<String>()
+        var result = values.compactMap { raw -> String? in
+            let value = raw.trimmed.lowercased()
+            guard known.contains(value), seen.insert(value).inserted else { return nil }
+            return value
+        }
+        result.append(contentsOf: defaultAIProviderOrder.filter { seen.insert($0).inserted })
+        return result
+    }
+
+    private static func normalizedAIProviderEnabled(_ values: [String: Bool]) -> [String: Bool] {
+        Dictionary(uniqueKeysWithValues: allAIProviders.map { provider in
+            (provider.id, values[provider.id] ?? provider.defaultEnabled)
+        })
+    }
+
+    private static func loadAIProviderOrder(defaults: UserDefaults) -> [String] {
+        guard let raw = defaults.string(forKey: "ai_provider_order_v1"),
+              let data = raw.data(using: .utf8),
+              let values = try? JSONDecoder().decode([String].self, from: data) else {
+            return defaultAIProviderOrder
+        }
+        return normalizedAIProviderOrder(values)
+    }
+
+    private static func loadAIProviderEnabled(defaults: UserDefaults, selectedProvider: Provider) -> [String: Bool] {
+        if let raw = defaults.string(forKey: "ai_provider_enabled_v1"),
+           let data = raw.data(using: .utf8),
+           let values = try? JSONDecoder().decode([String: Bool].self, from: data) {
+            return normalizedAIProviderEnabled(values)
+        }
+        var migrated = normalizedAIProviderEnabled([:])
+        migrated[KeylessTranslationProviders.bingId] = defaults.object(forKey: "bing_translate_enabled") as? Bool ?? true
+        migrated[KeylessTranslationProviders.googleId] = defaults.object(forKey: "google_translate_enabled") as? Bool ?? true
+        let hasLegacyKey = !(SecureStringStore.shared.migratedString(
+            forKey: "api_keys",
+            legacyDefaults: defaults
+        ) ?? "").trimmed.isEmpty
+        let hasPollinationsToken = selectedProvider.id == "pollinations"
+            && !(SecureStringStore.shared.migratedString(
+                forKey: "pollinations_access_token",
+                legacyDefaults: defaults
+            ) ?? "").trimmed.isEmpty
+        if hasLegacyKey || hasPollinationsToken {
+            migrated[selectedProvider.id] = true
+        }
+        return migrated
+    }
+
+    private static func loadAIProviderProfiles(defaults: UserDefaults, selectedProvider: Provider) -> [String: AIProviderProfile] {
+        var profiles: [String: AIProviderProfile] = [:]
+        if let raw = SecureStringStore.shared.migratedString(
+            forKey: "ai_provider_profiles_v1",
+            legacyDefaults: defaults
+        ),
+           let data = raw.data(using: .utf8),
+           let values = try? JSONDecoder().decode([String: AIProviderProfile].self, from: data) {
+            profiles = values
+        }
+        for provider in providers {
+            if let stored = profiles[provider.id] {
+                profiles[provider.id] = AIProviderProfile(
+                    apiKeys: stored.apiKeys,
+                    baseUrl: stored.baseUrl.trimmed.isEmpty ? provider.defaultBaseUrl : stored.baseUrl,
+                    model: stored.model,
+                    maxTokens: max(256, stored.maxTokens),
+                    temperature: min(2, max(0, stored.temperature))
+                )
+            } else if provider.id == selectedProvider.id {
+                profiles[provider.id] = AIProviderProfile(
+                    apiKeys: SecureStringStore.shared.migratedString(
+                        forKey: "api_keys",
+                        legacyDefaults: defaults
+                    ) ?? "",
+                    baseUrl: defaults.string(forKey: "base_url")?.trimmed.isEmpty == false
+                        ? defaults.string(forKey: "base_url")!
+                        : provider.defaultBaseUrl,
+                    model: defaults.string(forKey: "model")?.trimmed.isEmpty == false
+                        ? defaults.string(forKey: "model")!
+                        : provider.defaultModel,
+                    maxTokens: max(256, defaults.object(forKey: "max_tokens") as? Int ?? 16000),
+                    temperature: min(2, max(0, defaults.object(forKey: "temperature") as? Double ?? 0.3))
+                )
+            } else {
+                profiles[provider.id] = AIProviderProfile.defaults(for: provider)
+            }
+        }
+        return profiles
     }
 
     private static func loadStandardLyricsProviderOrder(defaults: UserDefaults) -> [String] {
@@ -1317,6 +1702,17 @@ final class AppSettings: ObservableObject {
             return value
         }
         return "left"
+    }
+
+    static func normalizeKaraokeDisplayGranularity(_ granularity: String?) -> String {
+        switch (granularity ?? "").trimmed.lowercased() {
+        case karaokeDisplayWord:
+            return karaokeDisplayWord
+        case karaokeDisplayLine:
+            return karaokeDisplayLine
+        default:
+            return karaokeDisplayCharacter
+        }
     }
 
     static func normalizePipOrientation(_ orientation: String?) -> String {
@@ -1577,6 +1973,11 @@ final class AppSettings: ObservableObject {
         var languageRules: [String: LanguageRule]
         var translationEnabled: Bool
         var pronunciationEnabled: Bool
+        var bingTranslateEnabled: Bool
+        var googleTranslateEnabled: Bool
+        var aiProviderOrder: [String]
+        var aiProviderEnabled: [String: Bool]
+        var aiProviderProfiles: [String: AIProviderProfile]
         var metadataTranslationEnabled: Bool
         var japaneseFuriganaEnabled: Bool
         var culturalAnnotationsEnabled: Bool
@@ -1600,7 +2001,10 @@ final class AppSettings: ObservableObject {
         var interludeLabelsEnabled: Bool
         var syncedLyricsKaraokeAnimationEnabled: Bool
         var karaokeBounceEffectEnabled: Bool
-        var karaokeDataAsLineSynced: Bool
+        var karaokeDisplayGranularity: String
+        var karaokeDataAsLineSynced: Bool {
+            AppSettings.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity) == AppSettings.karaokeDisplayLine
+        }
         var useSyncCreatorSpeakerColors: Bool
         var lyricsTextAlignment: String
         var keepScreenOn: Bool
@@ -1638,6 +2042,61 @@ final class AppSettings: ObservableObject {
                 return true
             }
             return !apiKeys.trimmed.isEmpty
+        }
+
+        var hasModel: Bool {
+            !model.trimmed.isEmpty
+        }
+
+        var hasKeylessTranslationProvider: Bool {
+            (aiProviderEnabled[KeylessTranslationProviders.bingId] ?? false)
+                || (aiProviderEnabled[KeylessTranslationProviders.googleId] ?? false)
+        }
+
+        func isAIProviderEnabled(_ providerId: String) -> Bool {
+            aiProviderEnabled[providerId] ?? false
+        }
+
+        var enabledAIProviderOrder: [String] {
+            AppSettings.normalizedAIProviderOrder(aiProviderOrder).filter(isAIProviderEnabled)
+        }
+
+        var readyAIProviderSnapshots: [Snapshot] {
+            enabledAIProviderOrder.compactMap { providerId in
+                guard let provider = AppSettings.aiProviderById(providerId), !provider.isKeyless,
+                      let snapshot = selectingAIProvider(providerId), snapshot.hasApiKey, snapshot.hasModel else {
+                    return nil
+                }
+                return snapshot
+            }
+        }
+
+        var hasReadyAIProvider: Bool {
+            !readyAIProviderSnapshots.isEmpty
+        }
+
+        var hasEnabledAIProvider: Bool {
+            enabledAIProviderOrder.contains { providerId in
+                guard let provider = AppSettings.aiProviderById(providerId) else { return false }
+                return !provider.isKeyless
+            }
+        }
+
+        var hasAnyTranslationProvider: Bool {
+            hasKeylessTranslationProvider || hasReadyAIProvider
+        }
+
+        func selectingAIProvider(_ providerId: String) -> Snapshot? {
+            guard let selected = AppSettings.aiProviderById(providerId), !selected.isKeyless else { return nil }
+            let profile = aiProviderProfiles[selected.id] ?? AIProviderProfile.defaults(for: selected)
+            var copy = self
+            copy.provider = selected
+            copy.apiKeys = profile.apiKeys
+            copy.baseUrl = profile.baseUrl
+            copy.model = profile.model
+            copy.maxTokens = profile.maxTokens
+            copy.temperature = profile.temperature
+            return copy
         }
 
         var hasSpotifyCredentials: Bool {
@@ -1717,7 +2176,13 @@ final class AppSettings: ObservableObject {
         }
 
         var cacheKey: String {
-            var key = "\(provider.id)|output=\(outputLang)|resolvedOutput=\(pronunciationLanguage)|translationTarget=\(defaultRule.targetLang)|default=\(defaultRule.cacheKey)|furigana=\(japaneseFuriganaEnabled)|model=\(model)|url=\(baseUrl)|tok=\(maxTokens)|temp=\(temperature)"
+            var key = "\(provider.id)|output=\(outputLang)|resolvedOutput=\(pronunciationLanguage)|translationTarget=\(defaultRule.targetLang)|bingTranslate=\(bingTranslateEnabled)|googleTranslate=\(googleTranslateEnabled)|default=\(defaultRule.cacheKey)|furigana=\(japaneseFuriganaEnabled)|model=\(model)|url=\(baseUrl)|tok=\(maxTokens)|temp=\(temperature)"
+            for providerId in AppSettings.normalizedAIProviderOrder(aiProviderOrder) {
+                key += "|provider=\(providerId):enabled=\(isAIProviderEnabled(providerId))"
+                if let profile = aiProviderProfiles[providerId] {
+                    key += ":model=\(profile.model):url=\(profile.baseUrl):tok=\(profile.maxTokens):temp=\(profile.temperature)"
+                }
+            }
             for rule in languageRules.values.sorted(by: { $0.sourceLang < $1.sourceLang }) {
                 key += "|rule=\(rule.cacheKey)"
             }
@@ -1899,6 +2364,26 @@ final class AppSettings: ObservableObject {
         var defaultBaseUrl: String
         var defaultModel: String
         var apiKeyURL: String
+        var isKeyless: Bool = false
+        var defaultEnabled: Bool = false
+    }
+
+    struct AIProviderProfile: Codable, Hashable, Sendable {
+        var apiKeys: String
+        var baseUrl: String
+        var model: String
+        var maxTokens: Int
+        var temperature: Double
+
+        static func defaults(for provider: Provider) -> AIProviderProfile {
+            AIProviderProfile(
+                apiKeys: "",
+                baseUrl: provider.defaultBaseUrl,
+                model: provider.defaultModel,
+                maxTokens: 16000,
+                temperature: 0.3
+            )
+        }
     }
 
     struct StandardLyricsProvider: Identifiable, Hashable, Sendable {

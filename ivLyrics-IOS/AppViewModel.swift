@@ -20,6 +20,21 @@ enum CreatorPrivacyState: Equatable {
     case privateProfile
 }
 
+struct FirstLanguagePrompt: Identifiable, Equatable {
+    let sourceLang: String
+    let languageName: String
+    let trackKey: String
+
+    var id: String { "\(trackKey)|\(sourceLang)" }
+}
+
+enum FirstLanguagePromptChoice {
+    case original
+    case pronunciation
+    case translation
+    case both
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     private static let spotifyPlaybackRefreshBurstDelays: [UInt64] = [
@@ -42,17 +57,23 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var lyricsResult = LyricsResult.empty("") {
         didSet {
             cachedTimelineContext = nil
+            refreshCreatorSupportPresentations(for: lyricsResult)
         }
     }
     @Published private(set) var baseLyricsResult = LyricsResult.empty("")
+    @Published private(set) var creatorSupportPresentations: [String: CreatorSupportPresentation] = [:]
+    @Published private(set) var lyricsSupplementLayoutRevision = 0
     @Published private(set) var status: AppStatus = .idle
     @Published private(set) var logs: [String] = []
     @Published private(set) var metadataTranslation: AiLyricsRepository.MetadataTranslation?
+    @Published private(set) var metadataTranslationLoading = false
+    @Published private(set) var researchTokenConsentPresented = false
     @Published var tmiPresented = false
     @Published private(set) var tmiTrack: TrackSnapshot?
     @Published private(set) var tmiInfo: AiLyricsRepository.TmiInfo?
     @Published private(set) var tmiLoading = false
     @Published private(set) var tmiError = ""
+    @Published private(set) var tmiWebSearchFallback = false
     @Published private(set) var youtubeInfo: YouTubeVideoInfo?
     @Published private(set) var manualCandidates: [ManualLrclibCandidate] = []
     @Published private(set) var searchingManualCandidates = false
@@ -78,6 +99,12 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var creatorPrivacyState: CreatorPrivacyState = .signedOut
     @Published private(set) var creatorPrivacyRequestInFlight = false
     @Published private(set) var creatorPrivacyLoginInProgress = false
+    @Published private(set) var cloudSettingsRequestInFlight = false
+    @Published private(set) var cloudSettingsLoaded = false
+    @Published private(set) var cloudSettingsExists = false
+    @Published private(set) var cloudSettingsRevision: Int64 = 0
+    @Published private(set) var cloudSettingsUpdatedAt: Int64 = 0
+    @Published private(set) var cloudMonthlyRequiredAlertPresented = false
     @Published private(set) var aiLyricsGenerating = false
     @Published private(set) var culturalAnnotations: [CulturalAnnotation] = []
     @Published private(set) var culturalAnnotationsLoading = false
@@ -91,6 +118,7 @@ final class AppViewModel: ObservableObject {
     @Published var updateDialogPresented = false
     @Published var initialSetupPresented = false
     @Published var onboardingStep = 0
+    @Published private(set) var firstLanguagePrompt: FirstLanguagePrompt?
 
     var lyricsLoadingText: String {
         let providerName = lyricsLoadingProviderName.trimmed
@@ -122,6 +150,28 @@ final class AppViewModel: ObservableObject {
 
     var culturalAnnotationsLoadingText: String {
         settings.t("loading.cultural_annotations")
+    }
+
+    var lyricsGenerationLoadingText: String? {
+        if metadataTranslationLoading {
+            return settings.t("loading.translation")
+        }
+        if lyricsSupplementTranslationLoading && lyricsSupplementPronunciationLoading {
+            return aiLyricsLoadingText
+        }
+        if lyricsSupplementTranslationLoading {
+            return aiTranslationLoadingText
+        }
+        if lyricsSupplementPronunciationLoading {
+            return aiPronunciationLoadingText
+        }
+        if lyricsSupplementFuriganaLoading {
+            return settings.t("loading.pronunciation")
+        }
+        if culturalAnnotationsLoading {
+            return culturalAnnotationsLoadingText
+        }
+        return nil
     }
 
     var tmiLoadingText: String {
@@ -194,6 +244,8 @@ final class AppViewModel: ObservableObject {
     let pictureInPictureController = LyricsPictureInPictureController()
     private let pollinationsAuthClient = PollinationsAuthClient()
     private let creatorAccountClient = CreatorAccountClient()
+    private lazy var cloudSettingsClient = CloudSettingsClient(accountClient: creatorAccountClient)
+    private let creatorSupportClient = CreatorSupportClient()
     private let updateChecker = UpdateChecker()
     private var culturalAnnotationTask: Task<Void, Never>?
     private var culturalAnnotationRequestKey = ""
@@ -208,6 +260,11 @@ final class AppViewModel: ObservableObject {
     private var toastTask: Task<Void, Never>?
     private var pollinationsAuthTask: Task<Void, Never>?
     private var creatorPrivacyTask: Task<Void, Never>?
+    private var cloudSettingsTask: Task<Void, Never>?
+    private var cloudSettingsRecord = CloudSettingsClient.Record.empty
+    private var cloudSettingsStatusOverrideKey = ""
+    private var creatorSupportTask: Task<Void, Never>?
+    private var creatorSupportRequestKey = ""
     private var spotifyPollTask: Task<Void, Never>?
     private var pipActiveCancellable: AnyCancellable?
     private var spotifyMetadataHydrationTask: Task<Void, Never>?
@@ -219,10 +276,12 @@ final class AppViewModel: ObservableObject {
     private var cachedTimelineContext: LyricsTimelineContext?
     private var audioRouteObserver: NSObjectProtocol?
     private var spotifyMetadataHydrationTrackId = ""
-    private var spotifyHydratedTrackIds: Set<String> = []
+    private var spotifyArtworkURLsByTrackId = BoundedLRUCache<String, URL>(capacity: 200)
+    private var spotifyMetadataHydrationRetryAfter = BoundedLRUCache<String, Date>(capacity: 200)
     private var currentYouTubeBackgroundRequestKey = ""
     private var currentYouTubeBackgroundLoading = false
     private var currentTmiRequestKey = ""
+    private var pendingResearchBypassCache: Bool?
     private var currentFuriganaKey = ""
     private var currentFuriganaResult: LyricsResult?
     private var lastSeekCommandUptimeMs: Int64 = 0
@@ -237,6 +296,7 @@ final class AppViewModel: ObservableObject {
     private let keyLastAutoUpdateCheckMs = "last_auto_update_check_ms"
     private let keyInitialSetupDismissed = "initial_setup_dismissed"
     private let keySpotifyValidatedSourceKey = "spotify_validated_source_key"
+    private let keyResearchTokenConsentV1 = "research_token_consent_v1"
     private let autoUpdateCheckIntervalMs: Int64 = 24 * 60 * 60 * 1000
     private var lyricsLoadRequestID = UUID()
 
@@ -337,11 +397,16 @@ final class AppViewModel: ObservableObject {
         furiganaRefreshTask?.cancel()
         manualTask?.cancel()
         tmiTask?.cancel()
+        culturalAnnotationTask?.cancel()
         toastTask?.cancel()
         pollinationsAuthTask?.cancel()
         creatorPrivacyTask?.cancel()
+        cloudSettingsTask?.cancel()
+        creatorSupportTask?.cancel()
         spotifyPollTask?.cancel()
         spotifyMetadataHydrationTask?.cancel()
+        spotifyPlaybackRefreshBurstTask?.cancel()
+        youtubeBackgroundLoadTask?.cancel()
         updateTask?.cancel()
         if let audioRouteObserver {
             NotificationCenter.default.removeObserver(audioRouteObserver)
@@ -370,6 +435,41 @@ final class AppViewModel: ObservableObject {
         creatorPrivacyState == .privateProfile
     }
 
+    func creatorSupportPresentation(for contributor: LyricsResult.SyncContributor) -> CreatorSupportPresentation? {
+        guard !contributor.identityHidden else { return nil }
+        return creatorSupportPresentations[contributor.userHash.trimmed]
+    }
+
+    private func refreshCreatorSupportPresentations(for result: LyricsResult) {
+        let userHashes = result.contributors.prefix(3).compactMap { contributor -> String? in
+            guard !contributor.identityHidden else { return nil }
+            let value = contributor.userHash.trimmed
+            guard (15...22).contains(value.count), value.allSatisfy(\.isNumber) else { return nil }
+            return value
+        }
+        guard !userHashes.isEmpty else {
+            creatorSupportTask?.cancel()
+            creatorSupportTask = nil
+            creatorSupportRequestKey = ""
+            creatorSupportPresentations = [:]
+            return
+        }
+
+        let trackKey = currentTrack?.stableKey ?? result.spotifyTrackId
+        let requestKey = ([trackKey] + userHashes).joined(separator: "|")
+        guard requestKey != creatorSupportRequestKey else { return }
+        creatorSupportRequestKey = requestKey
+        creatorSupportTask?.cancel()
+        let client = creatorSupportClient
+        let contributors = result.contributors
+        creatorSupportTask = Task { [weak self] in
+            let presentations = await client.load(contributors: contributors)
+            guard !Task.isCancelled, let self,
+                  self.creatorSupportRequestKey == requestKey else { return }
+            self.creatorSupportPresentations = presentations
+        }
+    }
+
     var creatorPrivacyCanEdit: Bool {
         creatorAccountConnected
             && !creatorPrivacyRequestInFlight
@@ -392,6 +492,42 @@ final class AppViewModel: ObservableObject {
         case .privateProfile:
             return settings.t("creator_privacy.status_private")
         }
+    }
+
+    var cloudSettingsCanApply: Bool {
+        creatorAccountConnected && cloudSettingsLoaded && cloudSettingsExists && !cloudSettingsRequestInFlight
+    }
+
+    var cloudSettingsActionsEnabled: Bool {
+        creatorAccountConnected && !cloudSettingsRequestInFlight
+    }
+
+    var cloudSettingsSupportBlocked: Bool {
+        cloudSettingsStatusOverrideKey == "cloud_sync.monthly_required"
+    }
+
+    var cloudSettingsStatusText: String {
+        if cloudSettingsRequestInFlight {
+            return settings.t("cloud_sync.status_working")
+        }
+        if !cloudSettingsStatusOverrideKey.isEmpty {
+            return settings.t(cloudSettingsStatusOverrideKey)
+        }
+        guard creatorAccountConnected else {
+            return settings.t("cloud_sync.login_required")
+        }
+        guard cloudSettingsLoaded else {
+            return settings.t("cloud_sync.status_not_loaded")
+        }
+        guard cloudSettingsExists else {
+            return settings.t("cloud_sync.status_empty")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: settings.uiLang)
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        let updated = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(cloudSettingsUpdatedAt)))
+        return settings.tf("cloud_sync.status_found_format", cloudSettingsRevision, updated)
     }
 
     var pollinationsCanOpenLoginPage: Bool {
@@ -800,6 +936,7 @@ final class AppViewModel: ObservableObject {
             creatorPrivacyRequestInFlight = false
             creatorPrivacyLoginInProgress = false
             creatorPrivacyState = .signedOut
+            resetCloudSettingsState()
             return
         }
         if creatorPrivacyState == .signedOut {
@@ -934,6 +1071,7 @@ final class AppViewModel: ObservableObject {
                 creatorPrivacyRequestInFlight = false
                 creatorPrivacyLoginInProgress = false
                 creatorPrivacyState = .signedOut
+                resetCloudSettingsState()
                 inAppBrowserURL = nil
                 appendLog("creator privacy: signed out")
                 showSavedToast(settings.t("creator_privacy.disconnected"))
@@ -945,6 +1083,195 @@ final class AppViewModel: ObservableObject {
                 showSavedToast(settings.t("creator_privacy.logout_failed"))
             }
         }
+    }
+
+    func refreshCloudSettings() {
+        guard prepareCloudSettingsOperation() else { return }
+        cloudSettingsTask?.cancel()
+        cloudSettingsStatusOverrideKey = ""
+        cloudSettingsRequestInFlight = true
+        cloudSettingsTask = Task { [weak self] in
+            guard let self else { return }
+            guard await ensureMonthlyCloudSupport() else {
+                cloudSettingsRequestInFlight = false
+                return
+            }
+            do {
+                let record = try await cloudSettingsClient.load(language: settings.uiLang)
+                if Task.isCancelled { return }
+                setCloudSettingsRecord(record)
+                cloudSettingsRequestInFlight = false
+            } catch {
+                if Task.isCancelled { return }
+                finishCloudSettingsFailure(error)
+            }
+        }
+    }
+
+    func uploadCloudSettings() {
+        guard prepareCloudSettingsOperation() else { return }
+        cloudSettingsTask?.cancel()
+        cloudSettingsStatusOverrideKey = ""
+        cloudSettingsRequestInFlight = true
+        cloudSettingsTask = Task { [weak self] in
+            guard let self else { return }
+            guard await ensureMonthlyCloudSupport() else {
+                cloudSettingsRequestInFlight = false
+                return
+            }
+            do {
+                let current = try await cloudSettingsClient.load(language: settings.uiLang)
+                if Task.isCancelled { return }
+                let saved = try await cloudSettingsClient.save(
+                    settings: settings.exportCloudSettings(),
+                    baseRevision: current.revision,
+                    language: settings.uiLang
+                )
+                if Task.isCancelled { return }
+                setCloudSettingsRecord(saved)
+                cloudSettingsRequestInFlight = false
+                showSavedToast(settings.t("cloud_sync.uploaded"))
+            } catch {
+                if Task.isCancelled { return }
+                finishCloudSettingsFailure(error)
+            }
+        }
+    }
+
+    func applyCloudSettings() {
+        guard prepareCloudSettingsOperation() else { return }
+        cloudSettingsTask?.cancel()
+        cloudSettingsStatusOverrideKey = ""
+        cloudSettingsRequestInFlight = true
+        cloudSettingsTask = Task { [weak self] in
+            guard let self else { return }
+            guard await ensureMonthlyCloudSupport() else {
+                cloudSettingsRequestInFlight = false
+                return
+            }
+            do {
+                let record = try await cloudSettingsClient.load(language: settings.uiLang)
+                guard record.exists else {
+                    throw CloudSettingsClient.CloudError(
+                        code: "not_found",
+                        statusCode: 404,
+                        message: "No iOS cloud settings were found"
+                    )
+                }
+                if Task.isCancelled { return }
+                settings.importCloudSettings(record.settings)
+                globalOffsetMs = settings.globalSyncOffsetMs()
+                refreshLocalizedStatusStrings()
+                setCloudSettingsRecord(record)
+                cloudSettingsRequestInFlight = false
+                showSavedToast(settings.t("cloud_sync.applied"))
+                refreshBackgroundForCurrentTrack()
+                reloadLyrics(bypassCache: false)
+            } catch {
+                if Task.isCancelled { return }
+                finishCloudSettingsFailure(error)
+            }
+        }
+    }
+
+    func deleteCloudSettings() {
+        guard prepareCloudSettingsOperation() else { return }
+        cloudSettingsTask?.cancel()
+        cloudSettingsStatusOverrideKey = ""
+        cloudSettingsRequestInFlight = true
+        cloudSettingsTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await cloudSettingsClient.delete(language: settings.uiLang)
+                if Task.isCancelled { return }
+                setCloudSettingsRecord(.empty)
+                cloudSettingsRequestInFlight = false
+                showSavedToast(settings.t("cloud_sync.deleted"))
+            } catch {
+                if Task.isCancelled { return }
+                finishCloudSettingsFailure(error)
+            }
+        }
+    }
+
+    private func prepareCloudSettingsOperation() -> Bool {
+        guard !cloudSettingsRequestInFlight else { return false }
+        guard creatorAccountClient.currentSession() != nil else {
+            creatorAccountConnected = false
+            showSavedToast(settings.t("cloud_sync.login_required"))
+            startCreatorAccountLogin()
+            return false
+        }
+        creatorAccountConnected = true
+        return true
+    }
+
+    private func ensureMonthlyCloudSupport() async -> Bool {
+        guard let session = creatorAccountClient.currentSession() else {
+            creatorAccountConnected = false
+            cloudSettingsStatusOverrideKey = "cloud_sync.login_required"
+            showSavedToast(settings.t("cloud_sync.login_required"))
+            return false
+        }
+        do {
+            let tier = try await creatorSupportClient.tier(userHash: session.userHash, forceRefresh: true)
+            guard tier == "monthly" else {
+                cloudSettingsStatusOverrideKey = "cloud_sync.monthly_required"
+                cloudMonthlyRequiredAlertPresented = true
+                showSavedToast(settings.t("cloud_sync.monthly_required"))
+                return false
+            }
+            return true
+        } catch {
+            cloudSettingsStatusOverrideKey = "cloud_sync.failed"
+            appendLog("cloud supporter role lookup failed: \(error.localizedDescription)")
+            showSavedToast(settings.t("cloud_sync.failed"))
+            return false
+        }
+    }
+
+    func dismissCloudMonthlyRequiredAlert() {
+        cloudMonthlyRequiredAlertPresented = false
+    }
+
+    private func setCloudSettingsRecord(_ record: CloudSettingsClient.Record) {
+        cloudSettingsRecord = record
+        cloudSettingsLoaded = true
+        cloudSettingsExists = record.exists
+        cloudSettingsRevision = record.revision
+        cloudSettingsUpdatedAt = record.updatedAt
+        cloudSettingsStatusOverrideKey = ""
+    }
+
+    private func resetCloudSettingsState() {
+        cloudSettingsTask?.cancel()
+        cloudSettingsTask = nil
+        cloudSettingsRequestInFlight = false
+        cloudSettingsLoaded = false
+        cloudSettingsExists = false
+        cloudSettingsRevision = 0
+        cloudSettingsUpdatedAt = 0
+        cloudSettingsRecord = .empty
+        cloudSettingsStatusOverrideKey = ""
+    }
+
+    private func finishCloudSettingsFailure(_ error: Error) {
+        cloudSettingsRequestInFlight = false
+        var key = "cloud_sync.failed"
+        if let cloudError = error as? CloudSettingsClient.CloudError {
+            switch cloudError.code {
+            case "monthly_supporter_required": key = "cloud_sync.monthly_required"
+            case "revision_conflict": key = "cloud_sync.conflict"
+            case "discord_login_required": key = "cloud_sync.login_required"
+            default: break
+            }
+        }
+        cloudSettingsStatusOverrideKey = key
+        if key == "cloud_sync.monthly_required" {
+            cloudMonthlyRequiredAlertPresented = true
+        }
+        appendLog("cloud settings failed: \(error.localizedDescription)")
+        showSavedToast(settings.t(key))
     }
 
     func refreshSpotifyPlayback(loadLyricsIfNeeded: Bool = true) async {
@@ -1005,24 +1332,91 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func applyFirstLanguagePromptChoice(
+        _ choice: FirstLanguagePromptChoice,
+        prompt selectedPrompt: FirstLanguagePrompt? = nil
+    ) {
+        guard let prompt = selectedPrompt ?? firstLanguagePrompt else { return }
+        if firstLanguagePrompt?.id == prompt.id {
+            firstLanguagePrompt = nil
+        }
+        let pronunciationEnabled: Bool
+        let translationEnabled: Bool
+        switch choice {
+        case .original:
+            pronunciationEnabled = false
+            translationEnabled = false
+        case .pronunciation:
+            pronunciationEnabled = true
+            translationEnabled = false
+        case .translation:
+            pronunciationEnabled = false
+            translationEnabled = true
+        case .both:
+            pronunciationEnabled = true
+            translationEnabled = true
+        }
+        settings.setLanguageRule(
+            sourceLang: prompt.sourceLang,
+            translationEnabled: translationEnabled,
+            pronunciationEnabled: pronunciationEnabled
+        )
+        if currentTrack?.stableKey == prompt.trackKey {
+            reloadLyrics(bypassCache: false)
+        }
+    }
+
+    func dismissFirstLanguagePrompt() {
+        guard let prompt = firstLanguagePrompt else { return }
+        firstLanguagePrompt = nil
+        if currentTrack?.stableKey == prompt.trackKey {
+            reloadLyrics(bypassCache: false)
+        }
+    }
+
+#if DEBUG
+    func applyDebugFirstLanguagePrompt() {
+        let locale = Locale(identifier: settings.uiLang)
+        firstLanguagePrompt = FirstLanguagePrompt(
+            sourceLang: "ja",
+            languageName: locale.localizedString(forLanguageCode: "ja") ?? "日本語",
+            trackKey: currentTrack?.stableKey ?? "debug-first-language"
+        )
+    }
+#endif
+
     func showTmiForCurrentTrack(bypassCache: Bool = false) {
         let snapshot = currentTrack ?? pendingManualTrackSnapshot()
         guard let snapshot, snapshot.hasUsableMetadata, !snapshot.isSpotifyDjSegment else {
             appendLog("ai tmi skipped: current track missing")
             return
         }
+        let snapshotSettings = settings.snapshot
+        if snapshotSettings.hasApiKey,
+           snapshotSettings.hasModel,
+           !defaults.bool(forKey: keyResearchTokenConsentV1) {
+            pendingResearchBypassCache = bypassCache
+            researchTokenConsentPresented = true
+            return
+        }
         let trackKey = snapshot.stableKey
+        let sameRequest = currentTmiRequestKey == trackKey
+        if sameRequest, tmiLoading, !bypassCache, tmiTask != nil {
+            tmiTrack = snapshot
+            tmiPresented = true
+            return
+        }
         let needsNewDialog = !tmiPresented || currentTmiRequestKey != trackKey
         currentTmiRequestKey = trackKey
         tmiTrack = snapshot
         tmiPresented = true
         tmiLoading = true
         tmiError = ""
+        tmiWebSearchFallback = false
         if needsNewDialog || bypassCache {
             tmiInfo = nil
         }
 
-        let snapshotSettings = settings.snapshot
         guard snapshotSettings.hasApiKey else {
             tmiLoading = false
             tmiError = settings.t("tmi.require_key")
@@ -1032,18 +1426,46 @@ final class AppViewModel: ObservableObject {
         tmiTask?.cancel()
         tmiTask = Task { [weak self] in
             guard let self else { return }
-            let response = await aiRepository.loadTmi(track: snapshot, settings: snapshotSettings, bypassCache: bypassCache)
+            let lyrics = baseLyricsResult.lines.isEmpty ? lyricsResult : baseLyricsResult
+            let response = await aiRepository.loadTmi(
+                track: snapshot,
+                lyrics: lyrics,
+                settings: snapshotSettings,
+                bypassCache: bypassCache
+            ) { [weak self] info, webSearchFallback, reset in
+                await MainActor.run {
+                    guard let self, self.currentTmiRequestKey == trackKey else { return }
+                    self.tmiWebSearchFallback = webSearchFallback
+                    if reset { self.tmiInfo = nil }
+                    else if let info { self.tmiInfo = info }
+                    self.tmiLoading = true
+                }
+            }
             if Task.isCancelled { return }
             appendLogs(response.logs)
             guard response.trackKey == currentTmiRequestKey else { return }
             tmiLoading = false
             if let info = response.info {
                 tmiInfo = info
+                tmiWebSearchFallback = info.webSearchFallback == true
                 tmiError = ""
             } else {
                 tmiError = localizedTmiError(response.errorMessage)
             }
         }
+    }
+
+    func acceptResearchTokenConsent() {
+        defaults.set(true, forKey: keyResearchTokenConsentV1)
+        let bypassCache = pendingResearchBypassCache ?? false
+        pendingResearchBypassCache = nil
+        researchTokenConsentPresented = false
+        showTmiForCurrentTrack(bypassCache: bypassCache)
+    }
+
+    func dismissResearchTokenConsent() {
+        pendingResearchBypassCache = nil
+        researchTokenConsentPresented = false
     }
 
     func regenerateTmiForCurrentTrack() {
@@ -1363,13 +1785,13 @@ final class AppViewModel: ObservableObject {
 
     func applyManualCandidate(_ candidate: ManualLrclibCandidate) {
         guard let track = currentTrack else { return }
+        let previousBase = baseLyricsResult
+        let previousResult = lyricsResult
+        let previousStatus = status
         cancelLyricsLoadTask()
         status = .loading
         lyricsLoadingProviderName = "LRCLIB"
         manualLrclibStatus = settings.t("lyrics.lrclib_search.selecting")
-        let loadingResult = LyricsResult.empty(lyricsLoadingText)
-        baseLyricsResult = loadingResult
-        lyricsResult = loadingResult
         let requestID = lyricsLoadRequestID
         loadTask = Task { [weak self] in
             guard let self else { return }
@@ -1383,7 +1805,7 @@ final class AppViewModel: ObservableObject {
                 requestMetadataTranslation(track: track, base: base, bypassCache: false)
                 let final = await applyLyricsSupplements(track: track, base: base, bypassCache: false)
                 guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else { return }
-                lyricsResult = final
+                publishFinalSupplementResult(final)
                 lyricsLoadingProviderName = ""
                 status = .loaded
                 manualLrclibStatus = settings.t("lyrics.lrclib_search.loaded")
@@ -1393,9 +1815,11 @@ final class AppViewModel: ObservableObject {
             } catch {
                 guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else { return }
                 let detail = error.localizedDescription.trimmed.isEmpty ? "unknown error" : error.localizedDescription.trimmed
+                baseLyricsResult = previousBase
+                lyricsResult = previousResult
                 lyricsLoadingProviderName = ""
                 manualLrclibStatus = settings.tf("lyrics.lrclib_search.error_format", detail)
-                status = .failed(detail)
+                status = previousStatus
                 showSavedToast(manualLrclibStatus)
                 appendLog("manual LRCLIB apply failed: \(detail)")
             }
@@ -1484,6 +1908,11 @@ final class AppViewModel: ObservableObject {
         regenerateCurrentAiSupplements(statusKey: "toast.settings_saved")
     }
 
+    func translationProviderSettingsChanged() {
+        showSavedToast(settings.t("toast.translation_provider_saved"))
+        regenerateCurrentAiSupplements(statusKey: "toast.translation_provider_saved")
+    }
+
     func saveLanguageRuleAndRegenerate() {
         showSavedToast(settings.t("toast.language_rule_saved"))
         regenerateCurrentAiSupplements(statusKey: "toast.language_rule_saved")
@@ -1491,7 +1920,11 @@ final class AppViewModel: ObservableObject {
 
     func outputLanguageChanged() {
         showSavedToast(settings.t("toast.pronunciation_language_saved"))
-        regenerateCurrentAiSupplements(statusKey: "toast.pronunciation_language_saved")
+        regenerateCurrentAiSupplements(
+            statusKey: "toast.pronunciation_language_saved",
+            bypassSupplementCache: false,
+            refreshMetadataTranslation: false
+        )
     }
 
     func uiLanguageChanged() {
@@ -1506,6 +1939,7 @@ final class AppViewModel: ObservableObject {
     func metadataTranslationSettingChanged(enabled: Bool) {
         metadataTranslationTask?.cancel()
         metadataTranslationTask = nil
+        metadataTranslationLoading = false
         metadataTranslation = nil
         guard enabled,
               let track = currentTrack,
@@ -1691,7 +2125,8 @@ final class AppViewModel: ObservableObject {
                 appendLog("spotify api validation: token verified, ttl=\(validation.expiresInSeconds)s")
                 if changed {
                     await lyricsRepository.clearCache()
-                    spotifyHydratedTrackIds.removeAll()
+                    spotifyArtworkURLsByTrackId.removeAll()
+                    spotifyMetadataHydrationRetryAfter.removeAll()
                     appendLog("spotify api settings changed: token verified, credentials saved, lyrics cache cleared")
                 }
                 if changed && reloadOnChange && currentTrack?.hasUsableMetadata == true {
@@ -1901,6 +2336,7 @@ final class AppViewModel: ObservableObject {
             creatorAccountConnected = false
             creatorPrivacyLoginInProgress = false
             creatorPrivacyState = .signedOut
+            resetCloudSettingsState()
         } else {
             creatorAccountConnected = true
             creatorPrivacyState = fallbackState
@@ -2130,7 +2566,7 @@ final class AppViewModel: ObservableObject {
             requestMetadataTranslation(track: resolvedTrack, base: baseResult, bypassCache: bypassCache)
             let finalResult = await applyLyricsSupplements(track: resolvedTrack, base: baseResult, bypassCache: bypassCache)
             guard isLyricsLoadCurrent(requestID, trackKey: resolvedTrack.stableKey) else { return }
-            lyricsResult = finalResult
+            publishFinalSupplementResult(finalResult)
             status = .loaded
             await loadYouTubeIfNeeded(track: resolvedTrack, result: finalResult)
         } catch {
@@ -2143,7 +2579,7 @@ final class AppViewModel: ObservableObject {
                 requestMetadataTranslation(track: failedTrack, base: cachedBase, bypassCache: bypassCache)
                 let finalResult = await applyLyricsSupplements(track: failedTrack, base: cachedBase, bypassCache: bypassCache)
                 guard isLyricsLoadCurrent(requestID, trackKey: failedTrack.stableKey) else { return }
-                lyricsResult = finalResult
+                publishFinalSupplementResult(finalResult)
                 await loadYouTubeIfNeeded(track: failedTrack, result: finalResult)
                 return
             }
@@ -2217,9 +2653,11 @@ final class AppViewModel: ObservableObject {
     private func hydrateSpotifyAppRemoteMetadataIfNeeded(_ playback: SpotifyPlaybackSnapshot) {
         let track = playback.track
         let trackId = track.trackId
+        let retryAfter = spotifyMetadataHydrationRetryAfter.value(forKey: trackId) ?? .distantPast
         guard !trackId.isEmpty,
               settings.snapshot.hasSpotifyCredentials,
-              !spotifyHydratedTrackIds.contains(trackId),
+              spotifyArtworkURLsByTrackId.value(forKey: trackId) == nil,
+              retryAfter <= Date(),
               spotifyMetadataHydrationTrackId != trackId else {
             return
         }
@@ -2231,8 +2669,15 @@ final class AppViewModel: ObservableObject {
             let hydration = await lyricsRepository.hydrateSpotifyTrackMetadata(track: track, settings: settingsSnapshot)
             if Task.isCancelled { return }
             spotifyMetadataHydrationTrackId = ""
-            spotifyHydratedTrackIds.insert(trackId)
             appendLogs(hydration.logs)
+            if let spotifyArtworkURL = hydration.spotifyArtworkURL {
+                spotifyArtworkURLsByTrackId.insert(spotifyArtworkURL, forKey: trackId)
+                spotifyMetadataHydrationRetryAfter.removeValue(forKey: trackId)
+                appendLog("spotify artwork cached for playback: \(spotifyArtworkURL.absoluteString)")
+            } else {
+                spotifyMetadataHydrationRetryAfter.insert(Date().addingTimeInterval(30), forKey: trackId)
+                appendLog("spotify artwork hydration unavailable; retry scheduled")
+            }
             guard currentTrack?.trackId == trackId else { return }
             let hydratedTrack = hydration.track
             guard hydratedTrack != track else { return }
@@ -2264,7 +2709,14 @@ final class AppViewModel: ObservableObject {
             currentTrack: currentTrack,
             uptime: uptime
         )
-        let incoming = playback.track
+        var incoming = playback.track
+        let incomingTrackId = incoming.trackId
+        if incoming.packageName == "spotify.web-api", let artworkURL = incoming.artworkURL, !incomingTrackId.isEmpty {
+            spotifyArtworkURLsByTrackId.insert(artworkURL, forKey: incomingTrackId)
+            spotifyMetadataHydrationRetryAfter.removeValue(forKey: incomingTrackId)
+        } else if let spotifyArtworkURL = spotifyArtworkURLsByTrackId.value(forKey: incomingTrackId) {
+            incoming.artworkURL = spotifyArtworkURL
+        }
         let incomingKey = incoming.stableKey
         let previousKey = currentTrack?.stableKey ?? ""
         let changedTrack = previousKey != incomingKey
@@ -2316,14 +2768,20 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func regenerateCurrentAiSupplements(statusKey: String) {
+    private func regenerateCurrentAiSupplements(
+        statusKey: String,
+        bypassSupplementCache: Bool = true,
+        refreshMetadataTranslation: Bool = true
+    ) {
         appendLog(settings.t(statusKey))
         guard let track = currentTrack, !baseLyricsResult.lines.isEmpty else {
             appendLog(settings.t("status.no_lyrics_to_apply"))
             return
         }
         cancelLyricsLoadTask()
-        metadataTranslation = nil
+        if refreshMetadataTranslation {
+            metadataTranslation = nil
+        }
         status = .loading
         let base = baseLyricsResult
         let snapshot = settings.snapshot
@@ -2333,10 +2791,16 @@ final class AppViewModel: ObservableObject {
             guard isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else { return }
             self.lyricsResult = base
             self.resetCurrentFurigana()
-            self.requestMetadataTranslation(track: track, base: base, bypassCache: true)
-            let finalResult = await self.applyLyricsSupplements(track: track, base: base, bypassCache: true)
+            if refreshMetadataTranslation {
+                self.requestMetadataTranslation(track: track, base: base, bypassCache: true)
+            }
+            let finalResult = await self.applyLyricsSupplements(
+                track: track,
+                base: base,
+                bypassCache: bypassSupplementCache
+            )
             guard self.isLyricsLoadCurrent(requestID, trackKey: track.stableKey) else { return }
-            self.lyricsResult = finalResult
+            self.publishFinalSupplementResult(finalResult)
             self.status = .loaded
             self.appendLog(self.settings.t(snapshot.enabled ? "status.ai_applied" : "status.ai_disabled"))
         }
@@ -2395,6 +2859,10 @@ final class AppViewModel: ObservableObject {
     }
 
     private func applyLyricsSupplements(track: TrackSnapshot, base: LyricsResult, bypassCache: Bool) async -> LyricsResult {
+        if presentFirstLanguagePromptIfNeeded(track: track, base: base) {
+            resetLyricsSupplementLoading()
+            return base
+        }
         async let aiResult = applySupplements(track: track, base: base, bypassCache: bypassCache)
         async let furiganaResult = loadFuriganaIfNeeded(track: track, base: base, bypassCache: bypassCache)
         async let culturalResult: Void = loadCulturalAnnotationsIfNeeded(
@@ -2404,6 +2872,29 @@ final class AppViewModel: ObservableObject {
         )
         let (supplemented, furigana, _) = await (aiResult, furiganaResult, culturalResult)
         return mergeFuriganaIntoResult(supplemented, furiganaSource: furigana)
+    }
+
+    private func presentFirstLanguagePromptIfNeeded(track: TrackSnapshot, base: LyricsResult) -> Bool {
+        guard !base.lines.isEmpty else { return false }
+        let source = effectiveSelectedSourceLang(lines: base.lines)
+        guard settings.shouldPromptForFirstLanguage(source) else { return false }
+        settings.markFirstLanguagePrompted(source)
+        let languageCode = AppSettings.normalizeLanguageCode(source)
+        let displayCode = languageCode.split(separator: "-").first.map(String.init) ?? languageCode
+        let locale = Locale(identifier: settings.uiLang)
+        let languageName = locale.localizedString(forLanguageCode: displayCode)
+            ?? AppSettings.languageInfo(languageCode).nativeName
+        firstLanguagePrompt = FirstLanguagePrompt(
+            sourceLang: source,
+            languageName: languageName,
+            trackKey: track.stableKey
+        )
+        return true
+    }
+
+    private func publishFinalSupplementResult(_ result: LyricsResult) {
+        lyricsResult = result
+        lyricsSupplementLayoutRevision &+= 1
     }
 
     private func loadCulturalAnnotationsIfNeeded(
@@ -2477,6 +2968,7 @@ final class AppViewModel: ObservableObject {
 
     private func requestMetadataTranslation(track: TrackSnapshot, base: LyricsResult, bypassCache: Bool) {
         metadataTranslationTask?.cancel()
+        metadataTranslationLoading = false
         guard track.hasUsableMetadata, !track.isSpotifyDjSegment else {
             metadataTranslation = nil
             return
@@ -2487,12 +2979,13 @@ final class AppViewModel: ObservableObject {
         let targetLang = snapshot.resolveTargetLanguage(sourceLang: sourceLang)
         guard snapshot.metadataTranslationEnabled,
               !AppSettings.isSameLanguage(sourceLang, targetLang),
-              snapshot.hasApiKey else {
+              snapshot.hasAnyTranslationProvider else {
             metadataTranslation = nil
             return
         }
 
         let trackKey = track.stableKey
+        metadataTranslationLoading = true
         metadataTranslationTask = Task { [weak self] in
             guard let self else { return }
             let response = await aiRepository.loadMetadataTranslation(
@@ -2503,10 +2996,11 @@ final class AppViewModel: ObservableObject {
             )
             if Task.isCancelled { return }
             appendLogs(response.logs)
-            guard currentTrack?.stableKey == trackKey,
-                  let translation = response.translation else {
+            guard currentTrack?.stableKey == trackKey else {
                 return
             }
+            metadataTranslationLoading = false
+            guard let translation = response.translation else { return }
 
             let currentSnapshot = settings.snapshot
             let currentSource = effectiveSelectedSourceLang(lines: baseLyricsResult.lines)
@@ -2524,6 +3018,7 @@ final class AppViewModel: ObservableObject {
     private func applyAiSupplementPartial(track: TrackSnapshot, response: AiLyricsRepository.SupplementResponse) {
         guard !Task.isCancelled, currentTrack?.stableKey == track.stableKey else { return }
         lyricsResult = mergeCurrentFurigana(into: response.result, trackKey: track.stableKey)
+        lyricsSupplementLayoutRevision &+= 1
         setLyricsSupplementLoading(
             pronunciation: response.pronunciationLoading,
             translation: response.translationLoading,
@@ -2659,6 +3154,7 @@ final class AppViewModel: ObservableObject {
         culturalAnnotationsLoading = false
         metadataTranslationTask?.cancel()
         metadataTranslationTask = nil
+        metadataTranslationLoading = false
         furiganaRefreshTask?.cancel()
         furiganaRefreshTask = nil
         lyricsLoadingProviderName = ""
@@ -2703,8 +3199,7 @@ final class AppViewModel: ObservableObject {
     ) -> (pronunciation: Bool, translation: Bool) {
         guard track.hasUsableMetadata,
               !base.lines.isEmpty,
-              snapshot.enabled,
-              snapshot.hasApiKey else {
+              snapshot.enabled else {
             return (false, false)
         }
         let payload = supplementDetectionPayload(lines: base.lines)
@@ -2713,8 +3208,11 @@ final class AppViewModel: ObservableObject {
         }
         let rule = snapshot.ruleForSource(sourceLang)
         let targetLang = snapshot.resolveTargetLanguage(sourceLang: sourceLang)
-        let translation = rule.translationEnabled && !snapshot.shouldSkipTranslation(sourceLang: sourceLang, resolvedTargetLang: targetLang)
-        return (rule.pronunciationEnabled, translation)
+        let selectedAiReady = snapshot.hasApiKey && snapshot.hasModel
+        let translationRequested = rule.translationEnabled
+            && !snapshot.shouldSkipTranslation(sourceLang: sourceLang, resolvedTargetLang: targetLang)
+        let translation = translationRequested && (snapshot.hasKeylessTranslationProvider || selectedAiReady)
+        return (rule.pronunciationEnabled && selectedAiReady, translation)
     }
 
     private func effectiveSelectedSourceLang(lines: [LyricsLine]) -> String {
@@ -2764,6 +3262,11 @@ final class AppViewModel: ObservableObject {
         if let artworkURL = metadata.artworkURL, artworkURL != latestTrack.artworkURL {
             latestTrack.artworkURL = artworkURL
             appendLog("spotify artwork applied: \(artworkURL.absoluteString)")
+        }
+        let artworkTrackId = IvLyricsUtilities.firstNonEmpty(safeSpotifyTrackId, latestTrack.trackId)
+        if let artworkURL = metadata.artworkURL, !artworkTrackId.isEmpty {
+            spotifyArtworkURLsByTrackId.insert(artworkURL, forKey: artworkTrackId)
+            spotifyMetadataHydrationRetryAfter.removeValue(forKey: artworkTrackId)
         }
         currentTrack = latestTrack
 
@@ -3018,6 +3521,7 @@ final class AppViewModel: ObservableObject {
             title: titleText,
             artist: artistText,
             statusText: pipLyricsStatusText,
+            lyricsLocale: effectiveSelectedRuleSourceLang,
             settings: settings.snapshot
         )
         lastPictureInPictureUpdateUptime = ProcessInfo.processInfo.systemUptime

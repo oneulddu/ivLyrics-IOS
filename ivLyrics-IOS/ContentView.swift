@@ -6,6 +6,17 @@ import WebKit
 import UIKit
 #endif
 
+private struct LyricsSegmentationLocaleKey: EnvironmentKey {
+    static let defaultValue = "auto"
+}
+
+extension EnvironmentValues {
+    var lyricsSegmentationLocale: String {
+        get { self[LyricsSegmentationLocaleKey.self] }
+        set { self[LyricsSegmentationLocaleKey.self] = newValue }
+    }
+}
+
 private struct AndroidSlidingMetadataText: View {
     private static let edgeHoldSeconds = 1.05
     private static let minimumMoveSeconds = 1.8
@@ -155,6 +166,7 @@ struct ContentView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var showingSettings = false
     @State private var showingLogs = false
     @State private var landscapeControlsVisible = true
@@ -177,6 +189,7 @@ struct ContentView: View {
                 size: geometry.size,
                 safeAreaInsets: geometry.safeAreaInsets
             )
+            .environment(\.lyricsSegmentationLocale, model.effectiveSelectedRuleSourceLang)
             .statusBarHidden(isLandscape)
             .persistentSystemOverlays(isLandscape ? .hidden : .automatic)
             .contentShape(Rectangle())
@@ -234,6 +247,9 @@ struct ContentView: View {
             .onChange(of: model.tmiPresented) { _, _ in
                 updateLandscapeAutoHide(isLandscape: isLandscape)
             }
+            .onChange(of: model.researchTokenConsentPresented) { _, _ in
+                updateLandscapeAutoHide(isLandscape: isLandscape)
+            }
             .onChange(of: showingLyricsMetaMenu) { _, _ in
                 if showingLyricsMetaMenu {
                     dismissLyricsMetaTip()
@@ -279,9 +295,16 @@ struct ContentView: View {
             .opacity(vinylModeVisible ? 0 : 1)
             .scaleEffect(vinylModeVisible ? 0.985 : 1)
             .allowsHitTesting(!vinylModeVisible)
-            .accessibilityHidden(vinylModeVisible)
+            .accessibilityHidden(
+                vinylModeVisible
+                    || showingLyricsMetaMenu
+                    || model.researchTokenConsentPresented
+                    || model.tmiPresented
+                    || model.updateDialogPresented
+                    || model.firstLanguagePrompt != nil
+            )
             .animation(
-                settings.vinylAnimationsEnabled
+                settings.vinylAnimationsEnabled && !accessibilityReduceMotion
                     ? .timingCurve(0.22, 0.74, 0.28, 1, duration: 0.36)
                     : nil,
                 value: vinylModeVisible
@@ -289,7 +312,7 @@ struct ContentView: View {
             if vinylModeVisible {
                 VinylPlayerModeView(isPresented: $vinylModeVisible)
                     .transition(
-                        settings.vinylAnimationsEnabled
+                        settings.vinylAnimationsEnabled && !accessibilityReduceMotion
                             ? .opacity.combined(with: .scale(scale: 0.975))
                             : .identity
                     )
@@ -404,6 +427,17 @@ struct ContentView: View {
                 .transition(.opacity)
                 .zIndex(13)
         }
+        if let prompt = model.firstLanguagePrompt {
+            FirstLanguagePromptSheetView(prompt: prompt)
+                .id(prompt.id)
+                .transition(.opacity.combined(with: .scale(scale: 0.975)))
+                .zIndex(14)
+        }
+        if model.researchTokenConsentPresented {
+            ResearchTokenConsentSheetView()
+                .transition(.opacity.combined(with: .scale(scale: 0.975)))
+                .zIndex(15)
+        }
         if !model.toastMessage.trimmed.isEmpty {
             ToastBanner(
                 message: model.toastMessage,
@@ -430,7 +464,9 @@ struct ContentView: View {
             let width = proxy.size.width
             let height = proxy.size.height
             let fullHeight = height + safeAreaInsets.top + safeAreaInsets.bottom
-            let artworkSize = max(180, min(width - 32, fullHeight * 0.45))
+            let horizontalPadding: CGFloat = 24
+            let contentWidth = max(0, width - horizontalPadding * 2)
+            let artworkSize = max(180, min(contentWidth, fullHeight * 0.45))
             let typography = settings.typographySettings()
             let artworkMetadataSpacing = min(30, max(18, height * 0.034))
             let metadataControlsSpacing = min(38, max(28, height * 0.045))
@@ -504,8 +540,8 @@ struct ContentView: View {
                         showLyricsPage(true)
                     }
             }
-            .frame(width: max(0, width - 48), height: max(0, height))
-            .padding(.horizontal, 24)
+            .frame(width: contentWidth, height: max(0, height))
+            .padding(.horizontal, horizontalPadding)
             .foregroundStyle(.white)
         }
         .simultaneousGesture(
@@ -613,6 +649,11 @@ struct ContentView: View {
                 model.updateDialogPresented = true
             }
         }
+        if environment["IVLYRICS_DEBUG_SHOW_FIRST_LANGUAGE"] == "1" {
+            DispatchQueue.main.async {
+                model.applyDebugFirstLanguagePrompt()
+            }
+        }
         if environment["IVLYRICS_DEBUG_SHOW_ONBOARDING"] == "1" {
             DispatchQueue.main.async {
                 model.initialSetupPresented = true
@@ -700,7 +741,7 @@ struct ContentView: View {
         showLyricsPage(false)
         showingLyricsMetaMenu = false
         dismissLyricsMetaTip()
-        withAnimation(settings.vinylAnimationsEnabled
+        withAnimation(settings.vinylAnimationsEnabled && !accessibilityReduceMotion
             ? .timingCurve(0.18, 0.80, 0.22, 1, duration: 0.42)
             : nil) {
             vinylModeVisible = true
@@ -1524,14 +1565,14 @@ private struct LyricsPageOverlay: View {
                     .contentShape(Rectangle())
                     .gesture(dismissDragGesture)
 
-                if model.culturalAnnotationsLoading {
-                    CulturalAnnotationLoadingPill()
+                if let loadingText = model.lyricsGenerationLoadingText {
+                    LyricsGenerationLoadingPill(text: loadingText)
                         .padding(.top, 8)
                         .padding(.horizontal, 24)
                 }
 
                 LyricsTimelineScrollView(
-                    topPadding: model.culturalAnnotationsLoading ? 10 : 16,
+                    topPadding: model.lyricsGenerationLoadingText == nil ? 16 : 10,
                     bottomPadding: safeAreaBottom + 28,
                     horizontalPadding: 24,
                     centerAnchorY: 0.42
@@ -2212,7 +2253,7 @@ private struct LandscapeArtworkView: View {
                 .fill(Color(red: 34.0 / 255.0, green: 35.0 / 255.0, blue: 40.0 / 255.0))
             if let url = model.currentTrack?.artworkURL {
                 AsyncImage(url: url) { image in
-                    image.resizable().scaledToFill()
+                    image.resizable().scaledToFit()
                 } placeholder: {
                     Color.clear
                 }
@@ -2226,6 +2267,7 @@ private struct LandscapeArtworkView: View {
 }
 
 private struct LandscapeTransportControls: View {
+    @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
     // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
@@ -2252,6 +2294,7 @@ private struct LandscapeTransportControls: View {
                     Color.clear
                 }
                 .buttonStyle(AndroidTransportButtonStyle(kind: .previous, size: 54))
+                .accessibilityLabel(settings.t("button.prev_track"))
                 Button { model.togglePlayback() } label: {
                     Color.clear
                 }
@@ -2261,10 +2304,12 @@ private struct LandscapeTransportControls: View {
                     playing: model.currentTrack?.playing == true,
                     size: 62
                 ))
+                .accessibilityLabel(settings.t("debug.play_pause"))
                 Button { model.skipToNextTrack() } label: {
                     Color.clear
                 }
                 .buttonStyle(AndroidTransportButtonStyle(kind: .next, size: 54))
+                .accessibilityLabel(settings.t("button.next_track"))
             }
             .buttonStyle(.plain)
         }
@@ -2455,24 +2500,24 @@ private struct LandscapeLyricsPane: View {
                 .padding(.bottom, 10)
         }
         .overlay(alignment: .topTrailing) {
-            if model.culturalAnnotationsLoading {
-                CulturalAnnotationLoadingPill()
+            if let loadingText = model.lyricsGenerationLoadingText {
+                LyricsGenerationLoadingPill(text: loadingText)
                     .padding(.top, 8)
-                    .padding(.trailing, 12)
+                    .padding(.horizontal, 12)
             }
         }
     }
 }
 
-private struct CulturalAnnotationLoadingPill: View {
-    @EnvironmentObject private var model: AppViewModel
+private struct LyricsGenerationLoadingPill: View {
+    let text: String
 
     var body: some View {
         HStack(spacing: 8) {
             ProgressView()
                 .controlSize(.small)
                 .tint(.white)
-            Text(model.culturalAnnotationsLoadingText)
+            Text(text)
                 .font(.pretendard(12, weight: .semibold))
                 .lineLimit(1)
         }
@@ -2480,7 +2525,7 @@ private struct CulturalAnnotationLoadingPill: View {
         .padding(.horizontal, 12)
         .frame(height: 34)
         .background(.black.opacity(0.34), in: Capsule())
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .allowsHitTesting(false)
     }
 }
@@ -2497,7 +2542,7 @@ struct ArtworkView: View {
                 .fill(Color(red: 34.0 / 255.0, green: 35.0 / 255.0, blue: 40.0 / 255.0))
             if let url = model.currentTrack?.artworkURL {
                 AsyncImage(url: url) { image in
-                    image.resizable().scaledToFill()
+                    image.resizable().scaledToFit()
                 } placeholder: {
                     Color.clear
                 }
@@ -2584,9 +2629,318 @@ private extension View {
     }
 }
 
+private struct FirstLanguagePromptSheetView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+
+    let prompt: FirstLanguagePrompt
+
+    @State private var pronunciationEnabled = false
+    @State private var translationEnabled = false
+
+    private let accent = Color(red: 47.0 / 255.0, green: 125.0 / 255.0, blue: 221.0 / 255.0)
+
+    private var hasSelection: Bool {
+        pronunciationEnabled || translationEnabled
+    }
+
+    private var shouldShowAIProviderHint: Bool {
+        let snapshot = settings.snapshot
+        return snapshot.hasKeylessTranslationProvider && !snapshot.hasEnabledAIProvider
+    }
+
+    private var aiProviderHintKey: String {
+        pronunciationEnabled
+            ? "first_language.pronunciation_ai_provider_hint"
+            : "first_language.ai_provider_hint"
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.56)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    ZStack {
+                        Circle()
+                            .fill(Color(red: 96.0 / 255.0, green: 165.0 / 255.0, blue: 250.0 / 255.0).opacity(0.22))
+                        Image(systemName: "translate")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(Color(red: 147.0 / 255.0, green: 197.0 / 255.0, blue: 253.0 / 255.0))
+                    }
+                    .frame(width: 58, height: 58)
+                    .accessibilityHidden(true)
+
+                    Text(settings.tf("first_language.title_format", prompt.languageName))
+                        .font(.pretendard(20, weight: .bold))
+                        .foregroundStyle(Color(red: 248.0 / 255.0, green: 250.0 / 255.0, blue: 252.0 / 255.0))
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .padding(.top, 16)
+
+                    Text(settings.t("first_language.message"))
+                        .font(.pretendard(16))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(3)
+                        .padding(.top, 5)
+
+                    Text(settings.t("first_language.hint"))
+                        .font(.pretendard(12.5))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .padding(.top, 8)
+
+                    VStack(spacing: 0) {
+                        promptToggle(
+                            icon: "Abc",
+                            label: settings.t("first_language.pronunciation"),
+                            isOn: $pronunciationEnabled
+                        )
+
+                        Divider()
+                            .overlay(.white.opacity(0.09))
+
+                        promptToggle(
+                            icon: "文A",
+                            label: settings.t("first_language.translation"),
+                            isOn: $translationEnabled
+                        )
+                    }
+                    .padding(.top, 16)
+
+                    if shouldShowAIProviderHint {
+                        HStack(alignment: .top, spacing: 9) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color(red: 147.0 / 255.0, green: 197.0 / 255.0, blue: 253.0 / 255.0))
+                                .accessibilityHidden(true)
+                            Text(settings.t(aiProviderHintKey))
+                                .font(.pretendard(12.5))
+                                .foregroundStyle(Color(red: 219.0 / 255.0, green: 234.0 / 255.0, blue: 254.0 / 255.0).opacity(0.88))
+                                .lineSpacing(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            Color(red: 59.0 / 255.0, green: 130.0 / 255.0, blue: 246.0 / 255.0).opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .stroke(Color(red: 96.0 / 255.0, green: 165.0 / 255.0, blue: 250.0 / 255.0).opacity(0.22))
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(settings.t(aiProviderHintKey))
+                        .padding(.top, 14)
+                    }
+
+                    Button(actionTitle) {
+                        applySelection()
+                    }
+                    .font(.pretendard(15, weight: .semibold))
+                    .foregroundStyle(hasSelection ? Color.white : Color.white.opacity(0.62))
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .background(
+                        hasSelection ? accent : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                    .buttonStyle(.plain)
+                    .padding(.top, 16)
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 28)
+                .padding(.bottom, 22)
+                .frame(maxWidth: min(440, max(300, geometry.size.width - 32)))
+                .background(
+                    Color(red: 24.0 / 255.0, green: 24.0 / 255.0, blue: 27.0 / 255.0).opacity(0.98),
+                    in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(.white.opacity(0.10), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.44), radius: 32, y: 16)
+                .padding(.horizontal, 16)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+    }
+
+    private var actionTitle: String {
+        settings.t(hasSelection ? "first_language.apply" : "first_language.not_now")
+    }
+
+    private func promptToggle(icon: String, label: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(spacing: 12) {
+                Text(icon)
+                    .font(.pretendard(12, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.66))
+                    .frame(width: 24)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .font(.pretendard(16, weight: .semibold))
+                    .foregroundStyle(Color(red: 248.0 / 255.0, green: 250.0 / 255.0, blue: 252.0 / 255.0))
+            }
+        }
+        .toggleStyle(SwitchToggleStyle(tint: accent))
+        .frame(minHeight: 58)
+        .accessibilityLabel(label)
+        .animation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.16), value: isOn.wrappedValue)
+    }
+
+    private func applySelection() {
+        let choice: FirstLanguagePromptChoice
+        switch (pronunciationEnabled, translationEnabled) {
+        case (true, true):
+            choice = .both
+        case (true, false):
+            choice = .pronunciation
+        case (false, true):
+            choice = .translation
+        case (false, false):
+            withAnimation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.16)) {
+                model.dismissFirstLanguagePrompt()
+            }
+            return
+        }
+        withAnimation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.16)) {
+            model.applyFirstLanguagePromptChoice(choice, prompt: prompt)
+        }
+    }
+}
+
+private struct ResearchTokenConsentSheetView: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+
+    private let amber = Color(red: 251.0 / 255.0, green: 191.0 / 255.0, blue: 36.0 / 255.0)
+
+    var body: some View {
+        GeometryReader { geometry in
+            let cardWidth = min(440, max(300, geometry.size.width - 32))
+            let cardHeight = min(420, max(240, geometry.size.height - 32))
+            ZStack {
+                Color.black.opacity(0.56)
+                    .ignoresSafeArea()
+                    .onTapGesture { dismissDialog() }
+
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ZStack {
+                            Circle()
+                                .fill(amber.opacity(0.16))
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundStyle(amber)
+                        }
+                        .frame(width: 56, height: 56)
+                        .accessibilityHidden(true)
+
+                        Text(settings.t("tmi.title"))
+                            .font(.pretendard(11, weight: .semibold))
+                            .tracking(0.8)
+                            .foregroundStyle(amber)
+                            .padding(.top, 14)
+
+                        Text(settings.t("research.token_consent_title"))
+                            .font(.pretendard(20, weight: .bold))
+                            .foregroundStyle(Color(red: 248.0 / 255.0, green: 250.0 / 255.0, blue: 252.0 / 255.0))
+                            .multilineTextAlignment(.center)
+                            .padding(.top, 7)
+
+                        Text(settings.t("research.token_consent_body"))
+                            .font(.pretendard(14.5))
+                            .foregroundStyle(.white.opacity(0.75))
+                            .multilineTextAlignment(.center)
+                            .lineSpacing(3)
+                            .padding(.top, 12)
+
+                        HStack(alignment: .top, spacing: 9) {
+                            Circle()
+                                .fill(amber)
+                                .frame(width: 6, height: 6)
+                                .padding(.top, 6)
+                                .accessibilityHidden(true)
+                            Text(settings.t("research.token_consent_note"))
+                                .font(.pretendard(12.5))
+                                .foregroundStyle(Color(red: 254.0 / 255.0, green: 243.0 / 255.0, blue: 199.0 / 255.0))
+                                .lineSpacing(2.5)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 11)
+                        .background(amber.opacity(0.11), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .stroke(amber.opacity(0.24), lineWidth: 1)
+                        }
+                        .padding(.top, 16)
+
+                        HStack(spacing: 8) {
+                            Button(settings.t("button.cancel")) {
+                                dismissDialog()
+                            }
+                            .font(.pretendard(13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 92)
+                            .frame(minHeight: 48)
+                            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                            Button {
+                                withAnimation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.16)) {
+                                    model.acceptResearchTokenConsent()
+                                }
+                            } label: {
+                                Text(settings.t("research.token_consent_agree"))
+                                    .font(.pretendard(13, weight: .semibold))
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(2)
+                                    .frame(maxWidth: .infinity, minHeight: 48)
+                            }
+                            .foregroundStyle(Color(red: 30.0 / 255.0, green: 24.0 / 255.0, blue: 10.0 / 255.0))
+                            .background(amber, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .padding(.top, 18)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 22)
+                }
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(width: cardWidth, height: cardHeight)
+                .background(
+                    Color(red: 18.0 / 255.0, green: 20.0 / 255.0, blue: 30.0 / 255.0),
+                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(amber.opacity(0.18), lineWidth: 1)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+    }
+
+    private func dismissDialog() {
+        withAnimation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.16)) {
+            model.dismissResearchTokenConsent()
+        }
+    }
+}
+
 private struct TmiSheetView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    @State private var researchTextScale: CGFloat = 1
 
     private var track: TrackSnapshot? {
         model.tmiTrack ?? model.currentTrack
@@ -2608,9 +2962,16 @@ private struct TmiSheetView: View {
                         .lineSpacing(2)
                         .padding(.top, 10)
 
-                    ScrollView {
-                        content
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    ScrollViewReader { proxy in
+                        VStack(alignment: .leading, spacing: 10) {
+                            if let research = model.tmiInfo?.research {
+                                researchNavigation(research, proxy: proxy)
+                            }
+                            ScrollView {
+                                content
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            }
+                        }
                     }
                     .frame(height: tmiBodyHeight(geometry.size.height))
                     .padding(.top, 14)
@@ -2641,6 +3002,8 @@ private struct TmiSheetView: View {
                 .padding(.horizontal, 16)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
     }
 
     private func tmiBodyHeight(_ screenHeight: CGFloat) -> CGFloat {
@@ -2660,7 +3023,7 @@ private struct TmiSheetView: View {
                     .fill(.white.opacity(0.10))
                 if let url = track?.artworkURL {
                     AsyncImage(url: url) { image in
-                        image.resizable().scaledToFill()
+                        image.resizable().scaledToFit()
                     } placeholder: {
                         Image(systemName: "music.note")
                             .foregroundStyle(.white.opacity(0.58))
@@ -2692,6 +3055,22 @@ private struct TmiSheetView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
+                researchTextScale = max(0.8, researchTextScale - 0.1)
+            } label: {
+                Text("A−").font(.pretendard(12, weight: .semibold)).frame(width: 34, height: 38)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(settings.t("research.font_decrease"))
+
+            Button {
+                researchTextScale = min(1.4, researchTextScale + 0.1)
+            } label: {
+                Text("A+").font(.pretendard(12, weight: .semibold)).frame(width: 34, height: 38)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(settings.t("research.font_increase"))
+
+            Button {
                 dismissDialog()
             } label: {
                 Text("×")
@@ -2706,18 +3085,34 @@ private struct TmiSheetView: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.tmiLoading {
-            HStack(spacing: 12) {
-                ProgressView()
-                    .tint(.white)
-                Text(model.tmiLoadingText)
-                    .font(.pretendard(13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.86))
-                Spacer(minLength: 0)
+        if let info = model.tmiInfo, info.hasContent {
+            VStack(alignment: .leading, spacing: 12) {
+                if model.tmiWebSearchFallback || info.webSearchFallback == true { webSearchWarning }
+                tmiInfoContent(info)
+                if model.tmiLoading {
+                    HStack(spacing: 8) {
+                        ProgressView().tint(.white)
+                        Text(settings.t("research.generating_more"))
+                            .font(.pretendard(12 * researchTextScale, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.64))
+                    }
+                    .padding(.top, 4)
+                }
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.white.opacity(28.0 / 255.0), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else if model.tmiLoading {
+            VStack(alignment: .leading, spacing: 10) {
+                if model.tmiWebSearchFallback { webSearchWarning }
+                HStack(spacing: 12) {
+                    ProgressView().tint(.white)
+                    Text(model.tmiLoadingText)
+                        .font(.pretendard(13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.86))
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.white.opacity(28.0 / 255.0), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
         } else if !model.tmiError.trimmed.isEmpty {
             VStack(alignment: .leading, spacing: 9) {
                 Label(settings.t("tmi.error_fetch"), systemImage: "exclamationmark.triangle")
@@ -2730,8 +3125,6 @@ private struct TmiSheetView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
             .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-        } else if let info = model.tmiInfo, info.hasContent {
-            tmiInfoContent(info)
         } else {
             Text(settings.t("tmi.no_data"))
                 .font(.pretendard(13))
@@ -2741,6 +3134,16 @@ private struct TmiSheetView: View {
     }
 
     private func tmiInfoContent(_ info: AiLyricsRepository.TmiInfo) -> some View {
+        Group {
+            if let research = info.research {
+                researchContent(research)
+            } else {
+                legacyTmiContent(info)
+            }
+        }
+    }
+
+    private func legacyTmiContent(_ info: AiLyricsRepository.TmiInfo) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             if !info.description.isEmpty {
                 Text(info.description)
@@ -2773,6 +3176,193 @@ private struct TmiSheetView: View {
             sourceGroup(title: settings.t("tmi.verified_sources"), sources: info.verifiedSources)
             sourceGroup(title: settings.t("tmi.related_sources"), sources: info.relatedSources)
             sourceGroup(title: settings.t("tmi.other_sources"), sources: info.otherSources)
+        }
+    }
+
+    private var webSearchWarning: some View {
+        Text(settings.t("research.web_fallback_warning"))
+            .font(.pretendard(11.5 * researchTextScale))
+            .foregroundStyle(Color(red: 244 / 255, green: 190 / 255, blue: 92 / 255))
+            .lineSpacing(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(11)
+            .background(Color(red: 244 / 255, green: 190 / 255, blue: 92 / 255).opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+    }
+
+    private func researchContent(_ research: ResearchDocument) -> some View {
+        LazyVStack(alignment: .leading, spacing: 12) {
+            if !research.hook.isEmpty {
+                Text(research.hook)
+                    .font(.pretendard(13 * researchTextScale, weight: .semibold))
+                    .foregroundStyle(Color(red: 82 / 255, green: 220 / 255, blue: 143 / 255))
+            }
+            if !research.thesis.isEmpty || !research.thesisExpanded.isEmpty {
+                researchCard {
+                    Text(settings.t("research.thesis"))
+                        .font(.pretendard(13 * researchTextScale, weight: .bold))
+                    if !research.thesis.isEmpty { researchParagraph(research.thesis) }
+                    if !research.thesisExpanded.isEmpty { researchParagraph(research.thesisExpanded) }
+                }
+                .id("research-thesis")
+            }
+            ForEach(research.mediaGallery ?? []) { media in
+                if let imageURL = URL(string: media.displayImageURL), !media.displayImageURL.isEmpty {
+                    researchCard {
+                        AsyncImage(url: imageURL) { image in
+                            image.resizable().scaledToFill()
+                        } placeholder: {
+                            ZStack {
+                                Color.white.opacity(0.06)
+                                ProgressView().tint(.white)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 170)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        if !media.title.isEmpty { researchParagraph(media.title) }
+                        if let destination = URL(string: media.url.isEmpty ? media.sourceURL : media.url) {
+                            Link(settings.t("research.source_note"), destination: destination)
+                                .font(.pretendard(10.5 * researchTextScale, weight: .semibold))
+                                .foregroundStyle(Color(red: 82 / 255, green: 220 / 255, blue: 143 / 255))
+                        }
+                    }
+                }
+            }
+            ForEach(research.sections) { section in
+                researchCard {
+                    let sectionTitle = researchSectionTitle(section)
+                    Text(sectionTitle)
+                        .font(.pretendard(13 * researchTextScale, weight: .bold))
+                    if !section.headline.isEmpty && section.headline != sectionTitle {
+                        Text(section.headline)
+                            .font(.pretendard(16 * researchTextScale, weight: .semibold))
+                    }
+                    ForEach(Array(section.paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                        researchParagraph(paragraph)
+                    }
+                    ForEach(Array(section.details.enumerated()), id: \.offset) { _, detail in
+                        researchParagraph("• \(detail)")
+                    }
+                }
+                .id("research-\(section.id)")
+            }
+            if !research.funFacts.isEmpty {
+                Text(settings.t("research.fun_facts"))
+                    .font(.pretendard(14 * researchTextScale, weight: .bold))
+                    .padding(.top, 6)
+                    .id("research-fun_facts")
+                ForEach(research.funFacts) { fact in
+                    researchCard {
+                        if !fact.title.isEmpty { Text(fact.title).font(.pretendard(13 * researchTextScale, weight: .bold)) }
+                        if !fact.body.isEmpty { researchParagraph(fact.body) }
+                        if !fact.whyInteresting.isEmpty { researchParagraph(fact.whyInteresting) }
+                        sourceFootnote(fact.sourceURL)
+                    }
+                }
+            }
+            if !research.timeline.isEmpty {
+                Text(settings.t("research.timeline"))
+                    .font(.pretendard(14 * researchTextScale, weight: .bold))
+                    .padding(.top, 6)
+                    .id("research-timeline")
+                ForEach(research.timeline) { event in
+                    researchCard {
+                        researchParagraph((event.date.isEmpty ? "" : event.date + "  ") + event.event)
+                        if !event.whyItMatters.isEmpty { researchParagraph(event.whyItMatters) }
+                        sourceFootnote(event.sourceURL)
+                    }
+                }
+            }
+            if !research.pullQuote.isEmpty {
+                Text("“\(research.pullQuote)”")
+                    .font(.pretendard(17 * researchTextScale, weight: .semibold))
+                    .lineSpacing(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Color(red: 82 / 255, green: 220 / 255, blue: 143 / 255).opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+            }
+            if !research.sources.isEmpty {
+                Text(settings.t("research.sources"))
+                    .font(.pretendard(14 * researchTextScale, weight: .bold))
+                    .padding(.top, 6)
+                    .id("research-sources")
+                ForEach(research.sources) { source in
+                    if let url = URL(string: source.url) {
+                        Link(source.displayTitle, destination: url)
+                            .font(.pretendard(12.5 * researchTextScale, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+            }
+        }
+    }
+
+    private func researchNavigation(_ research: ResearchDocument, proxy: ScrollViewProxy) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                if !research.thesis.isEmpty || !research.thesisExpanded.isEmpty {
+                    researchNavButton(settings.t("research.thesis"), id: "research-thesis", proxy: proxy)
+                }
+                ForEach(research.sections) { section in
+                    researchNavButton(researchSectionTitle(section), id: "research-\(section.id)", proxy: proxy)
+                }
+                if !research.funFacts.isEmpty {
+                    researchNavButton(settings.t("research.fun_facts"), id: "research-fun_facts", proxy: proxy)
+                }
+                if !research.timeline.isEmpty {
+                    researchNavButton(settings.t("research.timeline"), id: "research-timeline", proxy: proxy)
+                }
+                if !research.sources.isEmpty {
+                    researchNavButton(settings.t("research.sources"), id: "research-sources", proxy: proxy)
+                }
+            }
+        }
+    }
+
+    private func researchNavButton(_ title: String, id: String, proxy: ScrollViewProxy) -> some View {
+        Button(title) {
+            withAnimation(.easeInOut(duration: 0.22)) { proxy.scrollTo(id, anchor: .top) }
+        }
+        .font(.pretendard(10.5, weight: .semibold))
+        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(.white.opacity(0.08), in: Capsule())
+    }
+
+    private func researchSectionTitle(_ section: ResearchDocument.Section) -> String {
+        let key = "research.section.\(section.id)"
+        let localized = settings.t(key)
+        if localized != key { return localized }
+        return section.headline.isEmpty ? settings.t("research.section.overview") : section.headline
+    }
+
+    private func researchCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) { content() }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(13)
+            .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private func researchParagraph(_ value: String) -> some View {
+        Text(value)
+            .font(.pretendard(13 * researchTextScale))
+            .foregroundStyle(.white.opacity(0.86))
+            .lineSpacing(3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func sourceFootnote(_ value: String) -> some View {
+        if let url = URL(string: value), !value.isEmpty {
+            Link(settings.t("research.source_note"), destination: url)
+                .font(.pretendard(10.5 * researchTextScale, weight: .semibold))
+                .foregroundStyle(Color(red: 82 / 255, green: 220 / 255, blue: 143 / 255))
         }
     }
 
@@ -3635,6 +4225,7 @@ private struct MainLyricPreviewRowView: View {
                 text: row.text,
                 rubyText: settings.japaneseFuriganaEnabled ? row.rubyText : "",
                 syllables: shouldRenderTimedKaraoke ? row.syllables : [],
+                displayGranularity: settings.karaokeDisplayGranularity,
                 startTimeMs: row.syllables.first?.startTimeMs ?? 0,
                 endTimeMs: row.syllables.last?.endTimeMs ?? 0,
                 positionMs: positionMs,
@@ -3642,6 +4233,8 @@ private struct MainLyricPreviewRowView: View {
                 activeColor: LyricSpeakerPalette.activeColor(speaker: row.speaker, settings: speakerColors),
                 alignment: .center,
                 kind: row.kind,
+                speakerColors: speakerColors,
+                useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: row.slotId, baseSize: row.primary ? 17 : 14.5),
                 effectRowSeed: row.effectRowSeed,
@@ -3685,6 +4278,7 @@ private struct MainLyricPreviewInterludeIcon: View {
 }
 
 private struct MainLyricPreviewLoadingSkeleton: View {
+    @EnvironmentObject private var settings: AppSettings
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
             let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
@@ -3702,11 +4296,12 @@ private struct MainLyricPreviewLoadingSkeleton: View {
             .frame(width: 210)
         }
         .frame(height: 26)
-        .accessibilityLabel("Loading lyrics")
+        .accessibilityLabel(settings.t("status.lyrics_loading"))
     }
 }
 
 private struct LyricsLoadingSkeleton: View {
+    @EnvironmentObject private var settings: AppSettings
     private let widths: [CGFloat] = [0.62, 0.86, 0.74, 0.92, 0.56]
 
     var body: some View {
@@ -3728,7 +4323,7 @@ private struct LyricsLoadingSkeleton: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .accessibilityLabel("Loading lyrics")
+        .accessibilityLabel(settings.t("status.lyrics_loading"))
     }
 }
 
@@ -3905,18 +4500,67 @@ private struct LyricsContributorCredit: View {
                     await model.openSyncContributorProfile(contributor)
                 }
             } label: {
-                Text(contributorDisplayName(contributor))
-                    .foregroundStyle(.white.opacity(linkedNameOpacity))
+                CreatorContributorNameText(
+                    name: contributorDisplayName(contributor),
+                    presentation: model.creatorSupportPresentation(for: contributor),
+                    fallbackOpacity: linkedNameOpacity,
+                    supporterOpacity: subdued ? 0.45 : 1
+                )
             }
             .buttonStyle(.plain)
         } else {
-            Text(contributorDisplayName(contributor))
-                .foregroundStyle(.white.opacity(nameOpacity))
+            CreatorContributorNameText(
+                name: contributorDisplayName(contributor),
+                presentation: model.creatorSupportPresentation(for: contributor),
+                fallbackOpacity: nameOpacity,
+                supporterOpacity: subdued ? 0.45 : 1
+            )
         }
     }
 
     private func contributorDisplayName(_ contributor: LyricsResult.SyncContributor) -> String {
         contributor.identityHidden ? settings.t("lyrics.credit_anonymous") : contributor.name
+    }
+}
+
+private struct CreatorContributorNameText: View {
+    let name: String
+    let presentation: CreatorSupportPresentation?
+    let fallbackOpacity: Double
+    let supporterOpacity: Double
+
+    @ViewBuilder
+    var body: some View {
+        if let presentation, presentation.usesGradient {
+            let points = gradientPoints(angle: presentation.gradientAngle)
+            Text(name)
+                .foregroundStyle(LinearGradient(
+                    colors: [
+                        Color(hex: presentation.gradientStartColor),
+                        Color(hex: presentation.gradientEndColor)
+                    ],
+                    startPoint: points.start,
+                    endPoint: points.end
+                ))
+                .opacity(supporterOpacity)
+        } else if let presentation, presentation.hasDecoration {
+            Text(name)
+                .foregroundStyle(Color(hex: presentation.solidColor))
+                .opacity(supporterOpacity)
+        } else {
+            Text(name)
+                .foregroundStyle(.white.opacity(fallbackOpacity))
+        }
+    }
+
+    private func gradientPoints(angle: Int) -> (start: UnitPoint, end: UnitPoint) {
+        let radians = Double(angle) * .pi / 180
+        let directionX = sin(radians)
+        let directionY = -cos(radians)
+        return (
+            UnitPoint(x: 0.5 - directionX / 2, y: 0.5 - directionY / 2),
+            UnitPoint(x: 0.5 + directionX / 2, y: 0.5 + directionY / 2)
+        )
     }
 }
 
@@ -3963,6 +4607,7 @@ struct LyricsTimelineView: View {
     @EnvironmentObject private var model: AppViewModel
     // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var animatedCenterIndex: Double?
 
     var body: some View {
@@ -4073,7 +4718,7 @@ struct LyricsTimelineView: View {
                 animatedCenterIndex = next
                 return
             }
-            withAnimation(LyricsMotion.centering) {
+            withAnimation(accessibilityReduceMotion ? nil : LyricsMotion.centering) {
                 animatedCenterIndex = next
             }
         }
@@ -4144,6 +4789,7 @@ private struct LyricsTimelineScrollView: View {
     @EnvironmentObject private var model: AppViewModel
     // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var autoScrollPaused = false
     @State private var lastScrolledTargetID: String?
     @State private var autoScrollResumeTask: Task<Void, Never>?
@@ -4227,6 +4873,10 @@ private struct LyricsTimelineScrollView: View {
                         autoScrollPaused = false
                         scrollToTarget(activeTargetID, proxy: proxy, animated: true, force: true)
                     }
+                    .onChange(of: model.lyricsSupplementLayoutRevision) { _, _ in
+                        guard !autoScrollPaused else { return }
+                        scrollToTarget(activeTargetID, proxy: proxy, animated: false, force: true)
+                    }
                     .onDisappear {
                         autoScrollResumeTask?.cancel()
                         autoScrollResumeTask = nil
@@ -4285,7 +4935,7 @@ private struct LyricsTimelineScrollView: View {
                 anchor: UnitPoint(x: 0.5, y: min(1, max(0, centerAnchorY)))
             )
         }
-        if animated {
+        if animated && !accessibilityReduceMotion {
             withAnimation(LyricsMotion.centering, action)
         } else {
             action()
@@ -4754,7 +5404,10 @@ enum LyricsTimelineDisplayBuilder {
                 }
             }
             let end = max(line.endTimeMs, nextStart)
-            guard end - line.startTimeMs > interludeMinDurationMs else { continue }
+            let minimumDurationMs: Int64 = InstrumentalBreakMarker.isMusicNoteMarkerText(candidateText(line))
+                ? 0
+                : interludeMinDurationMs
+            guard end - line.startTimeMs > minimumDurationMs else { continue }
             result[index] = InterludeInfo(
                 startTimeMs: line.startTimeMs,
                 endTimeMs: end,
@@ -4913,18 +5566,7 @@ enum LyricsTimelineDisplayBuilder {
     }
 
     static func isInterludeMarkerText(_ text: String) -> Bool {
-        let normalized = text
-            .replacingOccurrences(of: "&nbsp;", with: " ")
-            .replacingOccurrences(of: "&NBSP;", with: " ")
-            .trimmed
-        if normalized.isEmpty { return true }
-        return normalized.unicodeScalars.allSatisfy { scalar in
-            CharacterSet.whitespacesAndNewlines.contains(scalar)
-                || scalar.value == 0x00A0
-                || (scalar.value >= 0x200B && scalar.value <= 0x200D)
-                || scalar.value == 0xFEFF
-                || (scalar.value >= 0x2669 && scalar.value <= 0x266C)
-        }
+        InstrumentalBreakMarker.isMarkerText(text)
     }
 
     private static func contains(_ info: InterludeInfo, _ positionMs: Int64) -> Bool {
@@ -5120,6 +5762,7 @@ struct LyricsLineView: View, Equatable {
                             text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
                             rubyText: settings.japaneseFuriganaEnabled ? part.furiganaText : "",
                             syllables: shouldRenderTimedKaraoke ? part.syllables : [],
+                            displayGranularity: settings.karaokeDisplayGranularity,
                             culturalAnnotations: culturalAnnotations,
                             startTimeMs: part.startTimeMs,
                             endTimeMs: part.endTimeMs,
@@ -5128,6 +5771,9 @@ struct LyricsLineView: View, Equatable {
                             activeColor: vocalPartActiveColor(part),
                             alignment: textAlignment,
                             kind: part.kind,
+                            speakerColors: speakerColors,
+                            useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
+                            speakerColorDistance: displayDistance + (partActive ? 0 : 0.45),
                             inactiveColor: vocalPartInactiveColor(part, active: partActive),
                             bounceEnabled: settings.karaokeBounceEffectEnabled,
                             bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
@@ -5146,6 +5792,7 @@ struct LyricsLineView: View, Equatable {
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
                 syllables: line.syllables,
+                displayGranularity: settings.karaokeDisplayGranularity,
                 culturalAnnotations: culturalAnnotations,
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
@@ -5154,6 +5801,9 @@ struct LyricsLineView: View, Equatable {
                 activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
+                speakerColors: speakerColors,
+                useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
+                speakerColorDistance: displayDistance,
                 inactiveColor: inactiveOriginalColor,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
@@ -5163,6 +5813,7 @@ struct LyricsLineView: View, Equatable {
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
                 syllables: [],
+                displayGranularity: settings.karaokeDisplayGranularity,
                 culturalAnnotations: culturalAnnotations,
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
@@ -5171,6 +5822,9 @@ struct LyricsLineView: View, Equatable {
                 activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
+                speakerColors: speakerColors,
+                useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
+                speakerColorDistance: displayDistance,
                 inactiveColor: inactiveOriginalColor,
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
@@ -5181,6 +5835,7 @@ struct LyricsLineView: View, Equatable {
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
                 syllables: [],
+                displayGranularity: settings.karaokeDisplayGranularity,
                 culturalAnnotations: culturalAnnotations,
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
@@ -5189,6 +5844,9 @@ struct LyricsLineView: View, Equatable {
                 activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
+                speakerColors: speakerColors,
+                useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
+                speakerColorDistance: displayDistance,
                 inactiveColor: inactiveOriginalColor
             )
         }
@@ -5335,9 +5993,12 @@ struct LyricsLineView: View, Equatable {
 }
 
 struct SyllableKaraokeText: View {
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.lyricsSegmentationLocale) private var lyricsSegmentationLocale
     var text: String
     var rubyText: String = ""
     var syllables: [LyricsLine.Syllable]
+    var displayGranularity: String = AppSettings.karaokeDisplayCharacter
     var culturalAnnotations: [CulturalAnnotation] = []
     var startTimeMs: Int64
     var endTimeMs: Int64
@@ -5346,6 +6007,9 @@ struct SyllableKaraokeText: View {
     var activeColor: Color
     var alignment: TextAlignment
     var kind: String = "vocal"
+    var speakerColors: AppSettings.SpeakerColorSettings = .defaults
+    var useCreatorSpeakerColors: Bool = true
+    var speakerColorDistance: Double = 0
     var inactiveOpacity: Double = 0.46
     var inactiveColor: Color? = nil
     var bounceEnabled: Bool = false
@@ -5356,9 +6020,9 @@ struct SyllableKaraokeText: View {
 
     var body: some View {
         let displayKind = normalizedKind
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !requiresContinuousEffect(displayKind))) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: accessibilityReduceMotion || !requiresContinuousEffect(displayKind))) { timeline in
             karaokeBody(
-                nowMs: timeline.date.timeIntervalSinceReferenceDate * 1_000,
+                nowMs: accessibilityReduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate * 1_000,
                 displayKind: displayKind
             )
         }
@@ -5377,12 +6041,20 @@ struct SyllableKaraokeText: View {
                     .multilineTextAlignment(alignment)
                     .modifier(LyricGlyphEffectModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
                     .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
+            } else if LyricsTextShaping.requiresContinuousShaping(text) {
+                Text(continuouslyShapedText(segments))
+                    .multilineTextAlignment(alignment)
+                    .lineLimit(singleLine ? 1 : nil)
+                    .fixedSize(horizontal: singleLine, vertical: false)
+                    .modifier(LyricGlyphEffectModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
+                    .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
+                    .accessibilityLabel(text)
             } else {
                 KaraokeSegmentFlowLayout(alignment: alignment, wraps: !singleLine) {
                     ForEach(segments) { segment in
                         KaraokeSyllableSegmentView(
                             segment: segment,
-                            kind: displayKind,
+                            kind: segment.kind,
                             active: active,
                             nowMs: nowMs,
                             textSize: bounceTextSize,
@@ -5390,22 +6062,42 @@ struct SyllableKaraokeText: View {
                         )
                     }
                 }
-                .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
+                .modifier(LyricLineMotionModifier(kind: hasInlineEffects ? "vocal" : displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
                 .accessibilityLabel(text)
             }
         }
     }
 
+    private func continuouslyShapedText(
+        _ segments: [KaraokeSyllableSegment]
+    ) -> AttributedString {
+        var result = AttributedString()
+        for segment in segments {
+            var run = AttributedString(segment.text)
+            run.foregroundColor = segment.fill > 0 ? segment.activeColor : segment.baseColor
+            result.append(run)
+        }
+        return result
+    }
+
     private var karaokeSegments: [KaraokeSyllableSegment] {
         let annotations = rubyAnnotations
         let sourceSyllables = effectiveSyllables
+        let fillTimings = isWordDisplayGranularity
+            ? sourceSyllables.map {
+                KaraokeSyllableTimingNormalizer.FillTiming(
+                    startTimeMs: $0.startTimeMs,
+                    endTimeMs: $0.endTimeMs
+                )
+            }
+            : KaraokeSyllableTimingNormalizer.latinWordFillTimings(sourceSyllables)
         let displaySyllables = CulturalAnnotation.annotateSyllables(
             text: text,
             syllables: sourceSyllables,
             annotations: culturalAnnotations
         )
-        let bounceActiveIndex = bounceEnabled && active && !displaySyllables.isEmpty
-            ? activeSegmentIndex(in: displaySyllables)
+        let bounceActiveIndex = bounceEnabled && !accessibilityReduceMotion && active && !displaySyllables.isEmpty
+            ? activeSegmentIndex(in: displaySyllables, fillTimings: fillTimings)
             : nil
         var timedSegments: [KaraokeSyllableSegment] = []
         timedSegments.reserveCapacity(displaySyllables.count)
@@ -5414,16 +6106,30 @@ struct SyllableKaraokeText: View {
             let sourceLength = sourceSyllables.indices.contains(index)
                 ? sourceSyllables[index].text.count
                 : syllable.text.count
+            let fillTiming = fillTimings.indices.contains(index)
+                ? fillTimings[index]
+                : KaraokeSyllableTimingNormalizer.FillTiming(
+                    startTimeMs: syllable.startTimeMs,
+                    endTimeMs: syllable.endTimeMs
+            )
             defer { sourceOffset += sourceLength }
             guard !syllable.text.isEmpty else { continue }
-            let bounce = karaokeBounce(for: syllable, index: index, activeIndex: bounceActiveIndex)
+            let bounce = karaokeBounce(
+                fillTiming: fillTiming,
+                index: index,
+                activeIndex: bounceActiveIndex
+            )
             timedSegments.append(KaraokeSyllableSegment(
                 id: index,
                 text: syllable.text,
                 rubyText: rubyReading(start: sourceOffset, length: sourceLength, annotations: annotations),
-                fill: fillFraction(for: syllable),
-                baseColor: baseColor,
-                activeColor: activeColor,
+                fill: fillFraction(
+                    startTimeMs: fillTiming.startTimeMs,
+                    endTimeMs: fillTiming.endTimeMs
+                ),
+                baseColor: segmentBaseColor(for: syllable),
+                activeColor: segmentActiveColor(for: syllable),
+                kind: segmentKind(for: syllable),
                 bounceOffsetY: bounce.offsetY,
                 bounceScale: bounce.scale,
                 isWhitespace: syllable.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
@@ -5453,6 +6159,7 @@ struct SyllableKaraokeText: View {
                 fill: 0,
                 baseColor: color,
                 activeColor: activeColor,
+                kind: normalizedKind,
                 bounceOffsetY: 0,
                 bounceScale: 1,
                 isWhitespace: value.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
@@ -5533,6 +6240,12 @@ struct SyllableKaraokeText: View {
     }
 
     private var effectiveSyllables: [LyricsLine.Syllable] {
+        if isLineDisplayGranularity {
+            guard hasInlineStyles else { return [] }
+            return syllables.filter { !$0.text.isEmpty }.map {
+                $0.copying(startTimeMs: 0, endTimeMs: 0)
+            }
+        }
         let timed: [LyricsLine.Syllable]
         if syllables.contains(where: { $0.text.isEmpty }) {
             timed = syllables.filter { !$0.text.isEmpty }
@@ -5540,17 +6253,22 @@ struct SyllableKaraokeText: View {
             timed = syllables
         }
         if !timed.isEmpty {
-            return KaraokeSyllableTimingNormalizer.expandTimedChunks(timed)
+            return isWordDisplayGranularity
+                ? KaraokeSyllableTimingNormalizer.groupedForWordDisplay(timed, locale: lyricsSegmentationLocale)
+                : KaraokeSyllableTimingNormalizer.expandTimedChunks(timed)
         }
         guard syntheticTimingEnabled, endTimeMs > startTimeMs else { return [] }
         let characters = text.map(String.init)
         guard !characters.isEmpty else { return [] }
         let duration = endTimeMs - startTimeMs
-        return characters.enumerated().map { index, character in
+        let synthetic = characters.enumerated().map { index, character in
             let start = startTimeMs + Int64((Double(duration) * Double(index) / Double(characters.count)).rounded())
             let end = startTimeMs + Int64((Double(duration) * Double(index + 1) / Double(characters.count)).rounded())
             return LyricsLine.Syllable(text: character, startTimeMs: start, endTimeMs: max(start, end))
         }
+        return isWordDisplayGranularity
+            ? KaraokeSyllableTimingNormalizer.groupedForWordDisplay(synthetic, locale: lyricsSegmentationLocale)
+            : KaraokeSyllableTimingNormalizer.expandTimedChunks(synthetic)
     }
 
     private var fallbackColor: Color {
@@ -5566,37 +6284,106 @@ struct SyllableKaraokeText: View {
         return value.isEmpty ? "vocal" : value
     }
 
-    private func requiresContinuousEffect(_ displayKind: String) -> Bool {
-        active && [
-            "effect", "adlib", "pulse", "bounce", "sway", "float", "pop", "glitch",
-            "wave", "sparkle", "echo", "whisper", "glow", "blur", "flicker"
-        ].contains(displayKind)
+    private var hasInlineStyles: Bool {
+        syllables.contains { $0.inlineStyle == true }
     }
 
-    private func fillFraction(for syllable: LyricsLine.Syllable) -> CGFloat {
+    private var hasInlineEffects: Bool {
+        let effectKinds: Set<String> = [
+            "effect", "adlib", "pulse", "bounce", "sway", "float", "pop", "glitch",
+            "wave", "sparkle", "echo", "whisper", "glow", "blur", "flicker"
+        ]
+        return syllables.contains {
+            $0.inlineStyle == true
+                && effectKinds.contains(($0.styleKind ?? "").trimmed.lowercased())
+        }
+    }
+
+    private func segmentKind(for syllable: LyricsLine.Syllable) -> String {
+        guard syllable.inlineStyle == true else { return normalizedKind }
+        let value = (syllable.styleKind ?? "").trimmed.lowercased()
+        return value.isEmpty ? normalizedKind : value
+    }
+
+    private func segmentActiveColor(for syllable: LyricsLine.Syllable) -> Color {
+        guard syllable.inlineStyle == true,
+              !(syllable.styleSpeaker ?? "").trimmed.isEmpty else {
+            return activeColor
+        }
+        return LyricSpeakerPalette.activeColor(
+            speaker: syllable.styleSpeaker ?? "",
+            speakerColor: syllable.styleSpeakerColor ?? "",
+            speakerFallback: syllable.styleSpeakerFallback ?? "",
+            settings: speakerColors,
+            useCreatorColors: useCreatorSpeakerColors
+        )
+    }
+
+    private func segmentBaseColor(for syllable: LyricsLine.Syllable) -> Color {
+        guard syllable.inlineStyle == true,
+              !(syllable.styleSpeaker ?? "").trimmed.isEmpty else {
+            return baseColor
+        }
+        return LyricSpeakerPalette.inactiveColor(
+            speaker: syllable.styleSpeaker ?? "",
+            speakerColor: syllable.styleSpeakerColor ?? "",
+            speakerFallback: syllable.styleSpeakerFallback ?? "",
+            settings: speakerColors,
+            useCreatorColors: useCreatorSpeakerColors,
+            distance: speakerColorDistance
+        )
+    }
+
+    private var normalizedDisplayGranularity: String {
+        AppSettings.normalizeKaraokeDisplayGranularity(displayGranularity)
+    }
+
+    private var isWordDisplayGranularity: Bool {
+        normalizedDisplayGranularity == AppSettings.karaokeDisplayWord
+    }
+
+    private var isLineDisplayGranularity: Bool {
+        normalizedDisplayGranularity == AppSettings.karaokeDisplayLine
+    }
+
+    private func requiresContinuousEffect(_ displayKind: String) -> Bool {
+        let continuousKinds: Set<String> = [
+            "effect", "adlib", "pulse", "bounce", "sway", "float", "pop", "glitch",
+            "wave", "sparkle", "echo", "whisper", "glow", "blur", "flicker"
+        ]
+        let canRenderInlineEffects = !LyricsTextShaping.requiresContinuousShaping(text)
+        return active && (continuousKinds.contains(displayKind) || (canRenderInlineEffects && syllables.contains {
+            $0.inlineStyle == true && continuousKinds.contains(($0.styleKind ?? "").trimmed.lowercased())
+        }))
+    }
+
+    private func fillFraction(startTimeMs: Int64, endTimeMs: Int64) -> CGFloat {
         guard active else { return 0 }
-        if positionMs >= syllable.endTimeMs {
+        if isWordDisplayGranularity {
+            return positionMs >= startTimeMs ? 1 : 0
+        }
+        if positionMs >= endTimeMs {
             return 1
         }
-        if positionMs <= syllable.startTimeMs || syllable.endTimeMs <= syllable.startTimeMs {
+        if positionMs <= startTimeMs || endTimeMs <= startTimeMs {
             return 0
         }
-        return min(1, max(0, CGFloat(positionMs - syllable.startTimeMs) / CGFloat(syllable.endTimeMs - syllable.startTimeMs)))
+        return min(1, max(0, CGFloat(positionMs - startTimeMs) / CGFloat(endTimeMs - startTimeMs)))
     }
 
     private func karaokeBounce(
-        for syllable: LyricsLine.Syllable,
+        fillTiming: KaraokeSyllableTimingNormalizer.FillTiming,
         index: Int,
         activeIndex: Int?
     ) -> KaraokeBounceMetrics {
         guard bounceEnabled,
               active,
-              syllable.endTimeMs > syllable.startTimeMs,
+              fillTiming.endTimeMs > fillTiming.startTimeMs,
               let activeIndex else {
             return .idle
         }
         let distance = abs(CGFloat(index - activeIndex))
-        guard distance <= 3, let rawStrength = bounceStrength(startTimeMs: syllable.startTimeMs) else {
+        guard distance <= 3, let rawStrength = bounceStrength(startTimeMs: fillTiming.startTimeMs) else {
             return .idle
         }
         let attenuation = max(0.22, 1 - distance * 0.23)
@@ -5609,7 +6396,10 @@ struct SyllableKaraokeText: View {
         return KaraokeBounceMetrics(offsetY: offsetY, scale: scale)
     }
 
-    private func activeSegmentIndex(in syllables: [LyricsLine.Syllable]) -> Int? {
+    private func activeSegmentIndex(
+        in syllables: [LyricsLine.Syllable],
+        fillTimings: [KaraokeSyllableTimingNormalizer.FillTiming]
+    ) -> Int? {
         var fallbackIndex: Int?
         var fallbackEnd = Int64.min
         var nextIndex: Int?
@@ -5618,15 +6408,21 @@ struct SyllableKaraokeText: View {
             guard !syllable.text.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else {
                 continue
             }
-            if positionMs >= syllable.startTimeMs, positionMs < syllable.endTimeMs {
+            let timing = fillTimings.indices.contains(index)
+                ? fillTimings[index]
+                : KaraokeSyllableTimingNormalizer.FillTiming(
+                    startTimeMs: syllable.startTimeMs,
+                    endTimeMs: syllable.endTimeMs
+                )
+            if positionMs >= timing.startTimeMs, positionMs < timing.endTimeMs {
                 return index
             }
-            if positionMs >= syllable.endTimeMs, syllable.endTimeMs >= fallbackEnd {
-                fallbackEnd = syllable.endTimeMs
+            if positionMs >= timing.endTimeMs, timing.endTimeMs >= fallbackEnd {
+                fallbackEnd = timing.endTimeMs
                 fallbackIndex = index
             }
-            if positionMs < syllable.startTimeMs, syllable.startTimeMs < nextStart {
-                nextStart = syllable.startTimeMs
+            if positionMs < timing.startTimeMs, timing.startTimeMs < nextStart {
+                nextStart = timing.startTimeMs
                 nextIndex = index
             }
         }
@@ -5637,19 +6433,14 @@ struct SyllableKaraokeText: View {
     }
 
     private func bounceStrength(startTimeMs: Int64) -> CGFloat? {
-        let prelead: CGFloat = 70
         let rise: CGFloat = 220
         let release: CGFloat = 640
         let elapsed = CGFloat(positionMs - startTimeMs)
-        if elapsed < -prelead || elapsed > rise + release {
+        if elapsed < 0 || elapsed > rise + release {
             return nil
         }
-        if elapsed < 0 {
-            let progress = (elapsed + prelead) / prelead
-            return easeOutCubic(progress) * 0.22
-        }
         if elapsed <= rise {
-            return 0.22 + easeOutCubic(elapsed / rise) * 0.78
+            return easeOutCubic(elapsed / rise)
         }
         let progress = min(1, (elapsed - rise) / release)
         return pow(1 - progress, 1.38)
@@ -5675,6 +6466,7 @@ private struct KaraokeSyllableSegment: Identifiable {
     var fill: CGFloat
     var baseColor: Color
     var activeColor: Color
+    var kind: String
     var bounceOffsetY: CGFloat
     var bounceScale: CGFloat
     var isWhitespace: Bool
@@ -5685,6 +6477,7 @@ private struct KaraokeWhitespaceLayoutKey: LayoutValueKey {
 }
 
 private struct KaraokeSyllableSegmentView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var segment: KaraokeSyllableSegment
     var kind: String
     var active: Bool
@@ -5697,6 +6490,7 @@ private struct KaraokeSyllableSegmentView: View {
             if !segment.rubyText.isEmpty {
                 Text(segment.rubyText)
                     .font(.system(size: max(9, textSize * 0.42), weight: .semibold))
+                    .minimumScaleFactor(dynamicTypeSize.isAccessibilitySize ? 0.85 : 1)
                     .foregroundStyle((segment.fill > 0 ? segment.activeColor : segment.baseColor).opacity(0.84))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
@@ -5928,18 +6722,27 @@ private struct KaraokeSegmentFlowLayout: Layout {
         let units = makeWrapUnits(subviews: subviews)
         for unit in units {
             let sizes = unit.map { subviews[$0].sizeThatFits(.unspecified) }
-            let unitWidth = sizes.reduce(0) { $0 + $1.width }
-            if unitWidth <= maxWidth {
-                if !currentIndices.isEmpty, currentWidth + unitWidth > maxWidth {
+            let separatorCount = unit.prefix { subviews[$0][KaraokeWhitespaceLayoutKey.self] }.count
+            let phraseIndices = Array(unit.dropFirst(separatorCount))
+            let separatorWidth = sizes.prefix(separatorCount).reduce(0) { $0 + $1.width }
+            let phraseWidth = sizes.dropFirst(separatorCount).reduce(0) { $0 + $1.width }
+            if phraseWidth <= maxWidth {
+                let spacingWidth = currentIndices.isEmpty ? 0 : separatorWidth
+                if !currentIndices.isEmpty, currentWidth + spacingWidth + phraseWidth > maxWidth {
                     flushRow()
                 }
-                currentIndices.append(contentsOf: unit)
-                currentWidth += unitWidth
+                if !currentIndices.isEmpty {
+                    currentIndices.append(contentsOf: unit.prefix(separatorCount))
+                    currentWidth += separatorWidth
+                }
+                currentIndices.append(contentsOf: phraseIndices)
+                currentWidth += phraseWidth
                 currentHeight = max(currentHeight, sizes.map(\.height).max() ?? 0)
                 continue
             }
-            for (offset, index) in unit.enumerated() {
-                let size = sizes[offset]
+            // Only an oversized single phrase falls back to its constituent glyph/syllable segments.
+            for index in phraseIndices {
+                let size = subviews[index].sizeThatFits(.unspecified)
                 if !currentIndices.isEmpty, currentWidth + size.width > maxWidth {
                     flushRow()
                 }
@@ -5956,13 +6759,17 @@ private struct KaraokeSegmentFlowLayout: Layout {
         var units: [[Int]] = []
         var current: [Int] = []
         for index in subviews.indices {
-            current.append(index)
             if subviews[index][KaraokeWhitespaceLayoutKey.self] {
-                units.append(current)
-                current = []
+                if current.contains(where: { !subviews[$0][KaraokeWhitespaceLayoutKey.self] }) {
+                    units.append(current)
+                    current = []
+                }
+                current.append(index)
+            } else {
+                current.append(index)
             }
         }
-        if !current.isEmpty {
+        if current.contains(where: { !subviews[$0][KaraokeWhitespaceLayoutKey.self] }) {
             units.append(current)
         }
         return units
@@ -6190,13 +6997,34 @@ private struct LyricsMotionDebugPreview: View {
 
 private struct KaraokeDebugPreview: View {
     @EnvironmentObject private var settings: AppSettings
-    private let longText = "Someone to die for you and more"
-    private let bounceSyllables = Array("ABCDEF").enumerated().map { index, character in
-        LyricsLine.Syllable(
-            text: String(character),
-            startTimeMs: Int64(index * 1_000),
-            endTimeMs: Int64((index + 1) * 1_000)
-        )
+    private var arabicPreviewEnabled: Bool {
+        ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_KARAOKE_ARABIC"] == "1"
+    }
+    private var longText: String {
+        arabicPreviewEnabled ? "تايهة و توهتك في القصة ويايا" : "Someone to die for you and more"
+    }
+    private var rangeStyledLine: LyricsLine {
+        let baseLine = LyricsLine(startTimeMs: 0, endTimeMs: 6_000, text: "ABCDEF")
+        return SyncDataApplier.applyWithDiagnostics(
+            baseLyrics: [baseLine],
+            syncBody: [
+                "version": 5,
+                "lines": [[
+                    "start": 0,
+                    "end": 5,
+                    "chars": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                    "granularity": "character",
+                    "kind": "vocal",
+                    "styleRanges": [[
+                        "start": 2,
+                        "end": 3,
+                        "kind": "wave",
+                        "speaker": "FEMALE 1"
+                    ]]
+                ]]
+            ],
+            track: nil
+        ).lines.first ?? baseLine
     }
 
     var body: some View {
@@ -6216,26 +7044,28 @@ private struct KaraokeDebugPreview: View {
                 positionMs: 5_000,
                 active: true,
                 activeColor: .white,
-                alignment: .leading,
+                alignment: arabicPreviewEnabled ? .trailing : .leading,
                 bounceEnabled: false,
                 bounceTextSize: 38,
                 syntheticTimingEnabled: true
             )
             .font(.pretendard(38, weight: .bold))
-            .frame(width: 320, alignment: .leading)
+            .frame(width: 320, alignment: arabicPreviewEnabled ? .trailing : .leading)
 
-            Text("Only C should bounce")
+            Text("C–D use range wave and speaker color")
                 .font(.pretendard(15, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.62))
             SyllableKaraokeText(
                 text: "ABCDEF",
-                syllables: bounceSyllables,
+                syllables: rangeStyledLine.syllables,
                 startTimeMs: 0,
                 endTimeMs: 6_000,
                 positionMs: 2_100,
                 active: true,
                 activeColor: Color(red: 0.48, green: 0.80, blue: 0.78),
                 alignment: .leading,
+                speakerColors: speakerColors,
+                useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
                 bounceEnabled: true,
                 bounceTextSize: 52
             )
@@ -6273,7 +7103,7 @@ private struct KaraokeDebugPreview: View {
                 fontSize: 32,
                 speakerColors: speakerColors,
                 useCreatorSpeakerColors: settings.useSyncCreatorSpeakerColors,
-                karaokeDataAsLineSynced: false,
+                karaokeDisplayGranularity: AppSettings.karaokeDisplayCharacter,
                 syncedLyricsKaraokeAnimationEnabled: true,
                 bounceEnabled: true
             )
@@ -7134,6 +7964,8 @@ struct SettingsView: View {
     @State private var paxsenixModels: [PaxsenixAIProvider.Model] = []
     @State private var paxsenixModelsLoading = false
     @State private var paxsenixModelsError = ""
+    @State private var cloudApplyConfirmationPresented = false
+    @State private var cloudDeleteConfirmationPresented = false
 
     var body: some View {
         ZStack {
@@ -7340,7 +8172,34 @@ struct SettingsView: View {
                 settingsToggleCard(settings.t("setting.interlude_labels"), description: settings.t("setting.interlude_labels_desc"), binding: settingsSavedBinding(\.interludeLabelsEnabled))
                 settingsToggleCard(settings.t("setting.synced_karaoke_animation"), description: settings.t("setting.synced_karaoke_animation_desc"), binding: settingsSavedBinding(\.syncedLyricsKaraokeAnimationEnabled))
                 settingsToggleCard(settings.t("setting.karaoke_bounce_effect"), description: settings.t("setting.karaoke_bounce_effect_desc"), binding: settingsSavedBinding(\.karaokeBounceEffectEnabled))
-                settingsToggleCard(settings.t("setting.karaoke_data_as_line_synced"), description: settings.t("setting.karaoke_data_as_line_synced_desc"), binding: settingsSavedBinding(\.karaokeDataAsLineSynced))
+                settingsCard(
+                    settings.t("setting.karaoke_display_granularity"),
+                    description: settings.t("setting.karaoke_display_granularity_desc")
+                ) {
+                    Picker(
+                        "",
+                        selection: Binding(
+                            get: {
+                                AppSettings.normalizeKaraokeDisplayGranularity(
+                                    settings.karaokeDisplayGranularity
+                                )
+                            },
+                            set: { value in
+                                settings.karaokeDisplayGranularity = value
+                                model.showSavedToast(settings.t("toast.settings_saved"))
+                            }
+                        )
+                    ) {
+                        Text(settings.t("karaoke.display.character"))
+                            .tag(AppSettings.karaokeDisplayCharacter)
+                        Text(settings.t("karaoke.display.word"))
+                            .tag(AppSettings.karaokeDisplayWord)
+                        Text(settings.t("karaoke.display.line"))
+                            .tag(AppSettings.karaokeDisplayLine)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
             }
         }
     }
@@ -7940,14 +8799,17 @@ struct SettingsView: View {
             settingsSection(settings.t("section.ai_lyrics"), description: settings.t("section.ai_lyrics_desc")) {
                 settingsToggleCard(settings.t("lyrics.translation"), binding: $settings.translationEnabled)
                 settingsToggleCard(settings.t("lyrics.pronunciation"), binding: $settings.pronunciationEnabled)
-                settingsCard(settings.t("section.provider")) {
-                    Picker("", selection: providerBinding) {
-                        ForEach(AppSettings.providers) { provider in
-                            Text(provider.label).tag(provider.id)
+                settingsCard(
+                    settings.t("section.provider"),
+                    description: settings.t("setting.ai_provider_order_desc")
+                ) {
+                    VStack(spacing: 8) {
+                        ForEach(Array(settings.aiProviderOrder.enumerated()), id: \.element) { index, providerId in
+                            if let provider = AppSettings.aiProviderById(providerId) {
+                                aiProviderSettingsCard(provider, index: index)
+                            }
                         }
                     }
-                    .labelsHidden()
-                    .settingsMenuSurface()
                 }
                 settingsToggleCard(
                     settings.t("setting.cultural_annotations"),
@@ -8207,6 +9069,68 @@ struct SettingsView: View {
                 }
             }
 
+            settingsSection(
+                settings.t("cloud_sync.section"),
+                description: settings.t("cloud_sync.monthly_required")
+                    + "\n" + settings.t("cloud_sync.section_desc")
+            ) {
+                settingsCard(settings.t("cloud_sync.section")) {
+                    HStack(alignment: .center, spacing: 10) {
+                        if model.cloudSettingsRequestInFlight {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: model.cloudSettingsSupportBlocked
+                                  ? "exclamationmark.triangle.fill"
+                                  : (model.cloudSettingsExists ? "checkmark.icloud" : "icloud"))
+                                .foregroundStyle(model.cloudSettingsSupportBlocked
+                                                 ? Color.orange.opacity(0.92)
+                                                 : (model.cloudSettingsExists ? Color.green.opacity(0.85) : Color.white.opacity(0.40)))
+                        }
+                        Text(model.cloudSettingsStatusText)
+                            .font(.pretendard(13))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityLabel(model.cloudSettingsStatusText)
+                    }
+
+                    HStack(spacing: 10) {
+                        settingsActionButton(settings.t("cloud_sync.refresh")) {
+                            model.refreshCloudSettings()
+                        }
+                        settingsActionButton(settings.t("cloud_sync.upload")) {
+                            model.uploadCloudSettings()
+                        }
+                    }
+                    .disabled(!model.cloudSettingsActionsEnabled)
+
+                    HStack(spacing: 10) {
+                        settingsActionButton(settings.t("cloud_sync.apply")) {
+                            cloudApplyConfirmationPresented = true
+                        }
+                        .disabled(!model.cloudSettingsCanApply)
+                        settingsActionButton(settings.t("cloud_sync.delete"), role: .destructive) {
+                            cloudDeleteConfirmationPresented = true
+                        }
+                        .disabled(!model.cloudSettingsActionsEnabled)
+                    }
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.66, green: 0.55, blue: 0.98).opacity(0.72),
+                                    Color(red: 0.93, green: 0.28, blue: 0.60).opacity(0.42)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                }
+            }
+
             settingsSection(settings.t("section.spotify_api")) {
                 settingsCard(settings.t("section.spotify_api")) {
                     SpotifySetupInstructionsPanel()
@@ -8296,6 +9220,31 @@ struct SettingsView: View {
                 settingsActionButton(settings.t("button.ai_cache_clear")) { model.clearAiCaches() }
                 settingsActionButton(settings.t("button.debug_log")) { settingsLogsPresented = true }
             }
+        }
+        .alert(settings.t("cloud_sync.apply"), isPresented: $cloudApplyConfirmationPresented) {
+            Button(settings.t("button.cancel"), role: .cancel) {}
+            Button(settings.t("cloud_sync.apply")) { model.applyCloudSettings() }
+        } message: {
+            Text(settings.t("cloud_sync.confirm_apply"))
+        }
+        .alert(settings.t("cloud_sync.delete"), isPresented: $cloudDeleteConfirmationPresented) {
+            Button(settings.t("button.cancel"), role: .cancel) {}
+            Button(settings.t("cloud_sync.delete"), role: .destructive) { model.deleteCloudSettings() }
+        } message: {
+            Text(settings.t("cloud_sync.confirm_delete"))
+        }
+        .alert(
+            settings.t("cloud_sync.section"),
+            isPresented: Binding(
+                get: { model.cloudMonthlyRequiredAlertPresented },
+                set: { presented in
+                    if !presented { model.dismissCloudMonthlyRequiredAlert() }
+                }
+            )
+        ) {
+            Button(settings.t("button.close")) { model.dismissCloudMonthlyRequiredAlert() }
+        } message: {
+            Text(settings.t("cloud_sync.monthly_required"))
         }
     }
 
@@ -8519,6 +9468,98 @@ struct SettingsView: View {
 
     private var selectedProvider: AppSettings.Provider {
         AppSettings.providerById(settings.providerId)
+    }
+
+    @ViewBuilder
+    private func aiProviderSettingsCard(_ provider: AppSettings.Provider, index: Int) -> some View {
+        let selected = !provider.isKeyless && settings.providerId == provider.id
+        HStack(spacing: 12) {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.52))
+                .frame(width: 32, height: 44)
+                .contentShape(Rectangle())
+                .draggable(provider.id)
+                .accessibilityLabel(settings.tf("setting.ai_provider_drag_format", provider.label))
+
+            Button {
+                guard !provider.isKeyless else { return }
+                settings.setProvider(provider.id)
+                model.showSavedToast(settings.t("toast.provider_saved"))
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(provider.label)
+                        .font(.pretendard(14, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text(aiProviderDescription(provider))
+                        .font(.pretendard(11))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(2)
+                    if selected {
+                        Text(settings.t("setting.ai_provider_selected"))
+                            .font(.pretendard(10, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.58, green: 0.75, blue: 1.0))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(provider.isKeyless)
+
+            Toggle("", isOn: aiProviderEnabledBinding(provider.id))
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityLabel(settings.tf("setting.ai_provider_toggle_format", provider.label))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            selected ? Color(red: 0.22, green: 0.39, blue: 0.68).opacity(0.42) : Color.white.opacity(0.055),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(selected ? Color(red: 0.48, green: 0.67, blue: 1.0).opacity(0.55) : .white.opacity(0.06))
+        )
+        .dropDestination(for: String.self) { providerIds, location in
+            guard let sourceId = providerIds.first else { return false }
+            settings.moveAIProvider(sourceId, relativeTo: provider.id, after: location.y > 36)
+            model.translationProviderSettingsChanged()
+            return true
+        }
+        .accessibilityAction(named: Text(settings.t("accessibility.move_up"))) {
+            guard index > 0 else { return }
+            settings.moveAIProvider(provider.id, offset: -1)
+            model.translationProviderSettingsChanged()
+        }
+        .accessibilityAction(named: Text(settings.t("accessibility.move_down"))) {
+            guard index < settings.aiProviderOrder.count - 1 else { return }
+            settings.moveAIProvider(provider.id, offset: 1)
+            model.translationProviderSettingsChanged()
+        }
+    }
+
+    private func aiProviderDescription(_ provider: AppSettings.Provider) -> String {
+        switch provider.id {
+        case KeylessTranslationProviders.bingId:
+            return settings.t("setting.bing_translate_provider_desc")
+        case KeylessTranslationProviders.googleId:
+            return settings.t("setting.google_translate_provider_desc")
+        default:
+            return settings.t("provider.desc.\(provider.id)")
+        }
+    }
+
+    private func aiProviderEnabledBinding(_ providerId: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.aiProviderEnabled[providerId] ?? false },
+            set: { enabled in
+                settings.setAIProviderEnabled(providerId, enabled: enabled)
+                model.translationProviderSettingsChanged()
+            }
+        )
     }
 
     @MainActor
@@ -9068,6 +10109,8 @@ struct UpdateSheetView: View {
                 .padding(.horizontal, 16)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
     }
 
     private func dismissDialog() {
