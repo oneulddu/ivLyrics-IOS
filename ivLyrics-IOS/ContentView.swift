@@ -4625,11 +4625,12 @@ struct LyricsTimelineView: View {
             trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )?.id
+        let fallbackActiveLineIndex = activeItemID == nil ? model.activeLineIndex : nil
         let activeDisplayIndex = activeItemID.flatMap { id in
             items.firstIndex { $0.id == id }
         } ?? max(0, items.firstIndex { item in
             if case .line(let index, _, _) = item {
-                return index == model.activeLineIndex
+                return index == fallbackActiveLineIndex
             }
             return false
         } ?? 0)
@@ -4670,7 +4671,7 @@ struct LyricsTimelineView: View {
                     Group {
                         switch item {
                         case .line(let index, let line, _):
-                            let lineActive = itemActive || (activeItemID == nil && index == model.activeLineIndex)
+                            let lineActive = itemActive || index == fallbackActiveLineIndex
                             let renderInput = model.timelineLineRenderInput(for: line, at: index)
                             LyricsLineView(
                                 lineIndex: index,
