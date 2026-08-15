@@ -320,7 +320,7 @@ final class AppViewModel: ObservableObject {
     var timelineContext: LyricsTimelineContext {
         let cacheLyricEndTimes = settings.autoInstrumentalBreakEnabled
         if let cachedTimelineContext,
-           cachedTimelineContext.cachesLyricEndTimes == cacheLyricEndTimes {
+           cachedTimelineContext.precomputesAutomaticInterludes == cacheLyricEndTimes {
             return cachedTimelineContext
         }
         let context = LyricsTimelineContext(
