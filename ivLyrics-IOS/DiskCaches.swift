@@ -9,6 +9,7 @@ nonisolated enum LyricsDiskCachePolicy {
     static let maxAgeMs: Int64 = 365 * 24 * 60 * 60 * 1000
     static let maxTotalBytes: Int64 = 10 * 1024 * 1024 * 1024
     private static let pruneInterval: TimeInterval = 10 * 60
+    private static let orphanedTemporaryFileMaxAge: TimeInterval = 60 * 60
     private static let pruneStateQueue = DispatchQueue(label: "ivlyrics.disk-cache.global-prune-state")
     private static let pruneQueue = DispatchQueue(label: "ivlyrics.disk-cache.global-prune")
     private static let pruneState = PruneState()
@@ -52,13 +53,21 @@ nonisolated enum LyricsDiskCachePolicy {
             options: [.skipsHiddenFiles]
         ) else { return }
 
-        let cutoff = Date().addingTimeInterval(-Double(maxAgeMs) / 1000)
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-Double(maxAgeMs) / 1000)
+        let temporaryFileCutoff = now.addingTimeInterval(-orphanedTemporaryFileMaxAge)
         var entries: [(url: URL, size: Int64, modified: Date)] = []
         for case let url as URL in enumerator {
-            guard url.pathExtension == "json",
-                  let values = try? url.resourceValues(forKeys: resourceKeys),
+            guard let values = try? url.resourceValues(forKeys: resourceKeys),
                   values.isRegularFile == true else { continue }
             let modified = values.contentModificationDate ?? .distantPast
+            if url.pathExtension == "tmp" {
+                if modified < temporaryFileCutoff {
+                    try? FileManager.default.removeItem(at: url)
+                }
+                continue
+            }
+            guard url.pathExtension == "json" else { continue }
             if modified < cutoff {
                 try? FileManager.default.removeItem(at: url)
                 continue
