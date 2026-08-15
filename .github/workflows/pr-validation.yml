@@ -1,0 +1,72 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate app and core
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        shell: bash
+        run: |
+          SELECTED_XCODE="$({
+            for app in /Applications/Xcode*.app; do
+              if [[ -d "$app" ]]; then
+                version="$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist" 2>/dev/null || true)"
+                if [[ -n "$version" ]]; then
+                  printf '%s\t%s\n' "$version" "$app"
+                fi
+              fi
+            done
+          } | ruby -rrubygems -e 'rows = STDIN.each_line.map { |line| line.chomp.split("\t", 2) }; selected = rows.max_by { |version, _| Gem::Version.new(version) }; puts selected&.last.to_s')"
+          if [[ -z "$SELECTED_XCODE" ]]; then
+            echo "No Xcode installation was found." >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$SELECTED_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Validate translations
+        run: python3 scripts/validate-i18n.py
+
+      - name: Run app contract tests
+        run: |
+          swiftc \
+            ivLyrics-IOS/LyricsProviderAppContracts.swift \
+            scripts/LyricsProviderAppContractsTests/main.swift \
+            -o "$RUNNER_TEMP/lyrics-provider-app-contracts-tests"
+          "$RUNNER_TEMP/lyrics-provider-app-contracts-tests"
+
+      - name: Run core tests
+        run: swift test --package-path LyricsProviderCore
+
+      - name: Build iOS Simulator app
+        run: |
+          xcodebuild \
+            -project ivLyrics-IOS.xcodeproj \
+            -scheme ivLyrics-IOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/ivlyrics-derived-data" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
