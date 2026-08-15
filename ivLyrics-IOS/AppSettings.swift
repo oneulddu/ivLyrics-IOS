@@ -342,6 +342,7 @@ final class AppSettings: ObservableObject {
     private var isApplyingRuleState = false
     private var isSwitchingAIProviderProfile = false
     private var cachedSnapshot: Snapshot?
+    private var cachedRuleConfig: (raw: RuleConfigRawSignature, value: RuleConfig)?
     private var snapshotInvalidationCancellable: AnyCancellable?
     private static let lyricsProviderRemotePolicyCacheKey = "lyrics_provider_verified_remote_policy_v1"
     private static let defaultRemotePolicyCacheLifetimeMs: Int64 = 24 * 60 * 60 * 1_000
@@ -564,7 +565,7 @@ final class AppSettings: ObservableObject {
         if let cachedSnapshot {
             return cachedSnapshot
         }
-        let ruleConfig = Self.loadRuleConfig(defaults: defaults).withTarget(outputLang)
+        let ruleConfig = ruleConfig().withTarget(outputLang)
         let explicitLocalOptIn = LyricsProviderMode.normalize(lyricsProviderModeRaw) == .multiProvider
         let multiProviderAuthorized = LyricsProviderAppContracts.multiProviderAuthorized(
             internalBuild: Self.isInternalLyricsProviderBuild,
@@ -1857,6 +1858,17 @@ final class AppSettings: ObservableObject {
         return RuleConfig(defaultRule: defaultRule, languageRules: rules)
     }
 
+    private func ruleConfig() -> RuleConfig {
+        let raw = RuleConfigRawSignature(defaults: defaults)
+        if let cachedRuleConfig,
+           cachedRuleConfig.raw == raw {
+            return cachedRuleConfig.value
+        }
+        let value = Self.loadRuleConfig(defaults: defaults)
+        cachedRuleConfig = (raw, value)
+        return value
+    }
+
     private static func storedOutputLanguage(defaults: UserDefaults, ruleConfig: RuleConfig) -> String {
         if defaults.object(forKey: "output_lang") != nil {
             return normalizeOutputLanguage(defaults.string(forKey: "output_lang") ?? outputLangSameUI)
@@ -2209,6 +2221,20 @@ final class AppSettings: ObservableObject {
 
         var cacheKey: String {
             "\(sourceLang):t=\(translationEnabled):p=\(pronunciationEnabled)"
+        }
+    }
+
+    private struct RuleConfigRawSignature: Equatable {
+        var languageRules: String?
+        var translationEnabled: Bool?
+        var pronunciationEnabled: Bool?
+        var targetLang: String?
+
+        init(defaults: UserDefaults) {
+            languageRules = defaults.string(forKey: "language_rules_v2")
+            translationEnabled = defaults.object(forKey: "translation_enabled") as? Bool
+            pronunciationEnabled = defaults.object(forKey: "pronunciation_enabled") as? Bool
+            targetLang = defaults.string(forKey: "target_lang")
         }
     }
 
