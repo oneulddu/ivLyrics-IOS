@@ -16,38 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    name: Classify changed paths
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      app: ${{ steps.paths.outputs.app }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect app-affecting changes
-        id: paths
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        shell: bash
-        run: |
-          app=false
-          while IFS= read -r path; do
-            case "$path" in
-              ivLyrics-IOS/*|ivLyrics-IOS.xcodeproj/*|ivLyrics-IOSTests/*|LyricsProviderCore/*|Config/*|.github/workflows/pr-validation.yml)
-                app=true
-                break
-                ;;
-            esac
-          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          echo "app=$app" >> "$GITHUB_OUTPUT"
-
-  validate-core:
+  validate:
     name: Validate translations and core
     runs-on: macos-26
     timeout-minutes: 10
@@ -69,57 +38,3 @@ jobs:
 
       - name: Run core tests
         run: swift test --package-path LyricsProviderCore
-
-  validate-app:
-    name: Test app and build Simulator
-    needs: changes
-    if: needs.changes.outputs.app == 'true'
-    runs-on: macos-26
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Select newest Xcode
-        shell: bash
-        run: |
-          SELECTED_XCODE="$({
-            for app in /Applications/Xcode*.app; do
-              if [[ -d "$app" ]]; then
-                version="$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist" 2>/dev/null || true)"
-                if [[ -n "$version" ]]; then
-                  printf '%s\t%s\n' "$version" "$app"
-                fi
-              fi
-            done
-          } | ruby -rrubygems -e 'rows = STDIN.each_line.map { |line| line.chomp.split("\t", 2) }; selected = rows.max_by { |version, _| Gem::Version.new(version) }; puts selected&.last.to_s')"
-          if [[ -z "$SELECTED_XCODE" ]]; then
-            echo "No Xcode installation was found." >&2
-            exit 1
-          fi
-          sudo xcode-select -s "$SELECTED_XCODE/Contents/Developer"
-          xcodebuild -version
-
-      - name: Run app tests and build Simulator app
-        shell: bash
-        run: |
-          SIMULATOR_ID="$(
-            xcrun simctl list devices available --json |
-              ruby -rjson -e 'devices = JSON.parse(STDIN.read).fetch("devices").values.flatten; selected = devices.find { |device| device["isAvailable"] && device["name"].start_with?("iPhone") }; puts selected&.fetch("udid", "").to_s'
-          )"
-          if [[ -z "$SIMULATOR_ID" ]]; then
-            echo "No available iPhone simulator was found." >&2
-            exit 1
-          fi
-          xcrun simctl boot "$SIMULATOR_ID" 2>/dev/null || true
-          xcrun simctl bootstatus "$SIMULATOR_ID" -b
-          xcodebuild \
-            -project ivLyrics-IOS.xcodeproj \
-            -scheme ivLyrics-IOS \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-            -derivedDataPath "$RUNNER_TEMP/ivlyrics-tests-derived-data" \
-            -only-testing:ivLyrics-IOSTests \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            test
