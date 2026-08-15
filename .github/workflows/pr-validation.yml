@@ -16,6 +16,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.paths.outputs.app }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect app-affecting changes
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          app=false
+          while IFS= read -r path; do
+            case "$path" in
+              ivLyrics-IOS/*|ivLyrics-IOS.xcodeproj/*|ivLyrics-IOSTests/*|LyricsProviderCore/*|Config/*|.github/workflows/pr-validation.yml)
+                app=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+
   validate-core:
     name: Validate translations and core
     runs-on: macos-26
@@ -41,6 +72,8 @@ jobs:
 
   validate-app:
     name: Test app and build Simulator
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: macos-26
     timeout-minutes: 20
 
