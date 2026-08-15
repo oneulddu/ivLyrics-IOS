@@ -8286,6 +8286,16 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var multiProviderSettingsContent: some View {
+        settingsToggleCard(
+            settings.t("setting.lyrics_type_priority"),
+            description: settings.t("setting.lyrics_type_priority_desc"),
+            binding: multiLyricsTypePriorityBinding
+        )
+        settingsToggleCard(
+            settings.t("setting.sync_data_provider_priority"),
+            description: settings.t("setting.sync_data_provider_priority_desc"),
+            binding: multiSyncDataProviderPriorityBinding
+        )
         ForEach(Array(normalizedMultiProviderOrder.enumerated()), id: \.element) { index, provider in
             multiLyricsProviderSettingsCard(provider, index: index)
         }
@@ -8384,20 +8394,22 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func multiLyricsProviderSettingsCard(_ provider: String, index: Int) -> some View {
-        let isLrclib = provider == "lrclib"
+        let sharedProvider = AppSettings.standardLyricsProviderById(provider)
         let deezerLocked = provider == "deezer" && !settings.deezerConfigured
         settingsCard(
-            multiProviderName(provider),
-            description: isLrclib ? "" : settings.t("lyrics_provider.unofficial_provider_desc")
+            sharedProvider?.name ?? multiProviderName(provider),
+            description: sharedProvider == nil
+                ? settings.t("lyrics_provider.unofficial_provider_desc")
+                : settings.t("lyrics.provider.author_default")
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Toggle(
                         settings.t("lyrics.provider.enabled"),
-                        isOn: isLrclib ? .constant(true) : multiProviderEnabledBinding(provider)
+                        isOn: multiProviderEnabledBinding(provider)
                     )
                     .font(.pretendard(14, weight: .semibold))
-                    .disabled(isLrclib || deezerLocked)
+                    .disabled(deezerLocked)
 
                     Spacer(minLength: 8)
 
@@ -8427,22 +8439,34 @@ struct SettingsView: View {
                         .font(.pretendard(13, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.64))
                     Toggle(
-                        provider == "unison"
+                        (sharedProvider?.supportsNativeKaraoke ?? false)
                             ? settings.t("lyrics.provider.type_karaoke")
                             : settings.t("lyrics.provider.type_karaoke_sync_data"),
                         isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypeKaraoke)
                     )
-                    Toggle(
-                        settings.t("lyrics.provider.type_synced"),
-                        isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypeSynced)
-                    )
-                    Toggle(
-                        settings.t("lyrics.provider.type_plain"),
-                        isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypePlain)
-                    )
+                    if sharedProvider?.supportsSynced ?? true {
+                        Toggle(
+                            settings.t("lyrics.provider.type_synced"),
+                            isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypeSynced)
+                        )
+                    }
+                    if sharedProvider?.supportsPlain ?? true {
+                        Toggle(
+                            settings.t("lyrics.provider.type_plain"),
+                            isOn: multiProviderTypeBinding(provider, type: AppSettings.standardLyricsTypePlain)
+                        )
+                    }
                 }
                 .font(.pretendard(14))
                 .disabled(deezerLocked)
+
+                if let projectURL = sharedProvider?.projectURL,
+                   let url = URL(string: projectURL) {
+                    Link(destination: url) {
+                        Label(settings.t("lyrics.provider.open_project"), systemImage: "arrow.up.right.square")
+                            .font(.pretendard(13, weight: .semibold))
+                    }
+                }
             }
         }
     }
@@ -9739,11 +9763,31 @@ struct SettingsView: View {
         )
     }
 
+    private var multiLyricsTypePriorityBinding: Binding<Bool> {
+        Binding(
+            get: { settings.multiPreferLyricsTypeOverProviderOrder },
+            set: { value in
+                settings.multiPreferLyricsTypeOverProviderOrder = value
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
     private var standardSyncDataProviderPriorityBinding: Binding<Bool> {
         Binding(
             get: { settings.standardPreferSyncDataProvider },
             set: { value in
                 settings.standardPreferSyncDataProvider = value
+                model.reloadLyrics(bypassCache: true)
+            }
+        )
+    }
+
+    private var multiSyncDataProviderPriorityBinding: Binding<Bool> {
+        Binding(
+            get: { settings.multiPreferSyncDataProvider },
+            set: { value in
+                settings.multiPreferSyncDataProvider = value
                 model.reloadLyrics(bypassCache: true)
             }
         )

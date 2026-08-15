@@ -15,10 +15,15 @@ struct StandardLyricsProviderStates: Equatable, Sendable {
 }
 
 enum LyricsProviderAppContracts {
-    static let providerOrderRawValues = ["musixmatch", "deezer", "unison", "bugs", "genie", "lrclib"]
+    static let providerOrderRawValues = [
+        "lrclib", "paxsenix", "lyricsplus", "unison", "musixmatch", "deezer", "bugs", "genie"
+    ]
     static let defaultEnabledProviderRawValues: Set<String> = ["lrclib"]
-    static let unofficialProviderRawValues = ["musixmatch", "deezer", "unison", "bugs", "genie"]
+    static let unofficialProviderRawValues = [
+        "paxsenix", "lyricsplus", "unison", "musixmatch", "deezer", "bugs", "genie"
+    ]
     static let standardProviderOrderRawValues = ["lrclib", "paxsenix", "lyricsplus", "unison"]
+    static let nativeKaraokeProviderRawValues: Set<String> = ["paxsenix", "lyricsplus", "unison"]
     static let standardDefaultEnabledProviderRawValues: Set<String> = ["lrclib"]
 
     static func standardProviderEnabledDefault(_ providerID: String) -> Bool {
@@ -151,12 +156,15 @@ enum LyricsProviderAppContracts {
 
     static func providerDisplayName(_ rawValue: String) -> String {
         switch rawValue {
+        case "lrclib": return "LRCLIB"
+        case "paxsenix": return "Lyrically (Paxsenix)"
+        case "lyricsplus": return "LyricsPlus"
         case "musixmatch": return "Musixmatch"
         case "deezer": return "Deezer"
         case "unison": return "Unison"
         case "bugs": return "Bugs"
         case "genie": return "Genie"
-        default: return "LRCLIB"
+        default: return rawValue
         }
     }
 
@@ -165,7 +173,7 @@ enum LyricsProviderAppContracts {
         lineSyllableDurationsMs: [[Int64]],
         vocalPartSyllableDurationsMs: [[[Int64]]]
     ) -> Bool {
-        guard providerID == "unison" else { return false }
+        guard nativeKaraokeProviderRawValues.contains(providerID) else { return false }
         return lineSyllableDurationsMs.joined().contains(where: { $0 > 0 })
             || vocalPartSyllableDurationsMs.joined().joined().contains(where: { $0 > 0 })
     }

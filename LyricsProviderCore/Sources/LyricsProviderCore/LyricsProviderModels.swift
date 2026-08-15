@@ -1,9 +1,20 @@
 import Foundation
 
 public enum LyricsProviderID: String, Codable, CaseIterable, Hashable, Sendable {
-    case lrclib, musixmatch, deezer, unison, bugs, genie
+    case lrclib, paxsenix, lyricsplus, unison, musixmatch, deezer, bugs, genie
 
-    public static let defaultOrder: [Self] = [.musixmatch, .deezer, .unison, .bugs, .genie, .lrclib]
+    public static let defaultOrder: [Self] = [
+        .lrclib, .paxsenix, .lyricsplus, .unison, .musixmatch, .deezer, .bugs, .genie
+    ]
+
+    public var supportsNativeKaraoke: Bool {
+        switch self {
+        case .paxsenix, .lyricsplus, .unison:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 public enum LyricsTiming: String, Codable, Hashable, Sendable {
@@ -58,12 +69,14 @@ public struct SyncDataSelectionContext: Codable, Hashable, Sendable {
     public let sourceLineCharCounts: [Int]
     public let sourceLyricsFingerprint: String
     public let preferredLyricsSource: String
+    public let preferredProviderID: LyricsProviderID?
     public let shouldNormalizeParentheticalLines: Bool
     public let hasLrclibSource: Bool
     public let contextVersion: Int
 
     public init(lrclibID: Int64 = 0, lineCharCounts: [Int] = [], sourceLineCharCounts: [Int] = [],
                 sourceLyricsFingerprint: String = "", preferredLyricsSource: String = "",
+                preferredProviderID: LyricsProviderID? = nil,
                 shouldNormalizeParentheticalLines: Bool = false, hasLrclibSource: Bool = false,
                 contextVersion: Int = 1) {
         self.lrclibID = lrclibID
@@ -71,6 +84,7 @@ public struct SyncDataSelectionContext: Codable, Hashable, Sendable {
         self.sourceLineCharCounts = sourceLineCharCounts
         self.sourceLyricsFingerprint = sourceLyricsFingerprint
         self.preferredLyricsSource = preferredLyricsSource
+        self.preferredProviderID = preferredProviderID
         self.shouldNormalizeParentheticalLines = shouldNormalizeParentheticalLines
         self.hasLrclibSource = hasLrclibSource
         self.contextVersion = contextVersion

@@ -258,6 +258,31 @@ actor LyricsRepository {
         return ["lrclib"] + eligible.filter { $0 != "lrclib" }
     }
 
+    private func preferredMultiSyncProvider(
+        policy: EffectiveProviderPolicy,
+        availableProviderIds: Set<String>
+    ) -> LyricsProviderID? {
+        guard policy.preferSyncDataProvider, !availableProviderIds.isEmpty else { return nil }
+        let eligible = policy.orderedProviders.filter { providerID in
+            availableProviderIds.contains(providerID.rawValue)
+                && authorizedMultiSyncProvider(policy: policy, providerID: providerID) != nil
+        }
+        if eligible.contains(.lrclib) { return .lrclib }
+        return eligible.first
+    }
+
+    private func authorizedMultiSyncProvider(
+        policy: EffectiveProviderPolicy,
+        providerID: LyricsProviderID
+    ) -> LyricsProviderID? {
+        guard policy.allows(providerID),
+              policy.allowedTypes(for: providerID).karaoke,
+              AppSettings.standardLyricsProviderById(providerID.rawValue)?.supportsIvLyricsSync == true else {
+            return nil
+        }
+        return providerID
+    }
+
     func loadLyrics(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
@@ -540,15 +565,31 @@ actor LyricsRepository {
             await publishResolvedMetadata(isrc: isrc, spotifyTrackId: spotifyTrackId, artworkURL: spotifyMatch?.artworkURL)
         }
 
-        let forceContributorRefresh = cachedBase?.contributors.isEmpty == false
-        let syncData = isrc.isEmpty ? nil : await fetchSyncData(
-            isrc: isrc,
-            providerId: lrclibProviderId,
-            track: track,
-            spotifyMatch: spotifyMatch,
-            log: log,
-            forceContributorRefresh: forceContributorRefresh
+        let availableSyncProviders = !isrc.isEmpty && providerPolicy.preferSyncDataProvider
+            ? await availableSyncDataProviderIds(isrc: isrc, log: log)
+            : []
+        let preferredSyncProvider = preferredMultiSyncProvider(
+            policy: providerPolicy,
+            availableProviderIds: availableSyncProviders
         )
+        let cachedSyncProvider = cachedBase.flatMap { _ in
+            authorizedMultiSyncProvider(policy: providerPolicy, providerID: cachedBaseProvider)
+        }
+        let preselectionSyncProvider = preferredSyncProvider ?? cachedSyncProvider
+        let forceContributorRefresh = cachedBase?.contributors.isEmpty == false
+        let syncData: SyncDataResult?
+        if !isrc.isEmpty, let preselectionSyncProvider {
+            syncData = await fetchSyncData(
+                isrc: isrc,
+                providerId: preselectionSyncProvider.rawValue,
+                track: track,
+                spotifyMatch: spotifyMatch,
+                log: log,
+                forceContributorRefresh: forceContributorRefresh
+            )
+        } else {
+            syncData = nil
+        }
         if var cachedBase {
             let latestSettings = AppSettings.shared.snapshot
             guard cachePreviewIsAuthorized(by: latestSettings, baseProvider: cachedBaseProvider) else {
@@ -606,8 +647,11 @@ actor LyricsRepository {
                 policy: providerPolicy,
                 cacheKey: providerCacheKey,
                 syncData: syncData,
+                preferredSyncProvider: preferredSyncProvider,
+                syncDataProviderAttempted: preselectionSyncProvider,
                 isrc: isrc,
                 spotifyTrackId: spotifyTrackId,
+                spotifyMatch: spotifyMatch,
                 artworkURL: spotifyMatch?.artworkURL,
                 logs: logs,
                 onCachedLyricsLoaded: onCachedLyricsLoaded,
@@ -3006,6 +3050,10 @@ actor LyricsRepository {
             allowedProviderTypesCanonical: LyricsCacheKey.allowedProviderTypesCanonical(
                 policy.allowedTypesByProvider
             ),
+            selectionPreferencesCanonical: LyricsCacheKey.selectionPreferencesCanonical(
+                preferLyricsTypeOverProviderOrder: policy.preferLyricsTypeOverProviderOrder,
+                preferSyncDataProvider: policy.preferSyncDataProvider
+            ),
             credentialGeneration: policy.credentialGeneration
         ))
     }
@@ -3102,8 +3150,11 @@ actor LyricsRepository {
         policy: EffectiveProviderPolicy,
         cacheKey: LyricsCacheKey,
         syncData: SyncDataResult?,
+        preferredSyncProvider: LyricsProviderID?,
+        syncDataProviderAttempted: LyricsProviderID?,
         isrc: String,
         spotifyTrackId: String,
+        spotifyMatch: SpotifyTrackMatch?,
         artworkURL: URL?,
         logs: [String],
         onCachedLyricsLoaded: CachedLyricsLoadedHandler?,
@@ -3112,17 +3163,23 @@ actor LyricsRepository {
         allowPolicyChangeRetry: Bool
     ) async throws -> LoadedLyrics {
         var diagnostics = logs
-        let context = syncData.map {
-            SyncDataSelectionContext(
-                lrclibID: $0.lrclibId,
-                lineCharCounts: $0.lineCharCounts,
-                sourceLineCharCounts: $0.sourceLineCharCounts,
-                sourceLyricsFingerprint: $0.sourceLyricsFingerprint,
-                preferredLyricsSource: $0.preferredLyricsSource,
-                shouldNormalizeParentheticalLines: $0.shouldNormalizeParentheticalLines,
-                hasLrclibSource: $0.hasLrclibSource,
+        let context: SyncDataSelectionContext?
+        if let syncData {
+            context = SyncDataSelectionContext(
+                lrclibID: syncData.lrclibId,
+                lineCharCounts: syncData.lineCharCounts,
+                sourceLineCharCounts: syncData.sourceLineCharCounts,
+                sourceLyricsFingerprint: syncData.sourceLyricsFingerprint,
+                preferredLyricsSource: syncData.preferredLyricsSource,
+                preferredProviderID: preferredSyncProvider,
+                shouldNormalizeParentheticalLines: syncData.shouldNormalizeParentheticalLines,
+                hasLrclibSource: syncData.hasLrclibSource,
                 contextVersion: 1
             )
+        } else if let preferredSyncProvider {
+            context = SyncDataSelectionContext(preferredProviderID: preferredSyncProvider)
+        } else {
+            context = nil
         }
         let request = LyricsProviderRequest(
             trackKey: track.stableKey,
@@ -3176,6 +3233,22 @@ actor LyricsRepository {
                 throw CancellationError()
             }
             let allowedTypes = policy.allowedTypes(for: selected.provider)
+            var selectedSyncData = syncData
+            if selectedSyncData == nil,
+               syncDataProviderAttempted == nil,
+               !isrc.isEmpty,
+               let selectedSyncProvider = authorizedMultiSyncProvider(
+                   policy: policy,
+                   providerID: selected.provider
+               ) {
+                selectedSyncData = await fetchSyncData(
+                    isrc: isrc,
+                    providerId: selectedSyncProvider.rawValue,
+                    track: track,
+                    spotifyMatch: spotifyMatch,
+                    log: { diagnostics.append($0) }
+                )
+            }
             var baseLines = appLines(from: selected, fallbackDurationMs: track.durationMs)
             guard !baseLines.isEmpty else { throw LyricsProviderError.miss }
             if !allowedTypes.karaoke {
@@ -3195,11 +3268,11 @@ actor LyricsRepository {
             var finalLines = baseLines
             var syncApplied = false
             if preserveProviderKaraoke {
-                diagnostics.append("provider unison: rich timing preserved; sync-data apply skipped")
-            } else if let syncData, allowedTypes.karaoke {
+                diagnostics.append("provider \(selected.provider.rawValue): rich timing preserved; sync-data apply skipped")
+            } else if let selectedSyncData, allowedTypes.karaoke {
                 let applied = SyncDataApplier.applyWithDiagnostics(
                     baseLyrics: baseLines,
-                    syncBody: syncData.syncBody,
+                    syncBody: selectedSyncData.syncBody,
                     track: track
                 )
                 diagnostics.append(contentsOf: applied.diagnostics.map { "sync-data apply: \($0)" })
@@ -3218,13 +3291,13 @@ actor LyricsRepository {
                 providerLabel: label,
                 detail: ui(preserveProviderKaraoke ? "repo.detail.provider_rich_timing" :
                     (syncApplied ? "repo.detail.sync_applied_search" :
-                        (syncData == nil || !allowedTypes.karaoke
+                        (selectedSyncData == nil || !allowedTypes.karaoke
                             ? "repo.detail.no_sync_data"
                             : "repo.detail.sync_apply_failed")), settings: settings),
                 karaoke: preserveProviderKaraoke || syncApplied,
                 isrc: isrc,
                 spotifyTrackId: spotifyTrackId,
-                contributors: syncApplied ? (syncData?.contributors ?? []) : []
+                contributors: syncApplied ? (selectedSyncData?.contributors ?? []) : []
             )
             let candidate = selected.matchedCandidate
             let provenance = LyricsCacheProvenance(
@@ -3355,6 +3428,8 @@ actor LyricsRepository {
     private func providerDisplayName(_ provider: LyricsProviderID) -> String {
         switch provider {
         case .lrclib: return "LRCLIB"
+        case .paxsenix: return "Lyrically (Paxsenix)"
+        case .lyricsplus: return "LyricsPlus"
         case .musixmatch: return "Musixmatch"
         case .deezer: return "Deezer"
         case .bugs: return "Bugs"

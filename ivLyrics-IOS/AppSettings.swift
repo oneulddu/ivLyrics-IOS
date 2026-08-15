@@ -81,7 +81,8 @@ final class AppSettings: ObservableObject {
         "background_brightness", "background_blur", "background_noise", "background_reduce_motion",
         "background_solid_color", "background_video_scale", "lyrics_provider_order_v1",
         "lyrics_provider_enabled_v1", "lyrics_provider_types_v1", "lyrics_prefer_sync_data_provider",
-        "lyrics_prefer_type_over_provider", "typography_settings_v1", "speaker_color_settings_v1",
+        "lyrics_prefer_type_over_provider", "lyrics_multi_prefer_sync_data_provider",
+        "lyrics_multi_prefer_type_over_provider", "typography_settings_v1", "speaker_color_settings_v1",
         "global_sync_offset_ms"
     ]
 
@@ -324,6 +325,18 @@ final class AppSettings: ObservableObject {
     @Published private(set) var lyricsProviderRemoteCohortAllowed = false
     @Published private(set) var lyricsProviderPolicyVersion = 1
     @Published private(set) var lyricsProviderPolicyGeneration: UInt64
+    @Published var multiPreferSyncDataProvider: Bool {
+        didSet {
+            set("lyrics_multi_prefer_sync_data_provider", multiPreferSyncDataProvider)
+            recordLyricsProviderPolicyChange()
+        }
+    }
+    @Published var multiPreferLyricsTypeOverProviderOrder: Bool {
+        didSet {
+            set("lyrics_multi_prefer_type_over_provider", multiPreferLyricsTypeOverProviderOrder)
+            recordLyricsProviderPolicyChange()
+        }
+    }
     @Published private(set) var standardLyricsProviderOrder: [String] { didSet { saveStandardLyricsProviderSettingsIfNeeded() } }
     @Published private(set) var standardLyricsProviderEnabled: [String: Bool] { didSet { saveStandardLyricsProviderSettingsIfNeeded() } }
     @Published private(set) var standardLyricsProviderTypes: [String: [String: Bool]] { didSet { saveStandardLyricsProviderSettingsIfNeeded() } }
@@ -438,6 +451,12 @@ final class AppSettings: ObservableObject {
         lyricsProviderOrder = normalizedLyricsProviderOrder
         defaults.set(normalizedLyricsProviderOrder, forKey: "lyrics_provider_order")
         lyricsMultiProviderTypes = Self.loadMultiLyricsProviderTypes(defaults: defaults)
+        let storedStandardPreferSyncData = defaults.object(forKey: "lyrics_prefer_sync_data_provider") as? Bool ?? true
+        let storedStandardPreferLyricsType = defaults.object(forKey: "lyrics_prefer_type_over_provider") as? Bool ?? true
+        multiPreferSyncDataProvider = defaults.object(forKey: "lyrics_multi_prefer_sync_data_provider") as? Bool
+            ?? storedStandardPreferSyncData
+        multiPreferLyricsTypeOverProviderOrder = defaults.object(forKey: "lyrics_multi_prefer_type_over_provider") as? Bool
+            ?? storedStandardPreferLyricsType
         deezerConfigured = defaults.bool(forKey: "lyrics_provider_deezer_configured")
         lyricsProviderCredentialGeneration = (defaults.object(forKey: "lyrics_provider_credential_generation") as? NSNumber)?.uint64Value ?? 0
         lyricsProviderPolicyGeneration = (defaults.object(forKey: "lyrics_provider_policy_generation") as? NSNumber)?.uint64Value ?? 0
@@ -450,8 +469,8 @@ final class AppSettings: ObservableObject {
         standardLyricsProviderOrder = Self.loadStandardLyricsProviderOrder(defaults: defaults)
         standardLyricsProviderEnabled = Self.loadStandardLyricsProviderEnabled(defaults: defaults)
         standardLyricsProviderTypes = Self.loadStandardLyricsProviderTypes(defaults: defaults)
-        standardPreferSyncDataProvider = defaults.object(forKey: "lyrics_prefer_sync_data_provider") as? Bool ?? true
-        standardPreferLyricsTypeOverProviderOrder = defaults.object(forKey: "lyrics_prefer_type_over_provider") as? Bool ?? true
+        standardPreferSyncDataProvider = storedStandardPreferSyncData
+        standardPreferLyricsTypeOverProviderOrder = storedStandardPreferLyricsType
         aiProviderOrder = Self.loadAIProviderOrder(defaults: defaults)
         aiProviderEnabled = loadedAIProviderEnabled
         aiProviderProfiles = loadedAIProviderProfiles
@@ -551,6 +570,8 @@ final class AppSettings: ObservableObject {
         standardLyricsProviderTypes = loaded.standardLyricsProviderTypes
         standardPreferSyncDataProvider = loaded.standardPreferSyncDataProvider
         standardPreferLyricsTypeOverProviderOrder = loaded.standardPreferLyricsTypeOverProviderOrder
+        multiPreferSyncDataProvider = loaded.multiPreferSyncDataProvider
+        multiPreferLyricsTypeOverProviderOrder = loaded.multiPreferLyricsTypeOverProviderOrder
         isSwitchingAIProviderProfile = false
         cachedTypographySettings = nil
         cachedSpeakerColorSettings = nil
@@ -693,7 +714,7 @@ final class AppSettings: ObservableObject {
             explicitLocalOptIn: localMode == .multiProvider,
             verifiedCohort: lyricsProviderRemoteCohortAllowed
         ) ? .multiProvider : .legacy
-        let enabled = Set(lyricsProviderEnabled.compactMap(LyricsProviderID.init(rawValue:))).union([.lrclib])
+        let enabled = Set(lyricsProviderEnabled.compactMap(LyricsProviderID.init(rawValue:)))
         let order = lyricsProviderOrder.compactMap(LyricsProviderID.init(rawValue:))
         let allowedTypes = Dictionary(uniqueKeysWithValues: lyricsMultiProviderTypes.compactMap {
             key, values -> (LyricsProviderID, ProviderAllowedLyricsTypes)? in
@@ -713,7 +734,9 @@ final class AppSettings: ObservableObject {
             globalRemoteDisable: lyricsProviderRemoteGlobalDisable,
             policyVersion: lyricsProviderPolicyVersion,
             credentialGeneration: lyricsProviderCredentialGeneration,
-            allowedTypesByProvider: allowedTypes
+            allowedTypesByProvider: allowedTypes,
+            preferLyricsTypeOverProviderOrder: multiPreferLyricsTypeOverProviderOrder,
+            preferSyncDataProvider: multiPreferSyncDataProvider
         )
     }
 
