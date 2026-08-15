@@ -22,6 +22,26 @@ final class LyricsProviderModeParityTests: XCTestCase {
         XCTAssertTrue(settings.snapshot.lyricsProviderSettings.preferLyricsTypeOverProviderOrder)
     }
 
+    func testInheritedMultiPreferencesArePersistedBeforeStandardValuesChange() {
+        let suiteName = "LyricsProviderModeParityTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "lyrics_prefer_sync_data_provider")
+        defaults.set(false, forKey: "lyrics_prefer_type_over_provider")
+
+        var settings: AppSettings? = AppSettings(defaults: defaults)
+        XCTAssertFalse(settings?.multiPreferSyncDataProvider ?? true)
+        XCTAssertFalse(settings?.multiPreferLyricsTypeOverProviderOrder ?? true)
+
+        settings?.standardPreferSyncDataProvider = true
+        settings?.standardPreferLyricsTypeOverProviderOrder = true
+        settings = nil
+
+        let reloaded = AppSettings(defaults: defaults)
+        XCTAssertFalse(reloaded.multiPreferSyncDataProvider)
+        XCTAssertFalse(reloaded.multiPreferLyricsTypeOverProviderOrder)
+    }
+
     func testMultiProviderModeDoesNotForceLrclibEnabled() {
         let suiteName = "LyricsProviderModeParityTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

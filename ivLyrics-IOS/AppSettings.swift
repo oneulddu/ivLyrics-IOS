@@ -453,10 +453,22 @@ final class AppSettings: ObservableObject {
         lyricsMultiProviderTypes = Self.loadMultiLyricsProviderTypes(defaults: defaults)
         let storedStandardPreferSyncData = defaults.object(forKey: "lyrics_prefer_sync_data_provider") as? Bool ?? true
         let storedStandardPreferLyricsType = defaults.object(forKey: "lyrics_prefer_type_over_provider") as? Bool ?? true
-        multiPreferSyncDataProvider = defaults.object(forKey: "lyrics_multi_prefer_sync_data_provider") as? Bool
-            ?? storedStandardPreferSyncData
-        multiPreferLyricsTypeOverProviderOrder = defaults.object(forKey: "lyrics_multi_prefer_type_over_provider") as? Bool
-            ?? storedStandardPreferLyricsType
+        if let storedMultiPreferSyncData = defaults.object(
+            forKey: "lyrics_multi_prefer_sync_data_provider"
+        ) as? Bool {
+            multiPreferSyncDataProvider = storedMultiPreferSyncData
+        } else {
+            multiPreferSyncDataProvider = storedStandardPreferSyncData
+            defaults.set(storedStandardPreferSyncData, forKey: "lyrics_multi_prefer_sync_data_provider")
+        }
+        if let storedMultiPreferLyricsType = defaults.object(
+            forKey: "lyrics_multi_prefer_type_over_provider"
+        ) as? Bool {
+            multiPreferLyricsTypeOverProviderOrder = storedMultiPreferLyricsType
+        } else {
+            multiPreferLyricsTypeOverProviderOrder = storedStandardPreferLyricsType
+            defaults.set(storedStandardPreferLyricsType, forKey: "lyrics_multi_prefer_type_over_provider")
+        }
         deezerConfigured = defaults.bool(forKey: "lyrics_provider_deezer_configured")
         lyricsProviderCredentialGeneration = (defaults.object(forKey: "lyrics_provider_credential_generation") as? NSNumber)?.uint64Value ?? 0
         lyricsProviderPolicyGeneration = (defaults.object(forKey: "lyrics_provider_policy_generation") as? NSNumber)?.uint64Value ?? 0
