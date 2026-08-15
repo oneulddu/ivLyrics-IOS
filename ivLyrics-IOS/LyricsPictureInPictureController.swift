@@ -55,6 +55,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private var possibleObservation: NSKeyValueObservation?
     private weak var hostView: UIView?
     private var state = RenderState.empty
+    private var resolvedActiveLine: ActiveLine?
     private var artwork: UIImage?
     private var blurredArtwork: UIImage?
     private var artworkURL: URL?
@@ -75,6 +76,12 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private var pixelBufferPool: CVPixelBufferPool?
     private var pixelBufferPoolSize = CGSize.zero
     private var videoFormatDescription: CMVideoFormatDescription?
+    private var staticBackgroundCacheKey: StaticBackgroundCacheKey?
+    private var staticBackgroundImage: UIImage?
+#if DEBUG
+    private var staticBackgroundCacheDisabled = false
+    private(set) var debugStaticBackgroundCacheHitCount = 0
+#endif
 
     override init() {
         super.init()
@@ -160,10 +167,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             typography: settings.typography,
             speakerColors: settings.speakerColors
         )
-        let nextRenderIdentityInput = RenderIdentityInput(
-            state: nextState,
-            activeLine: nextState.activeLine
-        )
+        let nextActiveLine = nextState.activeLine
+        let nextRenderIdentityInput = RenderIdentityInput(state: nextState, activeLine: nextActiveLine)
         let nextRenderIdentity: String
         if let lastRenderIdentityInput,
            let lastRenderIdentityValue,
@@ -175,6 +180,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         }
         let forceRender = nextRenderIdentity != lastRenderIdentityValue
         state = nextState
+        resolvedActiveLine = nextActiveLine
         lastRenderIdentityValue = nextRenderIdentity
         publishPlaybackState(
             durationMs: max(1, track?.durationMs ?? 0),
@@ -201,7 +207,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         if active || startReason != nil {
             let elapsed = uptime - lastRenderUptime
             let positionFrameDue = state.positionMs != lastRenderedPositionMs
-                && elapsed >= state.preferredFrameInterval
+                && elapsed >= state.preferredFrameInterval(activeLine: resolvedActiveLine)
             if forceRender || positionFrameDue || elapsed >= 1.0 {
                 renderFrame()
             }
@@ -469,8 +475,43 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
 #if DEBUG
+    func debugResetStaticBackgroundCache() {
+        staticBackgroundCacheKey = nil
+        staticBackgroundImage = nil
+        debugStaticBackgroundCacheHitCount = 0
+    }
+
+    func debugStaticBackgroundImage(
+        orientation: String,
+        backgroundMode: String,
+        solidColor: String = "#1e3a8a",
+        useCache: Bool = true
+    ) -> UIImage {
+        let previousState = state
+        let previousCacheDisabled = staticBackgroundCacheDisabled
+        defer {
+            state = previousState
+            staticBackgroundCacheDisabled = previousCacheDisabled
+        }
+
+        state.orientation = orientation
+        state.backgroundMode = AppSettings.normalizePipBackgroundMode(backgroundMode)
+        state.solidColor = solidColor
+        staticBackgroundCacheDisabled = !useCache
+
+        let size = state.renderSize
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        format.preferredRange = .standard
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            drawBackground(in: CGRect(origin: .zero, size: size), context: context.cgContext)
+        }
+    }
+
     func debugFrameImage(orientation: String, showArtwork: Bool, backgroundMode: String = AppSettings.pipBackgroundCover) -> UIImage {
         let previousState = state
+        let previousResolvedActiveLine = resolvedActiveLine
         let previousArtwork = artwork
         let previousBlurredArtwork = blurredArtwork
         let previousRenderedPositionMs = lastRenderedPositionMs
@@ -478,6 +519,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let previousRenderIdentityInput = lastRenderIdentityInput
         defer {
             state = previousState
+            resolvedActiveLine = previousResolvedActiveLine
             artwork = previousArtwork
             blurredArtwork = previousBlurredArtwork
             lastRenderedPositionMs = previousRenderedPositionMs
@@ -526,6 +568,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         state.alignment = "center"
         state.lyricsSizePercent = 150
         state.translationSizePercent = 100
+        resolvedActiveLine = state.activeLine
         lastRenderedPositionMs = nil
         lastRenderIdentityValue = nil
         lastRenderIdentityInput = nil
@@ -589,11 +632,56 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             UIColor.black.withAlphaComponent(0.72).setFill()
             UIRectFillUsingBlendMode(rect, .normal)
         case AppSettings.pipBackgroundGradient:
-            drawBlurGradientBackground(in: rect, context: context)
+            drawCachedStaticBackground(mode: AppSettings.pipBackgroundGradient, in: rect, context: context)
         case AppSettings.pipBackgroundSolid:
+            drawCachedStaticBackground(mode: AppSettings.pipBackgroundSolid, in: rect, context: context)
+        default:
+            drawBlurGradientBackground(in: rect, context: context)
+        }
+    }
+
+    private func drawCachedStaticBackground(mode: String, in rect: CGRect, context: CGContext) {
+#if DEBUG
+        if staticBackgroundCacheDisabled {
+            drawStaticBackground(mode: mode, in: rect, context: context)
+            return
+        }
+#endif
+        let key = StaticBackgroundCacheKey(
+            width: Int(rect.width.rounded()),
+            height: Int(rect.height.rounded()),
+            mode: mode,
+            solidColor: mode == AppSettings.pipBackgroundSolid ? state.solidColor : ""
+        )
+        if staticBackgroundCacheKey == key, let staticBackgroundImage {
+#if DEBUG
+            debugStaticBackgroundCacheHitCount += 1
+#endif
+            staticBackgroundImage.draw(in: rect)
+            return
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        format.preferredRange = .standard
+        let image = UIGraphicsImageRenderer(size: rect.size, format: format).image { rendererContext in
+            drawStaticBackground(
+                mode: mode,
+                in: CGRect(origin: .zero, size: rect.size),
+                context: rendererContext.cgContext
+            )
+        }
+        staticBackgroundCacheKey = key
+        staticBackgroundImage = image
+        image.draw(in: rect)
+    }
+
+    private func drawStaticBackground(mode: String, in rect: CGRect, context: CGContext) {
+        if mode == AppSettings.pipBackgroundSolid {
             (UIColor(hexString: state.solidColor) ?? UIColor(red: 0.06, green: 0.08, blue: 0.12, alpha: 1)).setFill()
             UIRectFill(rect)
-        default:
+        } else {
             drawBlurGradientBackground(in: rect, context: context)
         }
     }
@@ -672,7 +760,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     }
 
     private func drawLyrics(in lyricRect: CGRect) {
-        guard let active = state.activeLine else {
+        guard let active = resolvedActiveLine else {
             let hasStatusText = state.lines.isEmpty && !state.statusText.isEmpty
             let fontSize = max(18, lyricRect.width * 0.055 * (hasStatusText ? 0.85 : 1))
             let labelRect = CGRect(
@@ -724,7 +812,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             cursor = supplementRect.maxY
         }
 
-        if let next = state.nextLineText, cursor < lyricRect.maxY - nextSize {
+        if let next = state.nextLineText(after: resolvedActiveLine), cursor < lyricRect.maxY - nextSize {
             let nextRect = CGRect(x: lyricRect.minX, y: max(cursor + 4, lyricRect.maxY - nextSize * 1.75), width: lyricRect.width, height: nextSize * 1.45)
             drawText(
                 next,
@@ -1005,7 +1093,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private func makeSampleBuffer(pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
         guard let videoFormatDescription else { return nil }
         var timing = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: state.usesTimedKaraoke ? 30 : 12),
+            duration: CMTime(value: 1, timescale: state.usesTimedKaraoke(activeLine: resolvedActiveLine) ? 30 : 12),
             presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
             decodeTimeStamp: .invalid
         )
@@ -1125,7 +1213,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             return ActiveLine(line: line, index: activeLineIndex, progress: progress)
         }
 
-        var nextLineText: String? {
+        func nextLineText(after activeLine: ActiveLine?) -> String? {
             guard let activeLine else { return nil }
             let index = activeLine.index + 1
             guard lines.indices.contains(index) else { return nil }
@@ -1133,7 +1221,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             return value.isEmpty ? nil : value
         }
 
-        var usesTimedKaraoke: Bool {
+        func usesTimedKaraoke(activeLine: ActiveLine?) -> Bool {
             guard syncedLyricsKaraokeAnimationEnabled,
                   AppSettings.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity)
                     != AppSettings.karaokeDisplayLine,
@@ -1146,8 +1234,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             }
         }
 
-        var preferredFrameInterval: TimeInterval {
-            usesTimedKaraoke ? 1.0 / 30.0 : 1.0 / 12.0
+        func preferredFrameInterval(activeLine: ActiveLine?) -> TimeInterval {
+            usesTimedKaraoke(activeLine: activeLine) ? 1.0 / 30.0 : 1.0 / 12.0
         }
 
         func renderIdentity(for line: ActiveLine?) -> String {
@@ -1226,6 +1314,13 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             }
             return translation.isEmpty ? [pronunciation] : [pronunciation, translation]
         }
+    }
+
+    private struct StaticBackgroundCacheKey: Equatable {
+        let width: Int
+        let height: Int
+        let mode: String
+        let solidColor: String
     }
 
     private struct RenderIdentityInput {
