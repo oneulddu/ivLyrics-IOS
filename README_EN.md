@@ -38,6 +38,7 @@ ivLyrics iOS detects the song currently playing in Spotify and displays karaoke-
 - Main player and full lyrics page
 - Landscape player with a split lyrics layout
 - Open Spotify from the current track
+- Opportunistically prefetch parsed lyrics plus enabled translations and pronunciation for the next track, including while PIP remains active, when Spotify Web API user authorization is available
 - Clear lyric cache for the current track or all tracks
 
 ## Installation

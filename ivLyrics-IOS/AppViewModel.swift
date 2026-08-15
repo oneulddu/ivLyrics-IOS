@@ -42,6 +42,8 @@ struct TimelineLineRenderInput {
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    private static let spotifyQueuePrefetchEnabled = true
+    private static let spotifyQueuePrefetchDelayNs: UInt64 = 1_000_000_000
     private static let spotifyPlaybackRefreshBurstDelays: [UInt64] = [
         0,
         120_000_000,
@@ -284,6 +286,7 @@ final class AppViewModel: ObservableObject {
     private var pipActiveCancellable: AnyCancellable?
     private var spotifyMetadataHydrationTask: Task<Void, Never>?
     private var spotifyPlaybackRefreshBurstTask: Task<Void, Never>?
+    private var spotifyQueuePrefetchTask: Task<Void, Never>?
     private var youtubeBackgroundLoadTask: Task<Void, Never>?
     private var updateTask: Task<Void, Never>?
     private var timer: Timer?
@@ -293,6 +296,7 @@ final class AppViewModel: ObservableObject {
     private var cachedCurrentLyricsLanguageDetection: (payload: String, sourceLang: String)?
     private var audioRouteObserver: NSObjectProtocol?
     private var spotifyMetadataHydrationTrackId = ""
+    private var spotifyQueuePrefetchSourceKey = ""
     private var spotifyArtworkURLsByTrackId = BoundedLRUCache<String, URL>(capacity: 200)
     private var spotifyMetadataHydrationRetryAfter = BoundedLRUCache<String, Date>(capacity: 200)
     private var currentYouTubeBackgroundRequestKey = ""
@@ -916,6 +920,9 @@ final class AppViewModel: ObservableObject {
         guard UIApplication.shared.applicationState != .active,
               spotifyLivePolling else { return }
         if active {
+            if let currentTrack {
+                scheduleSpotifyQueuePrefetch(after: currentTrack)
+            }
             guard spotifyPollTask == nil else { return }
             guard spotifyAppRemotePlaybackService.connected || spotifyUserPlaybackService.connected else {
                 appendLog("spotify live: PIP active but Web API not connected; track updates paused")
@@ -931,6 +938,9 @@ final class AppViewModel: ObservableObject {
     private func suspendSpotifyLiveInBackground() {
         spotifyPollTask?.cancel()
         spotifyPollTask = nil
+        spotifyQueuePrefetchTask?.cancel()
+        spotifyQueuePrefetchTask = nil
+        spotifyQueuePrefetchSourceKey = ""
         suspendSpotifyAppRemoteInBackground()
         appendLog("spotify live: background connection suspended")
     }
@@ -948,7 +958,10 @@ final class AppViewModel: ObservableObject {
         spotifyMetadataHydrationTask = nil
         spotifyPlaybackRefreshBurstTask?.cancel()
         spotifyPlaybackRefreshBurstTask = nil
+        spotifyQueuePrefetchTask?.cancel()
+        spotifyQueuePrefetchTask = nil
         spotifyMetadataHydrationTrackId = ""
+        spotifyQueuePrefetchSourceKey = ""
         spotifyLivePolling = false
         spotifyAppRemoteConnected = false
         spotifyPlaybackInteractionGuard.reset()
@@ -2809,10 +2822,80 @@ final class AppViewModel: ObservableObject {
             lyricsResult = loadingResult
             status = loadLyricsIfNeeded ? .loading : .idle
             logs = Array(logs.suffix(40))
+            spotifyQueuePrefetchTask?.cancel()
+            spotifyQueuePrefetchTask = nil
+            scheduleSpotifyQueuePrefetch(after: incoming)
             guard loadLyricsIfNeeded else { return }
             let requestID = lyricsLoadRequestID
             loadTask = Task { [weak self] in
                 await self?.runLyricsPipeline(track: incoming, bypassCache: false, requestID: requestID)
+            }
+        }
+    }
+
+    private func scheduleSpotifyQueuePrefetch(after current: TrackSnapshot) {
+        guard Self.spotifyQueuePrefetchEnabled,
+              spotifyUserPlaybackService.connected,
+              current.hasUsableMetadata,
+              !current.isSpotifyDjSegment else {
+            return
+        }
+        let sourceKey = current.stableKey
+        guard spotifyQueuePrefetchSourceKey != sourceKey else { return }
+        let clientId = settings.spotifyClientId.trimmed
+        guard !clientId.isEmpty else { return }
+
+        spotifyQueuePrefetchTask?.cancel()
+        spotifyQueuePrefetchSourceKey = sourceKey
+        spotifyQueuePrefetchTask = Task(priority: .utility) { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: Self.spotifyQueuePrefetchDelayNs)
+                guard !Task.isCancelled, currentTrack?.stableKey == sourceKey else { return }
+                guard let nextTrack = await spotifyUserPlaybackService.nextQueuedTrack(clientId: clientId),
+                      !Task.isCancelled,
+                      currentTrack?.stableKey == sourceKey,
+                      nextTrack.stableKey != sourceKey,
+                      nextTrack.hasUsableMetadata,
+                      !nextTrack.isSpotifyDjSegment else {
+                    return
+                }
+
+                let settingsSnapshot = settings.snapshot
+                let loaded = try await lyricsRepository.loadLyrics(
+                    track: nextTrack,
+                    settings: settingsSnapshot
+                )
+                guard !Task.isCancelled,
+                      currentTrack?.stableKey == sourceKey,
+                      !loaded.result.lines.isEmpty else {
+                    return
+                }
+
+                let sourceLang = detectedSourceLang(lines: loaded.result.lines)
+                async let supplementResponse = aiRepository.loadSupplements(
+                    track: nextTrack,
+                    baseResult: loaded.result,
+                    settings: settingsSnapshot,
+                    sourceLangOverride: sourceLang,
+                    bypassCache: false,
+                    partialUpdate: nil
+                )
+                async let metadataResponse = aiRepository.loadMetadataTranslation(
+                    track: nextTrack,
+                    settings: settingsSnapshot,
+                    sourceLangOverride: sourceLang,
+                    bypassCache: false
+                )
+                _ = await (supplementResponse, metadataResponse)
+                guard !Task.isCancelled, currentTrack?.stableKey == sourceKey else { return }
+#if DEBUG
+                debugPrint("spotify queue prefetch ready: \(nextTrack.title) / \(nextTrack.artist)")
+#endif
+            } catch is CancellationError {
+                return
+            } catch {
+                return
             }
         }
     }

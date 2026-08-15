@@ -8,12 +8,103 @@ import Security
 import UIKit
 #endif
 
+enum SpotifyQueueResponseParser {
+    private struct QueueResponse: Decodable {
+        var queue: [QueueItem]
+    }
+
+    private struct QueueItem: Decodable {
+        var type: String
+        var id: String?
+        var name: String?
+        var artists: [Artist]?
+        var album: Album?
+        var durationMs: Int64?
+        var externalIds: ExternalIDs?
+
+        enum CodingKeys: String, CodingKey {
+            case type, id, name, artists, album
+            case durationMs = "duration_ms"
+            case externalIds = "external_ids"
+        }
+    }
+
+    private struct Artist: Decodable {
+        var name: String
+    }
+
+    private struct Album: Decodable {
+        var name: String?
+        var images: [Image]?
+    }
+
+    private struct Image: Decodable {
+        var url: String
+        var width: Int?
+    }
+
+    private struct ExternalIDs: Decodable {
+        var isrc: String?
+    }
+
+    static func nextTrack(from data: Data) -> TrackSnapshot? {
+        guard let item = try? JSONDecoder().decode(QueueResponse.self, from: data).queue.first,
+              item.type.caseInsensitiveCompare("track") == .orderedSame else {
+            return nil
+        }
+        let artists = (item.artists ?? [])
+            .map(\.name)
+            .map(\.trimmed)
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+        let artworkURL = (item.album?.images ?? [])
+            .sorted { ($0.width ?? 0) > ($1.width ?? 0) }
+            .compactMap { URL(string: $0.url) }
+            .first
+        let track = TrackSnapshot(
+            title: item.name ?? "",
+            artist: artists,
+            album: item.album?.name ?? "",
+            packageName: "spotify.web-api",
+            mediaId: item.id ?? "",
+            isrc: item.externalIds?.isrc ?? "",
+            durationMs: item.durationMs ?? 0,
+            positionMs: 0,
+            playing: false,
+            artworkURL: artworkURL
+        )
+        guard track.hasUsableMetadata, !track.isSpotifyDjSegment else { return nil }
+        return track
+    }
+}
+
+enum SpotifyQueueHTTPResponsePolicy {
+    enum Action: Equatable {
+        case parseBody
+        case noContent
+        case invalidateAccessToken
+        case disableForAuthorization
+        case ignore
+    }
+
+    static func action(for statusCode: Int) -> Action {
+        switch statusCode {
+        case 204: return .noContent
+        case 401: return .invalidateAccessToken
+        case 403: return .disableForAuthorization
+        case 200..<300: return .parseBody
+        default: return .ignore
+        }
+    }
+}
+
 @MainActor
 final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     private let authorizeEndpoint = "https://accounts.spotify.com/authorize"
     private let tokenEndpoint = "https://accounts.spotify.com/api/token"
     private let playbackStateEndpoint = "https://api.spotify.com/v1/me/player"
     private let currentlyPlayingEndpoint = "https://api.spotify.com/v1/me/player/currently-playing"
+    private let queueEndpoint = "https://api.spotify.com/v1/me/player/queue"
     private let redirectURI = SpotifyRedirectConfiguration.uri
     private let callbackScheme = SpotifyRedirectConfiguration.scheme
     private let scopes = [
@@ -32,6 +123,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     private var authenticationSession: ASWebAuthenticationSession?
     private var authorizationTask: Task<Void, Error>?
     private var authorizationClientId = ""
+    private var queueUnavailableForAuthorization = false
 
     override init() {
         super.init()
@@ -119,6 +211,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         defaults.set(safeClientId, forKey: clientIdKey)
         lastError = ""
         connected = true
+        queueUnavailableForAuthorization = false
     }
 
     func disconnect() {
@@ -127,6 +220,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         clearTokens()
         defaults.removeObject(forKey: clientIdKey)
         connected = false
+        queueUnavailableForAuthorization = false
     }
 
     func prepare(clientId: String) {
@@ -141,6 +235,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         clearTokens()
         defaults.set(safeClientId, forKey: clientIdKey)
         connected = false
+        queueUnavailableForAuthorization = false
     }
 
     private func clearTokens() {
@@ -161,6 +256,33 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         return try await requestPlaybackSnapshot(endpoint: currentlyPlayingEndpoint, token: token)
     }
 
+    func nextQueuedTrack(clientId: String) async -> TrackSnapshot? {
+        guard !queueUnavailableForAuthorization else { return nil }
+        prepare(clientId: clientId)
+        guard let token = try? await accessToken(clientId: clientId), !token.isEmpty else { return nil }
+        var request = URLRequest(url: URL(string: queueEndpoint)!)
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            return nil
+        }
+        switch SpotifyQueueHTTPResponsePolicy.action(for: http.statusCode) {
+        case .parseBody:
+            queueUnavailableForAuthorization = false
+            return SpotifyQueueResponseParser.nextTrack(from: data)
+        case .invalidateAccessToken:
+            invalidateAccessToken()
+            return nil
+        case .disableForAuthorization:
+            queueUnavailableForAuthorization = true
+            return nil
+        case .noContent, .ignore:
+            return nil
+        }
+    }
+
     private func requestPlaybackSnapshot(endpoint: String, token: String) async throws -> SpotifyPlaybackSnapshot? {
         var components = URLComponents(string: endpoint)!
         components.queryItems = [URLQueryItem(name: "additional_types", value: "track")]
@@ -172,9 +294,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         guard let http = response as? HTTPURLResponse else { return nil }
         if http.statusCode == 204 { return nil }
         if http.statusCode == 401 {
-            SecureStringStore.shared.remove(forKey: "spotify_user_access_token")
-            defaults.removeObject(forKey: "spotify_user_access_token")
-            defaults.removeObject(forKey: "spotify_user_expires_at_ms")
+            invalidateAccessToken()
             throw HTTPStatusError(statusCode: http.statusCode, message: String(data: data, encoding: .utf8) ?? "")
         }
         guard (200..<300).contains(http.statusCode) else {
@@ -264,6 +384,12 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
             return nil
         }
         return token
+    }
+
+    private func invalidateAccessToken() {
+        SecureStringStore.shared.remove(forKey: "spotify_user_access_token")
+        defaults.removeObject(forKey: "spotify_user_access_token")
+        defaults.removeObject(forKey: "spotify_user_expires_at_ms")
     }
 
     private var refreshToken: String {
@@ -383,6 +509,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         defaults.set(Double(Int64(Date().timeIntervalSince1970 * 1000) + expires * 1000), forKey: "spotify_user_expires_at_ms")
         defaults.set(stringValue(object["scope"]), forKey: "spotify_user_scope")
         connected = !access.isEmpty || !refresh.isEmpty
+        queueUnavailableForAuthorization = false
     }
 
     private func parseTrack(item: [String: Any], root: [String: Any]) -> TrackSnapshot? {
