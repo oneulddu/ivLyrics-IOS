@@ -6901,7 +6901,15 @@ private struct PictureInPictureLayoutDebugPreview: View {
         let backgroundMode = AppSettings.normalizePipBackgroundMode(
             environment["IVLYRICS_DEBUG_PIP_BACKGROUND"] ?? AppSettings.pipBackgroundCover
         )
-        let image = controller.debugFrameImage(orientation: orientation, showArtwork: showArtwork, backgroundMode: backgroundMode)
+        let vocalPartCount = Int(environment["IVLYRICS_DEBUG_PIP_PART_COUNT"] ?? "2") ?? 2
+        let translationText = environment["IVLYRICS_DEBUG_PIP_TRANSLATION"] ?? "Android PiP visual parity"
+        let image = controller.debugFrameImage(
+            orientation: orientation,
+            showArtwork: showArtwork,
+            backgroundMode: backgroundMode,
+            vocalPartCount: vocalPartCount,
+            translationText: translationText
+        )
         Image(uiImage: image)
             .resizable()
             .interpolation(.none)
