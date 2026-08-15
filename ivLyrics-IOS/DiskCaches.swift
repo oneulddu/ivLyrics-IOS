@@ -1,9 +1,17 @@
 import Foundation
 
 nonisolated enum LyricsDiskCachePolicy {
+    private final class PruneState: @unchecked Sendable {
+        var isScheduled = false
+        var lastCompletedUptime: TimeInterval?
+    }
+
     static let maxAgeMs: Int64 = 365 * 24 * 60 * 60 * 1000
     static let maxTotalBytes: Int64 = 10 * 1024 * 1024 * 1024
+    private static let pruneInterval: TimeInterval = 10 * 60
+    private static let pruneStateQueue = DispatchQueue(label: "ivlyrics.disk-cache.global-prune-state")
     private static let pruneQueue = DispatchQueue(label: "ivlyrics.disk-cache.global-prune")
+    private static let pruneState = PruneState()
 
     static var rootDirectory: URL {
         let cacheRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -12,36 +20,57 @@ nonisolated enum LyricsDiskCachePolicy {
     }
 
     static func prune() {
-        pruneQueue.sync {
-            let resourceKeys: Set<URLResourceKey> = [
-                .isRegularFileKey,
-                .fileSizeKey,
-                .contentModificationDateKey
-            ]
-            guard let enumerator = FileManager.default.enumerator(
-                at: rootDirectory,
-                includingPropertiesForKeys: Array(resourceKeys),
-                options: [.skipsHiddenFiles]
-            ) else { return }
-
-            let cutoff = Date().addingTimeInterval(-Double(maxAgeMs) / 1000)
-            var entries: [(url: URL, size: Int64, modified: Date)] = []
-            for case let url as URL in enumerator {
-                guard let values = try? url.resourceValues(forKeys: resourceKeys), values.isRegularFile == true else { continue }
-                let modified = values.contentModificationDate ?? .distantPast
-                if modified < cutoff {
-                    try? FileManager.default.removeItem(at: url)
-                    continue
-                }
-                entries.append((url, Int64(values.fileSize ?? 0), modified))
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        pruneStateQueue.async {
+            guard !pruneState.isScheduled else { return }
+            if let lastCompletedUptime = pruneState.lastCompletedUptime,
+               requestedAt - lastCompletedUptime < pruneInterval {
+                return
             }
+            pruneState.isScheduled = true
 
-            var totalBytes = entries.reduce(Int64(0)) { $0 + max(0, $1.size) }
-            guard totalBytes > maxTotalBytes else { return }
-            for entry in entries.sorted(by: { $0.modified < $1.modified }) where totalBytes > maxTotalBytes {
-                if (try? FileManager.default.removeItem(at: entry.url)) != nil {
-                    totalBytes -= max(0, entry.size)
+            pruneQueue.async {
+                performPrune()
+                let completedAt = ProcessInfo.processInfo.systemUptime
+                pruneStateQueue.async {
+                    pruneState.lastCompletedUptime = completedAt
+                    pruneState.isScheduled = false
                 }
+            }
+        }
+    }
+
+    private static func performPrune() {
+        let resourceKeys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .fileSizeKey,
+            .contentModificationDateKey
+        ]
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootDirectory,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let cutoff = Date().addingTimeInterval(-Double(maxAgeMs) / 1000)
+        var entries: [(url: URL, size: Int64, modified: Date)] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "json",
+                  let values = try? url.resourceValues(forKeys: resourceKeys),
+                  values.isRegularFile == true else { continue }
+            let modified = values.contentModificationDate ?? .distantPast
+            if modified < cutoff {
+                try? FileManager.default.removeItem(at: url)
+                continue
+            }
+            entries.append((url, Int64(values.fileSize ?? 0), modified))
+        }
+
+        var totalBytes = entries.reduce(Int64(0)) { $0 + max(0, $1.size) }
+        guard totalBytes > maxTotalBytes else { return }
+        for entry in entries.sorted(by: { $0.modified < $1.modified }) where totalBytes > maxTotalBytes {
+            if (try? FileManager.default.removeItem(at: entry.url)) != nil {
+                totalBytes -= max(0, entry.size)
             }
         }
     }
