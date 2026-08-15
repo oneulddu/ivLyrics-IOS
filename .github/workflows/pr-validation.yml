@@ -59,6 +59,28 @@ jobs:
       - name: Run core tests
         run: swift test --package-path LyricsProviderCore
 
+      - name: Run app tests
+        shell: bash
+        run: |
+          SIMULATOR_ID="$(
+            xcrun simctl list devices available --json |
+              ruby -rjson -e 'devices = JSON.parse(STDIN.read).fetch("devices").values.flatten; selected = devices.find { |device| device["isAvailable"] && device["name"].start_with?("iPhone") }; puts selected&.fetch("udid", "").to_s'
+          )"
+          if [[ -z "$SIMULATOR_ID" ]]; then
+            echo "No available iPhone simulator was found." >&2
+            exit 1
+          fi
+          xcrun simctl boot "$SIMULATOR_ID" 2>/dev/null || true
+          xcrun simctl bootstatus "$SIMULATOR_ID" -b
+          xcodebuild \
+            -project ivLyrics-IOS.xcodeproj \
+            -scheme ivLyrics-IOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/ivlyrics-tests-derived-data" \
+            -only-testing:ivLyrics-IOSTests \
+            test
+
       - name: Build iOS Simulator app
         run: |
           xcodebuild \
