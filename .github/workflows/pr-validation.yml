@@ -59,7 +59,7 @@ jobs:
       - name: Run core tests
         run: swift test --package-path LyricsProviderCore
 
-      - name: Run app tests
+      - name: Run app tests and build Simulator app
         shell: bash
         run: |
           SIMULATOR_ID="$(
@@ -80,15 +80,3 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/ivlyrics-tests-derived-data" \
             -only-testing:ivLyrics-IOSTests \
             test
-
-      - name: Build iOS Simulator app
-        run: |
-          xcodebuild \
-            -project ivLyrics-IOS.xcodeproj \
-            -scheme ivLyrics-IOS \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath "$RUNNER_TEMP/ivlyrics-derived-data" \
-            CODE_SIGNING_ALLOWED=NO \
-            build
