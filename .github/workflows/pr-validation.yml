@@ -16,10 +16,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Validate app and core
+  validate-core:
+    name: Validate translations and core
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate translations
+        run: python3 scripts/validate-i18n.py
+
+      - name: Run app contract tests
+        run: |
+          swiftc \
+            ivLyrics-IOS/LyricsProviderAppContracts.swift \
+            scripts/LyricsProviderAppContractsTests/main.swift \
+            -o "$RUNNER_TEMP/lyrics-provider-app-contracts-tests"
+          "$RUNNER_TEMP/lyrics-provider-app-contracts-tests"
+
+      - name: Run core tests
+        run: swift test --package-path LyricsProviderCore
+
+  validate-app:
+    name: Test app and build Simulator
+    runs-on: macos-26
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -45,20 +68,6 @@ jobs:
           sudo xcode-select -s "$SELECTED_XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Validate translations
-        run: python3 scripts/validate-i18n.py
-
-      - name: Run app contract tests
-        run: |
-          swiftc \
-            ivLyrics-IOS/LyricsProviderAppContracts.swift \
-            scripts/LyricsProviderAppContractsTests/main.swift \
-            -o "$RUNNER_TEMP/lyrics-provider-app-contracts-tests"
-          "$RUNNER_TEMP/lyrics-provider-app-contracts-tests"
-
-      - name: Run core tests
-        run: swift test --package-path LyricsProviderCore
-
       - name: Run app tests and build Simulator app
         shell: bash
         run: |
@@ -79,4 +88,5 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -derivedDataPath "$RUNNER_TEMP/ivlyrics-tests-derived-data" \
             -only-testing:ivLyrics-IOSTests \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             test
