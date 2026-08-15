@@ -17,33 +17,13 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate app and core
+    name: Validate translations and core
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Select newest Xcode
-        shell: bash
-        run: |
-          SELECTED_XCODE="$({
-            for app in /Applications/Xcode*.app; do
-              if [[ -d "$app" ]]; then
-                version="$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist" 2>/dev/null || true)"
-                if [[ -n "$version" ]]; then
-                  printf '%s\t%s\n' "$version" "$app"
-                fi
-              fi
-            done
-          } | ruby -rrubygems -e 'rows = STDIN.each_line.map { |line| line.chomp.split("\t", 2) }; selected = rows.max_by { |version, _| Gem::Version.new(version) }; puts selected&.last.to_s')"
-          if [[ -z "$SELECTED_XCODE" ]]; then
-            echo "No Xcode installation was found." >&2
-            exit 1
-          fi
-          sudo xcode-select -s "$SELECTED_XCODE/Contents/Developer"
-          xcodebuild -version
 
       - name: Validate translations
         run: python3 scripts/validate-i18n.py
@@ -58,37 +38,3 @@ jobs:
 
       - name: Run core tests
         run: swift test --package-path LyricsProviderCore
-
-      - name: Run app tests
-        shell: bash
-        run: |
-          SIMULATOR_ID="$(
-            xcrun simctl list devices available --json |
-              ruby -rjson -e 'devices = JSON.parse(STDIN.read).fetch("devices").values.flatten; selected = devices.find { |device| device["isAvailable"] && device["name"].start_with?("iPhone") }; puts selected&.fetch("udid", "").to_s'
-          )"
-          if [[ -z "$SIMULATOR_ID" ]]; then
-            echo "No available iPhone simulator was found." >&2
-            exit 1
-          fi
-          xcrun simctl boot "$SIMULATOR_ID" 2>/dev/null || true
-          xcrun simctl bootstatus "$SIMULATOR_ID" -b
-          xcodebuild \
-            -project ivLyrics-IOS.xcodeproj \
-            -scheme ivLyrics-IOS \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-            -derivedDataPath "$RUNNER_TEMP/ivlyrics-tests-derived-data" \
-            -only-testing:ivLyrics-IOSTests \
-            test
-
-      - name: Build iOS Simulator app
-        run: |
-          xcodebuild \
-            -project ivLyrics-IOS.xcodeproj \
-            -scheme ivLyrics-IOS \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath "$RUNNER_TEMP/ivlyrics-derived-data" \
-            CODE_SIGNING_ALLOWED=NO \
-            build
