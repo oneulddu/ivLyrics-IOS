@@ -15,9 +15,9 @@ public struct ProviderAllowedLyricsTypes: Codable, Hashable, Sendable {
     }
 
     /// Karaoke output needs either a synced/plain base for sync-data application or
-    /// Unison's native rich timing, so base participation is defined per provider.
+    /// native rich timing, so base participation is defined per provider.
     public func allowsParticipation(of provider: LyricsProviderID) -> Bool {
-        synced || plain || (provider == .unison && karaoke)
+        synced || plain || (provider.supportsNativeKaraoke && karaoke)
     }
 }
 
@@ -31,6 +31,8 @@ public struct LyricsProviderSettingsSnapshot: Sendable {
     public let policyVersion: Int
     public let credentialGeneration: UInt64
     public let allowedTypesByProvider: [LyricsProviderID: ProviderAllowedLyricsTypes]
+    public let preferLyricsTypeOverProviderOrder: Bool
+    public let preferSyncDataProvider: Bool
 
     public init(mode: LyricsProviderMode = .legacy,
                 enabledProviders: Set<LyricsProviderID> = Set(LyricsProviderID.defaultOrder),
@@ -39,7 +41,9 @@ public struct LyricsProviderSettingsSnapshot: Sendable {
                 remoteDisabledProviders: Set<LyricsProviderID> = [],
                 globalRemoteDisable: Bool = false, policyVersion: Int = 1,
                 credentialGeneration: UInt64 = 0,
-                allowedTypesByProvider: [LyricsProviderID: ProviderAllowedLyricsTypes] = [:]) {
+                allowedTypesByProvider: [LyricsProviderID: ProviderAllowedLyricsTypes] = [:],
+                preferLyricsTypeOverProviderOrder: Bool = true,
+                preferSyncDataProvider: Bool = true) {
         self.mode = mode
         self.enabledProviders = enabledProviders
         self.providerOrder = providerOrder
@@ -49,6 +53,8 @@ public struct LyricsProviderSettingsSnapshot: Sendable {
         self.policyVersion = policyVersion
         self.credentialGeneration = credentialGeneration
         self.allowedTypesByProvider = allowedTypesByProvider
+        self.preferLyricsTypeOverProviderOrder = preferLyricsTypeOverProviderOrder
+        self.preferSyncDataProvider = preferSyncDataProvider
     }
 
     public func allowedTypes(for provider: LyricsProviderID) -> ProviderAllowedLyricsTypes {
@@ -63,17 +69,23 @@ public struct EffectiveProviderPolicy: Codable, Hashable, Sendable {
     public let policyVersion: Int
     public let credentialGeneration: UInt64
     public let allowedTypesByProvider: [LyricsProviderID: ProviderAllowedLyricsTypes]
+    public let preferLyricsTypeOverProviderOrder: Bool
+    public let preferSyncDataProvider: Bool
 
     public init(effectiveMode: LyricsProviderMode, deniedProviders: Set<LyricsProviderID>,
                 orderedProviders: [LyricsProviderID], policyVersion: Int,
                 credentialGeneration: UInt64,
-                allowedTypesByProvider: [LyricsProviderID: ProviderAllowedLyricsTypes] = [:]) {
+                allowedTypesByProvider: [LyricsProviderID: ProviderAllowedLyricsTypes] = [:],
+                preferLyricsTypeOverProviderOrder: Bool = true,
+                preferSyncDataProvider: Bool = true) {
         self.effectiveMode = effectiveMode
         self.deniedProviders = deniedProviders
         self.orderedProviders = orderedProviders
         self.policyVersion = policyVersion
         self.credentialGeneration = credentialGeneration
         self.allowedTypesByProvider = allowedTypesByProvider
+        self.preferLyricsTypeOverProviderOrder = preferLyricsTypeOverProviderOrder
+        self.preferSyncDataProvider = preferSyncDataProvider
     }
 
     public func allows(_ provider: LyricsProviderID) -> Bool {
@@ -100,7 +112,9 @@ public enum LyricsProviderPolicyEvaluator {
                                        orderedProviders: ordered,
                                        policyVersion: snapshot.policyVersion,
                                        credentialGeneration: snapshot.credentialGeneration,
-                                       allowedTypesByProvider: snapshot.allowedTypesByProvider)
+                                       allowedTypesByProvider: snapshot.allowedTypesByProvider,
+                                       preferLyricsTypeOverProviderOrder: snapshot.preferLyricsTypeOverProviderOrder,
+                                       preferSyncDataProvider: snapshot.preferSyncDataProvider)
     }
 
     public static func canonicalProviderOrder(_ order: [LyricsProviderID],

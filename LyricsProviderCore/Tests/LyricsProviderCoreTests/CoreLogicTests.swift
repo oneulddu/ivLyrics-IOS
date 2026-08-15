@@ -23,7 +23,7 @@ final class CoreLogicTests: XCTestCase {
             enabledProviders: [.bugs, .genie, .lrclib], providerOrder: [.genie, .genie],
             deezerConfigured: false)
         let value = LyricsProviderPolicyEvaluator.evaluate(snapshot, multiProviderAuthorized: true)
-        XCTAssertEqual(value.orderedProviders, [.genie, .bugs, .lrclib])
+        XCTAssertEqual(value.orderedProviders, [.genie, .lrclib, .bugs])
     }
 
     func testDeezerNotConfiguredIsExcluded() {
@@ -46,6 +46,20 @@ final class CoreLogicTests: XCTestCase {
         let value = LyricsProviderPolicyEvaluator.evaluate(snapshot, multiProviderAuthorized: true)
         XCTAssertEqual(value.orderedProviders, [.unison])
         XCTAssertTrue(value.allowedTypes(for: .genie).synced)
+    }
+
+    func testNativeKaraokeProvidersParticipateWithKaraokeOnly() {
+        let snapshot = LyricsProviderSettingsSnapshot(
+            mode: .multiProvider,
+            enabledProviders: [.paxsenix, .lyricsplus],
+            providerOrder: [.paxsenix, .lyricsplus],
+            allowedTypesByProvider: [
+                .paxsenix: .init(karaoke: true, synced: false, plain: false),
+                .lyricsplus: .init(karaoke: true, synced: false, plain: false)
+            ]
+        )
+        let value = LyricsProviderPolicyEvaluator.evaluate(snapshot, multiProviderAuthorized: true)
+        XCTAssertEqual(value.orderedProviders, [.paxsenix, .lyricsplus])
     }
 
     func testRemotePolicySignatureAndExpiry() throws {
@@ -123,8 +137,8 @@ final class CoreLogicTests: XCTestCase {
             .musixmatch: .init(karaoke: true, synced: false, plain: true)
         ])
         XCTAssertNotEqual(allOn, restricted)
-        XCTAssertTrue(allOn.hasPrefix("musixmatch:111,"))
-        XCTAssertTrue(restricted.hasPrefix("musixmatch:101,"))
+        XCTAssertTrue(allOn.contains("musixmatch:111"))
+        XCTAssertTrue(restricted.contains("musixmatch:101"))
         let components = LyricsCacheKey.Components(schemaVersion: 3, effectiveMode: .multiProvider,
             normalizedTrackIdentity: "t", providerPolicyVersion: 1,
             enabledProviderSetCanonical: "lrclib",
@@ -142,6 +156,31 @@ final class CoreLogicTests: XCTestCase {
                 allowedProviderTypesCanonical: allOn,
                 credentialGeneration: 0)).encoded
         )
+    }
+
+    func testCacheKeySelectionPreferencesSeparatePoliciesAndRejectOldWireFormat() {
+        let typeFirst = LyricsCacheKey.selectionPreferencesCanonical(
+            preferLyricsTypeOverProviderOrder: true,
+            preferSyncDataProvider: true
+        )
+        let providerFirst = LyricsCacheKey.selectionPreferencesCanonical(
+            preferLyricsTypeOverProviderOrder: false,
+            preferSyncDataProvider: true
+        )
+        XCTAssertNotEqual(typeFirst, providerFirst)
+        let key = LyricsCacheKey(components: .init(
+            schemaVersion: 4,
+            effectiveMode: .multiProvider,
+            normalizedTrackIdentity: "t",
+            providerPolicyVersion: 1,
+            enabledProviderSetCanonical: "lrclib",
+            preferredProviderOrderCanonical: "lrclib",
+            allowedProviderTypesCanonical: "lrclib:111",
+            selectionPreferencesCanonical: providerFirst,
+            credentialGeneration: 0
+        ))
+        XCTAssertEqual(LyricsCacheKey(encoded: key.encoded)?.components, key.components)
+        XCTAssertNil(LyricsCacheKey(encoded: "3|multiProvider|t|1|lrclib|lrclib|lrclib:111|0"))
     }
 
     func testCacheEnvelopeCodableRoundTrip() throws {

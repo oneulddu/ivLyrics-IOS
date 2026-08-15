@@ -68,8 +68,13 @@ public actor LyricsProviderOrchestrator {
         try Task.checkCancellation()
         let started = Date()
         var diagnostics: [ProviderOutcomeDiagnostic] = []
+        let providerOrder = orderedProviders(for: request, policy: policy)
+        var preflightCandidate: ProviderLyrics?
 
-        if let id = request.syncDataSelectionContext?.lrclibID, id > 0,
+        if policy.preferSyncDataProvider,
+           providerOrder.first == .lrclib,
+           policy.allowedTypes(for: .lrclib).karaoke,
+           let id = request.syncDataSelectionContext?.lrclibID, id > 0,
            policy.allows(.lrclib), let provider = providers[.lrclib] {
             let attempt = await attempt(provider: provider, request: request,
                                         directTrackID: String(id), budgetStart: started)
@@ -77,42 +82,25 @@ public actor LyricsProviderOrchestrator {
             try Task.checkCancellation()
             if let lyrics = attempt.lyrics {
                 if let admittedLyrics = Self.admitted(lyrics, allowedTypes: policy.allowedTypes(for: .lrclib)) {
-                    diagnostics.append(selectedDiagnostic(admittedLyrics, elapsed: 0))
-                    return .init(chosen: admittedLyrics, diagnostics: diagnostics)
+                    preflightCandidate = admittedLyrics
                 }
-                diagnostics.append(.init(provider: .lrclib, outcome: .policyDisabled, elapsedMs: 0))
-            }
-        }
-
-        var heldPlain: ProviderLyrics?
-        if policy.allows(.musixmatch), let provider = providers[.musixmatch] {
-            let attempt = await attempt(provider: provider, request: request,
-                                        directTrackID: nil, budgetStart: started)
-            diagnostics.append(attempt.diagnostic)
-            try Task.checkCancellation()
-            if let lyrics = attempt.lyrics {
-                if let admittedLyrics = Self.admitted(lyrics, allowedTypes: policy.allowedTypes(for: .musixmatch)) {
-                    if admittedLyrics.timing == .lineSynced {
-                        diagnostics.append(selectedDiagnostic(admittedLyrics, elapsed: 0))
-                        return .init(chosen: admittedLyrics, diagnostics: diagnostics)
-                    }
-                    heldPlain = admittedLyrics
-                } else {
-                    diagnostics.append(.init(provider: .musixmatch, outcome: .policyDisabled, elapsedMs: 0))
+                if preflightCandidate == nil {
+                    diagnostics.append(.init(provider: .lrclib, outcome: .policyDisabled, elapsedMs: 0))
                 }
             }
         }
 
-        let fallbackIDs = policy.orderedProviders.filter {
-            $0 != .musixmatch && policy.allows($0) && providers[$0] != nil
+        let fallbackIDs = providerOrder.filter {
+            policy.allows($0) && providers[$0] != nil
+                && !($0 == .lrclib && preflightCandidate != nil)
         }
         let fallback = await collectFallback(ids: fallbackIDs, request: request,
                                              policy: policy, budgetStart: started)
         diagnostics.append(contentsOf: fallback.diagnostics)
-        var candidates = fallback.lyrics
-        if let heldPlain { candidates.append(heldPlain) }
         try Task.checkCancellation()
-        guard let chosen = stableSort(candidates, order: policy.orderedProviders).first else {
+        let candidates = fallback.lyrics + (preflightCandidate.map { [$0] } ?? [])
+        guard let chosen = stableSort(candidates, order: providerOrder,
+                                      preferLyricsType: policy.preferLyricsTypeOverProviderOrder).first else {
             throw LyricsProviderError.miss
         }
         diagnostics.append(selectedDiagnostic(chosen, elapsed: 0))
@@ -120,12 +108,20 @@ public actor LyricsProviderOrchestrator {
     }
 
     public nonisolated static func ranked(_ candidates: [ProviderLyrics],
-                                          providerOrder: [LyricsProviderID]) -> [ProviderLyrics] {
+                                          providerOrder: [LyricsProviderID],
+                                          preferLyricsType: Bool = true) -> [ProviderLyrics] {
         let index = Dictionary(uniqueKeysWithValues: providerOrder.enumerated().map { ($0.element, $0.offset) })
         return candidates.sorted { left, right in
-            if left.timing != right.timing { return left.timing == .lineSynced }
             let li = index[left.provider] ?? Int.max, ri = index[right.provider] ?? Int.max
-            if li != ri { return li < ri }
+            let leftTier = candidateTier(left)
+            let rightTier = candidateTier(right)
+            if preferLyricsType {
+                if leftTier != rightTier { return leftTier < rightTier }
+                if li != ri { return li < ri }
+            } else {
+                if li != ri { return li < ri }
+                if leftTier != rightTier { return leftTier < rightTier }
+            }
             if left.matchedCandidate.matchEvidence.totalScore != right.matchedCandidate.matchEvidence.totalScore {
                 return left.matchedCandidate.matchEvidence.totalScore > right.matchedCandidate.matchEvidence.totalScore
             }
@@ -135,19 +131,24 @@ public actor LyricsProviderOrchestrator {
         }
     }
 
-    private func stableSort(_ candidates: [ProviderLyrics], order: [LyricsProviderID]) -> [ProviderLyrics] {
-        Self.ranked(candidates, providerOrder: order)
+    private func stableSort(_ candidates: [ProviderLyrics], order: [LyricsProviderID],
+                            preferLyricsType: Bool) -> [ProviderLyrics] {
+        Self.ranked(candidates, providerOrder: order, preferLyricsType: preferLyricsType)
     }
 
     /// Applies the per-provider allowed lyric types to a fetched result before it can
     /// short-circuit, be held, or enter ranking. Synced results demote to plain when
-    /// only plain is allowed; Unison rich timing survives on karaoke permission alone.
+    /// only plain is allowed; native rich timing survives on karaoke permission alone.
     nonisolated static func admitted(_ lyrics: ProviderLyrics,
                                      allowedTypes: ProviderAllowedLyricsTypes) -> ProviderLyrics? {
         switch lyrics.timing {
         case .lineSynced:
+            if hasRichTiming(lyrics) {
+                if allowedTypes.karaoke { return lyrics }
+                if allowedTypes.synced { return strippedToSynced(lyrics) }
+                return allowedTypes.plain ? demotedToPlain(lyrics) : nil
+            }
             if allowedTypes.synced { return lyrics }
-            if lyrics.provider == .unison, allowedTypes.karaoke, hasRichTiming(lyrics) { return lyrics }
             return allowedTypes.plain ? demotedToPlain(lyrics) : nil
         case .plain:
             return allowedTypes.plain ? lyrics : nil
@@ -176,6 +177,26 @@ public actor LyricsProviderOrchestrator {
             matchedCandidate: lyrics.matchedCandidate,
             fetchedAt: lyrics.fetchedAt
         )
+    }
+
+    nonisolated static func strippedToSynced(_ lyrics: ProviderLyrics) -> ProviderLyrics {
+        ProviderLyrics(
+            provider: lyrics.provider,
+            providerTrackID: lyrics.providerTrackID,
+            lines: lyrics.lines.map {
+                ProviderLyricLine(startMs: $0.startMs, endMs: $0.endMs, text: $0.text,
+                                  syllables: [], speaker: $0.speaker, vocalParts: [])
+            },
+            timing: .lineSynced,
+            rawCopyright: lyrics.rawCopyright,
+            matchedCandidate: lyrics.matchedCandidate,
+            fetchedAt: lyrics.fetchedAt
+        )
+    }
+
+    private nonisolated static func candidateTier(_ lyrics: ProviderLyrics) -> Int {
+        if hasRichTiming(lyrics) { return 0 }
+        return lyrics.timing == .lineSynced ? 1 : 2
     }
 
     private struct Attempt: Sendable {
@@ -252,12 +273,24 @@ public actor LyricsProviderOrchestrator {
                         diagnostics.append(.init(provider: result.provider, outcome: .policyDisabled, elapsedMs: 0))
                     }
                 }
-                if let bestSynced = lyrics.filter({ $0.timing == .lineSynced }).min(by: {
-                    (ids.firstIndex(of: $0.provider) ?? .max) < (ids.firstIndex(of: $1.provider) ?? .max)
-                }), let bestIndex = ids.firstIndex(of: bestSynced.provider) {
+                if let best = Self.ranked(
+                    lyrics,
+                    providerOrder: ids,
+                    preferLyricsType: policy.preferLyricsTypeOverProviderOrder
+                ).first, let bestIndex = ids.firstIndex(of: best.provider) {
                     let unstarted = nextIndex < ids.count ? Array(ids[nextIndex...]) : []
                     let remaining = Array(pending) + unstarted
-                    if remaining.allSatisfy({ (ids.firstIndex(of: $0) ?? .max) > bestIndex }) {
+                    let allRemainingAreLowerPriority = remaining.allSatisfy {
+                        (ids.firstIndex(of: $0) ?? .max) > bestIndex
+                    }
+                    let noRemainingNativeKaraoke = remaining.allSatisfy {
+                        !$0.supportsNativeKaraoke || !policy.allowedTypes(for: $0).karaoke
+                    }
+                    let unbeatableByType = Self.candidateTier(best) == 0
+                        || (Self.candidateTier(best) == 1 && noRemainingNativeKaraoke)
+                    let shouldStop = allRemainingAreLowerPriority
+                        && (!policy.preferLyricsTypeOverProviderOrder || unbeatableByType)
+                    if shouldStop {
                         stoppedScheduling = true
                         nextIndex = ids.count
                         group.cancelAll()
@@ -267,6 +300,22 @@ public actor LyricsProviderOrchestrator {
             }
         }
         return (lyrics, diagnostics)
+    }
+
+    private func orderedProviders(
+        for request: LyricsProviderRequest,
+        policy: EffectiveProviderPolicy
+    ) -> [LyricsProviderID] {
+        var order = policy.orderedProviders
+        guard policy.preferSyncDataProvider,
+              let context = request.syncDataSelectionContext else { return order }
+        let preferred = context.preferredProviderID
+            ?? (context.lrclibID > 0 ? .lrclib : nil)
+        guard let preferred, policy.allows(preferred),
+              let index = order.firstIndex(of: preferred), index != 0 else { return order }
+        order.remove(at: index)
+        order.insert(preferred, at: 0)
+        return order
     }
 
     private func withTimeout<T: Sendable>(seconds: TimeInterval,
@@ -311,6 +360,7 @@ public actor LyricsProviderOrchestrator {
             sourceLineCharCounts: context.sourceLineCharCounts,
             sourceLyricsFingerprint: context.sourceLyricsFingerprint,
             preferredLyricsSource: context.preferredLyricsSource,
+            preferredProviderID: context.preferredProviderID,
             shouldNormalizeParentheticalLines: context.shouldNormalizeParentheticalLines,
             hasLrclibSource: context.hasLrclibSource,
             contextVersion: context.contextVersion)

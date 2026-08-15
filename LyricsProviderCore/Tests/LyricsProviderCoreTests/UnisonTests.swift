@@ -10,7 +10,7 @@ final class UnisonTests: XCTestCase {
 
     func testDefaultOrderAndProviderIdentity() {
         XCTAssertEqual(LyricsProviderID.defaultOrder,
-                       [.musixmatch, .deezer, .unison, .bugs, .genie, .lrclib])
+                       [.lrclib, .paxsenix, .lyricsplus, .unison, .musixmatch, .deezer, .bugs, .genie])
         XCTAssertEqual(UnisonProvider().id, .unison)
     }
 
@@ -324,7 +324,7 @@ final class UnisonTests: XCTestCase {
         }
         let ranked = LyricsProviderOrchestrator.ranked([lyrics(.bugs), lyrics(.unison), lyrics(.deezer)],
                                                         providerOrder: LyricsProviderID.defaultOrder)
-        XCTAssertEqual(ranked.map(\.provider), [.deezer, .unison, .bugs])
+        XCTAssertEqual(ranked.map(\.provider), [.unison, .deezer, .bugs])
     }
 
     private func makeRequest(artist: String = "Alpha", durationMs: Int64? = 180_000) -> LyricsProviderRequest {

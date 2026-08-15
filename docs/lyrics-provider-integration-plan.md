@@ -6,7 +6,7 @@
 >
 > 참조 구현: [`oneulddu/musicxmatch-api`](https://github.com/oneulddu/musicxmatch-api), 커밋 [`87eb9b446c568af206f80ef45ac4f5b1fcb98437`](https://github.com/oneulddu/musicxmatch-api/tree/87eb9b446c568af206f80ef45ac4f5b1fcb98437) (2026-07-11 확인)
 >
-> 문서 목적: Musixmatch, Deezer, Unison, Bugs, Genie 다섯 공급자를 안전하게 단계 도입하기 위한 구현 청사진과 검토 체크리스트
+> 문서 목적: 기존 가사 공급자와 다중 공급자 조회 경로를 하나의 정책 계약으로 안전하게 운영하기 위한 구현 청사진과 검토 체크리스트
 
 ## 1. 결론과 기본 결정
 
@@ -186,7 +186,7 @@ LyricsProviderOrchestrator
 
 ```swift
 enum LyricsProviderID: String, Codable, Hashable, Sendable {
-    case lrclib, musixmatch, deezer, unison, bugs, genie
+    case lrclib, paxsenix, lyricsplus, unison, musixmatch, deezer, bugs, genie
 }
 
 enum LyricsTiming: String, Codable, Hashable, Sendable {
@@ -387,32 +387,28 @@ protocol LyricsProvider: Sendable {
 6. cache miss이고 effective mode가 legacy면 현재 경로를 그대로 실행
    └─ sync-data lrclibId 직접 → LRCLIB 검색/점수 → sync-data 적용
 7. cache miss이고 effective mode가 multiProvider면
-   a. sync-data lrclibId가 있으면 LRCLIB 직접 조회 preflight
-      └─ 유효 결과면 현재 의미를 보존해 선택
-   b. Musixmatch 우선 단계
-      ├─ 채택 가능한 lineSynced → 선택
-      └─ plain 또는 오류 → plain 보류 후 fallback 진행
-   c. Deezer/Unison/Bugs/Genie/LRCLIB 검색을 동시성 2의 대기열로 수집
+   a. Sync 공급자 우선 옵션이 켜져 있으면 OpenDB 공급자 맵과 허용 유형을 확인
+      ├─ LRCLIB가 우선이면 karaoke 허용 시 lrclibId 직접 조회 preflight
+      └─ 다른 기존 공급자가 우선이면 해당 공급자를 대기열 선두로 이동
+   b. LRCLIB/Paxsenix/LyricsPlus/Unison/Musixmatch/Deezer/Bugs/Genie를 동시성 2의 대기열로 수집
       ├─ 각 완료 결과를 안정 순위 후보로 보관
       └─ 오류는 유형별 상태/회로 차단기에 반영
 8. bounded collection 종료 뒤 안정 정렬로 기본 가사 선택
 9. 선택된 기본 가사에 보관한 동일 sync-data 응답을 호환성 검사 후 적용
-   ├─ Unison rich TTML → 공급자 타이밍을 karaoke로 보존하고 적용 생략
-   └─ Unison LRC/plain 및 다른 공급자 → 기존 호환성 적용 규칙 수행
+   ├─ Paxsenix/LyricsPlus/Unison native rich timing → 공급자 타이밍을 karaoke로 보존하고 적용 생략
+   └─ line-synced/plain 결과 → 기존 호환성 적용 규칙 수행
 10. base provider + sync-data provenance로 UI label을 파생
 11. effectiveMode가 포함된 LyricsCacheEnvelope 저장 후 LyricsResult 반환
 ```
 
-참조 자동 모드는 Musixmatch 동기화 가사를 먼저 확정하고, 그렇지 않으면 설정된 Deezer와 Bugs·Genie를 함께 기다린 뒤 공급자 순서상 첫 동기화 결과, 없으면 첫 일반 결과를 고른다. iOS 구현은 Unison을 같은 공통 오케스트레이터에 추가하고 그대로 `join all`만 하지 않는다.
-
-**고정 기본 정책:** `.multiProvider`의 일반 공급자 순서는 `[musixmatch, deezer, unison, bugs, genie, lrclib]`이다. Deezer가 구성·활성화되지 않았으면 건너뛴다. `sync-data.lrclibId` 직접 조회는 이 순위보다 앞선 호환성 preflight이며, LRCLIB 검색은 fallback 순위의 마지막에 명시적으로 남는다. 신규 설치의 활성 공급자 기본값은 오직 `[lrclib]`이고, Unison을 포함한 다섯 비공식 공급자는 명시적 opt-in 전까지 비활성이다. 향후 사용자 설정이 순서를 바꿀 수는 있지만, 정규화된 유효 순서가 없으면 반드시 이 기본값으로 돌아간다.
+**고정 기본 정책:** `.multiProvider`의 기본 공급자 순서는 기존 방식의 공통 공급자를 먼저 둔 `[lrclib, paxsenix, lyricsplus, unison, musixmatch, deezer, bugs, genie]`이다. 신규 설치의 활성 공급자 기본값은 오직 `[lrclib]`이며 LRCLIB도 사용자가 끌 수 있다. 기존 저장 순서는 상대 순서를 보존하고 누락된 공급자만 결정적으로 삽입한다. Deezer는 자격 증명이 구성되지 않았으면 건너뛴다.
 
 fallback 공급자 작업은 최대 2개까지 동시에 실행한다. bounded collection은 모든 활성 fallback이 완료하거나 전체 제한 시간이 끝날 때 종료한다. 중간에 좋은 동기화 결과가 도착해도 **그보다 높은 공급자 순위의 작업이 실행 중이면 취소하지 않는다**. 높은 순위 작업이 모두 완료·실패·timeout됐고 현재 결과를 이길 수 있는 대기 작업이 없을 때만 낮은 순위 작업을 취소할 수 있다. URLSession 취소가 실제 요청까지 전파되는지 검증한다.
 
 수집 결과는 네트워크 도착 순서와 무관하게 다음 키로 오름차순/내림차순을 명시해 안정 정렬한다.
 
-1. `timing`: `lineSynced`가 `plain`보다 우선
-2. `providerOrderIndex`: 구성된 deduplicated 순서의 낮은 인덱스 우선
+1. 유형 우선 설정이 켜지면 native rich karaoke → `lineSynced` → `plain`, 같은 유형 안에서 공급자 순서
+2. 유형 우선 설정이 꺼지면 `providerOrderIndex`를 먼저 적용하고 공급자 안에서 가장 좋은 허용 유형 선택
 3. `MatchEvidence.totalScore`: 높은 점수 우선
 4. `providerTrackID`: 정규화된 문자열 오름차순
 
@@ -485,6 +481,9 @@ struct LyricsProviderSettingsSnapshot: Sendable {
     let globalRemoteDisable: Bool
     let policyVersion: Int
     let credentialGeneration: UInt64
+    let allowedTypesByProvider: [LyricsProviderID: ProviderAllowedLyricsTypes]
+    let preferLyricsTypeOverProviderOrder: Bool
+    let preferSyncDataProvider: Bool
 }
 ```
 
@@ -817,7 +816,7 @@ ATS 및 개인정보 명세 검토 대상 도메인은 최소 다음과 같다.
 - [ ] 신규 공급자 구현이 `LyricsResult`, 화면, `sync-data` 원문에 직접 의존하지 않고 LRCLIB 어댑터만 정규화 선택 문맥을 받는다.
 - [ ] 기존/신규 설치가 `.legacy`로 시작하고 현재 경로가 그대로 작동한다.
 - [ ] multiProvider에도 LRCLIB 직접 preflight와 검색 fallback이 명시돼 있다.
-- [ ] 유효 기본 순서가 `[musixmatch, deezer, unison, bugs, genie, lrclib]`이고 기본 활성 공급자는 LRCLIB뿐이다.
+- [ ] 유효 기본 순서가 `[lrclib, paxsenix, lyricsplus, unison, musixmatch, deezer, bugs, genie]`이고 기본 활성 공급자는 LRCLIB뿐이다.
 - [ ] 동기화/일반 가사와 `karaoke` 보강을 구분한다.
 - [ ] Unison rich TTML의 음절·화자·lead/background 보컬 파트가 앱 모델에 보존되고 `sync-data`가 덮어쓰지 않는다.
 - [ ] 매칭 정책이 순수 함수이며 점수 근거를 테스트할 수 있다.

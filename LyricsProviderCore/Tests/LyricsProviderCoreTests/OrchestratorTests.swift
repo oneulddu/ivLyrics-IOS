@@ -3,31 +3,48 @@ import XCTest
 @testable import LyricsProviderCore
 
 final class OrchestratorTests: XCTestCase {
-    func testDirectPreflightRunsBeforeMusixmatch() async throws {
+    func testDirectPreflightParticipatesInConfiguredRanking() async throws {
         let events = EventRecorder()
-        let lrclib = DirectFakeProvider(id: .lrclib, events: events, directResult: lyrics(.lrclib, "direct", .plain), fetchResult: nil)
+        let lrclib = DirectFakeProvider(id: .lrclib, events: events, directResult: lyrics(.lrclib, "direct", .lineSynced), fetchResult: nil)
         let musix = FakeProvider(id: .musixmatch) { _ in await events.add("musix"); return self.lyrics(.musixmatch, "m", .lineSynced) }
         let result = try await orchestrator([lrclib, musix]).fetch(request(contextID: 42), policy: policy([.musixmatch, .lrclib]))
         XCTAssertEqual(result.chosen.providerTrackID, "direct")
         let recorded = await events.values
-        XCTAssertEqual(recorded, ["direct"])
+        XCTAssertEqual(recorded, ["direct", "musix"])
     }
 
-    func testMusixmatchSyncedShortCircuitsFallback() async throws {
-        let calls = AtomicCounter()
-        let musix = FakeProvider(id: .musixmatch) { _ in self.lyrics(.musixmatch, "m", .lineSynced) }
-        let bugs = FakeProvider(id: .bugs) { _ in await calls.increment(); return self.lyrics(.bugs, "b", .lineSynced) }
-        let result = try await orchestrator([musix, bugs]).fetch(request(), policy: policy([.musixmatch, .bugs]))
-        XCTAssertEqual(result.chosen.provider, .musixmatch)
-        let callCount = await calls.value
-        XCTAssertEqual(callCount, 0)
+    func testNativeRichKaraokeCanBeatDirectPreflight() async throws {
+        let events = EventRecorder()
+        let lrclib = DirectFakeProvider(
+            id: .lrclib,
+            events: events,
+            directResult: lyrics(.lrclib, "direct", .lineSynced),
+            fetchResult: nil
+        )
+        let paxsenix = FakeProvider(id: .paxsenix) { _ in self.richLyrics(.paxsenix, "rich") }
+        let result = try await orchestrator([lrclib, paxsenix]).fetch(
+            request(contextID: 42),
+            policy: policy([.lrclib, .paxsenix])
+        )
+        XCTAssertEqual(result.chosen.provider, .paxsenix)
     }
 
-    func testMusixmatchPlainHeldForSyncedFallback() async throws {
+    func testTypeFirstPrefersLaterSyncedOverEarlierPlain() async throws {
         let musix = FakeProvider(id: .musixmatch) { _ in self.lyrics(.musixmatch, "m", .plain) }
         let bugs = FakeProvider(id: .bugs) { _ in self.lyrics(.bugs, "b", .lineSynced) }
         let result = try await orchestrator([musix, bugs]).fetch(request(), policy: policy([.musixmatch, .bugs]))
         XCTAssertEqual(result.chosen.provider, .bugs)
+    }
+
+    func testProviderFirstPrefersEarlierPlainOverLaterSynced() async throws {
+        let musix = FakeProvider(id: .musixmatch) { _ in self.lyrics(.musixmatch, "m", .plain) }
+        let bugs = FakeProvider(id: .bugs) { _ in self.lyrics(.bugs, "b", .lineSynced) }
+        let result = try await orchestrator([musix, bugs]).fetch(
+            request(),
+            policy: policy([.musixmatch, .bugs], preferLyricsType: false)
+        )
+        XCTAssertEqual(result.chosen.provider, .musixmatch)
+        XCTAssertEqual(result.chosen.timing, .plain)
     }
 
     func testSyncedDisallowedMusixmatchDemotesAndHoldsForSyncedFallback() async throws {
@@ -67,6 +84,65 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(result.chosen.provider, .unison)
         XCTAssertEqual(result.chosen.timing, .lineSynced)
         XCTAssertFalse(result.chosen.lines.flatMap(\.syllables).isEmpty)
+    }
+
+    func testAddedProvidersKaraokeOnlyPreserveRichTiming() async throws {
+        for providerID in [LyricsProviderID.paxsenix, .lyricsplus] {
+            let provider = FakeProvider(id: providerID) { _ in self.richLyrics(providerID, "rich") }
+            let types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [
+                providerID: .init(karaoke: true, synced: false, plain: false)
+            ]
+            let result = try await orchestrator([provider]).fetch(
+                request(), policy: policy([providerID], types: types)
+            )
+            XCTAssertEqual(result.chosen.provider, providerID)
+            XCTAssertTrue(LyricsProviderOrchestrator.hasRichTiming(result.chosen))
+        }
+    }
+
+    func testRichTimingIsStrippedWhenKaraokeIsDisabled() async throws {
+        let provider = FakeProvider(id: .paxsenix) { _ in self.richLyrics(.paxsenix, "rich") }
+        let types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [
+            .paxsenix: .init(karaoke: false, synced: true, plain: true)
+        ]
+        let result = try await orchestrator([provider]).fetch(
+            request(), policy: policy([.paxsenix], types: types)
+        )
+        XCTAssertEqual(result.chosen.timing, .lineSynced)
+        XCTAssertFalse(LyricsProviderOrchestrator.hasRichTiming(result.chosen))
+    }
+
+    func testSyncPriorityCanBeDisabledForDirectPreflight() async throws {
+        let events = EventRecorder()
+        let lrclib = DirectFakeProvider(
+            id: .lrclib,
+            events: events,
+            directResult: lyrics(.lrclib, "direct", .lineSynced),
+            fetchResult: lyrics(.lrclib, "search", .lineSynced)
+        )
+        let result = try await orchestrator([lrclib]).fetch(
+            request(contextID: 42),
+            policy: policy([.lrclib], preferSyncData: false)
+        )
+        XCTAssertEqual(result.chosen.providerTrackID, "search")
+        let recorded = await events.values
+        XCTAssertEqual(recorded, ["search"])
+    }
+
+    func testSyncPriorityReordersMatchingProviderOnlyWhenEnabled() async throws {
+        let bugs = FakeProvider(id: .bugs) { _ in self.lyrics(.bugs, "bugs", .plain) }
+        let lyricsPlus = FakeProvider(id: .lyricsplus) { _ in self.lyrics(.lyricsplus, "lyricsplus", .plain) }
+        let preferred = try await orchestrator([bugs, lyricsPlus]).fetch(
+            request(preferredProvider: .lyricsplus),
+            policy: policy([.bugs, .lyricsplus], preferLyricsType: false)
+        )
+        XCTAssertEqual(preferred.chosen.provider, .lyricsplus)
+
+        let normal = try await orchestrator([bugs, lyricsPlus]).fetch(
+            request(preferredProvider: .lyricsplus),
+            policy: policy([.bugs, .lyricsplus], preferLyricsType: false, preferSyncData: false)
+        )
+        XCTAssertEqual(normal.chosen.provider, .bugs)
     }
 
     func testProviderResultRejectedWhenNoBaseTypeAllowed() async throws {
@@ -178,13 +254,22 @@ final class OrchestratorTests: XCTestCase {
             configuration: .init(defaultProviderTimeout: 1, totalBudget: 3, fallbackConcurrencyLimit: 2))
     }
     private func policy(_ ids: [LyricsProviderID],
-                        types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [:]) -> EffectiveProviderPolicy {
+                        types: [LyricsProviderID: ProviderAllowedLyricsTypes] = [:],
+                        preferLyricsType: Bool = true,
+                        preferSyncData: Bool = true) -> EffectiveProviderPolicy {
         .init(effectiveMode: .multiProvider, deniedProviders: [], orderedProviders: ids,
-              policyVersion: 1, credentialGeneration: 0, allowedTypesByProvider: types)
+              policyVersion: 1, credentialGeneration: 0, allowedTypesByProvider: types,
+              preferLyricsTypeOverProviderOrder: preferLyricsType,
+              preferSyncDataProvider: preferSyncData)
     }
-    private func request(contextID: Int64 = 0) -> LyricsProviderRequest {
+    private func request(
+        contextID: Int64 = 0,
+        preferredProvider: LyricsProviderID? = nil
+    ) -> LyricsProviderRequest {
         LyricsProviderRequest(trackKey: "t", title: "Signal", artist: "Alpha", durationMs: 180_000,
-            syncDataSelectionContext: contextID > 0 ? .init(lrclibID: contextID) : nil)
+            syncDataSelectionContext: contextID > 0 || preferredProvider != nil
+                ? .init(lrclibID: contextID, preferredProviderID: preferredProvider)
+                : nil)
     }
     private func lyrics(_ provider: LyricsProviderID, _ id: String, _ timing: LyricsTiming,
                         score: Double = 0.9) -> ProviderLyrics {

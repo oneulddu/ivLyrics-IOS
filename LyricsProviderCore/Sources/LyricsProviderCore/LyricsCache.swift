@@ -11,6 +11,7 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
         public let enabledProviderSetCanonical: String
         public let preferredProviderOrderCanonical: String
         public let allowedProviderTypesCanonical: String
+        public let selectionPreferencesCanonical: String
         public let credentialGeneration: UInt64
 
         public init(schemaVersion: Int, effectiveMode: LyricsProviderMode,
@@ -18,6 +19,7 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
                     enabledProviderSetCanonical: String,
                     preferredProviderOrderCanonical: String,
                     allowedProviderTypesCanonical: String = "",
+                    selectionPreferencesCanonical: String = "type-first,sync-first",
                     credentialGeneration: UInt64) {
             self.schemaVersion = schemaVersion
             self.effectiveMode = effectiveMode
@@ -26,6 +28,7 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
             self.enabledProviderSetCanonical = enabledProviderSetCanonical
             self.preferredProviderOrderCanonical = preferredProviderOrderCanonical
             self.allowedProviderTypesCanonical = allowedProviderTypesCanonical
+            self.selectionPreferencesCanonical = selectionPreferencesCanonical
             self.credentialGeneration = credentialGeneration
         }
     }
@@ -37,21 +40,23 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
          components.normalizedTrackIdentity, String(components.providerPolicyVersion),
          components.enabledProviderSetCanonical, components.preferredProviderOrderCanonical,
          components.allowedProviderTypesCanonical,
+         components.selectionPreferencesCanonical,
          String(components.credentialGeneration)].map(Self.escape).joined(separator: String(Self.separator))
     }
 
     public init(components: Components) { self.components = components }
 
     public init?(encoded: String) {
-        guard let values = Self.splitEscaped(encoded), values.count == 8,
+        guard let values = Self.splitEscaped(encoded), values.count == 9,
               let schema = Int(values[0]),
               let mode = LyricsProviderMode(rawValue: values[1]),
-              let policy = Int(values[3]), let generation = UInt64(values[7]) else { return nil }
+              let policy = Int(values[3]), let generation = UInt64(values[8]) else { return nil }
         components = Components(schemaVersion: schema, effectiveMode: mode,
                                 normalizedTrackIdentity: values[2], providerPolicyVersion: policy,
                                 enabledProviderSetCanonical: values[4],
                                 preferredProviderOrderCanonical: values[5],
                                 allowedProviderTypesCanonical: values[6],
+                                selectionPreferencesCanonical: values[7],
                                 credentialGeneration: generation)
     }
 
@@ -80,6 +85,13 @@ public struct LyricsCacheKey: Codable, Hashable, Sendable, CustomStringConvertib
             let bits = "\(allowed.karaoke ? 1 : 0)\(allowed.synced ? 1 : 0)\(allowed.plain ? 1 : 0)"
             return "\(provider.rawValue):\(bits)"
         }.joined(separator: ",")
+    }
+
+    public static func selectionPreferencesCanonical(
+        preferLyricsTypeOverProviderOrder: Bool,
+        preferSyncDataProvider: Bool
+    ) -> String {
+        "\(preferLyricsTypeOverProviderOrder ? "type-first" : "provider-first"),\(preferSyncDataProvider ? "sync-first" : "normal-sync")"
     }
 
     private static func escape(_ value: String) -> String {
