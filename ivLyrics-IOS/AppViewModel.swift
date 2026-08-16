@@ -105,7 +105,10 @@ struct SpotifyWebAPIAuthorizationCoordinator {
     }
 
     mutating func deferRecoveryUntilActive() {
+        authorizationInFlight = false
+        authorizationSuppressed = false
         recoveryDeferredUntilActive = true
+        pollingFallbackRequested = false
     }
 
     mutating func consumeDeferredRecovery() -> Bool {
@@ -3168,6 +3171,11 @@ final class AppViewModel: ObservableObject {
                 )
             }
         case .authorize:
+            guard UIApplication.shared.applicationState == .active else {
+                spotifyWebAPIAuthorizationCoordinator.deferRecoveryUntilActive()
+                appendLog("spotify queue auth: authorization deferred until app becomes active")
+                return
+            }
             appendLog(
                 requiresPollingFallback
                     ? "spotify live: Web API authorization starting for playback fallback"
