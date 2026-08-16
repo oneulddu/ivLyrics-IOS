@@ -93,6 +93,23 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         )
     }
 
+    func testQueueAuthorizationRecoveryRevalidatesStoredAuthorization() {
+        var coordinator = SpotifyWebAPIAuthorizationCoordinator()
+
+        XCTAssertEqual(
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: false),
+            .validateExistingAuthorization
+        )
+        XCTAssertEqual(
+            coordinator.complete(succeeded: true, appRemoteConnected: true),
+            .keepAppRemote
+        )
+        XCTAssertEqual(
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: false),
+            .validateExistingAuthorization
+        )
+    }
+
     func testRefreshFailurePolicyDiscardsOnlyInvalidGrant() {
         XCTAssertEqual(
             SpotifyStoredAuthorizationRefreshFailurePolicy.action(

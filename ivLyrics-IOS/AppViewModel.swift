@@ -487,6 +487,15 @@ final class AppViewModel: ObservableObject {
         spotifyUserPlaybackService.onDiagnostic = { [weak self] message in
             self?.appendLog(message)
         }
+        spotifyUserPlaybackService.onAuthorizationRecoveryNeeded = { [weak self] in
+            guard let self else { return }
+            let clientId = settings.spotifyClientId.trimmed
+            guard !clientId.isEmpty else { return }
+            ensureSpotifyWebAPIAuthorization(
+                clientId: clientId,
+                requiresPollingFallback: !spotifyAppRemotePlaybackService.connected && spotifyLivePolling
+            )
+        }
         spotifyAppRemotePlaybackService.onConnectionChanged = { [weak self] connected in
             guard let self else { return }
             spotifyAppRemoteConnected = connected

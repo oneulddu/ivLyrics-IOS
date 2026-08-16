@@ -171,6 +171,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     @Published private(set) var authorizing = false
     @Published private(set) var lastError = ""
     var onDiagnostic: ((String) -> Void)?
+    var onAuthorizationRecoveryNeeded: (() -> Void)?
     var hasStoredAuthorization: Bool {
         validAccessToken() != nil || !refreshToken.isEmpty
     }
@@ -328,6 +329,18 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
             token = resolvedToken
         } catch {
             guard !Self.isCancellation(error) else { return nil }
+            let statusError = error as? HTTPStatusError
+            if SpotifyStoredAuthorizationRefreshFailurePolicy.action(
+                statusCode: statusError?.statusCode,
+                message: statusError?.message ?? ""
+            ) == .discardAndReauthorize {
+                clearTokens()
+                connected = false
+                queueUnavailableForAuthorization = false
+                onAuthorizationRecoveryNeeded?()
+                diagnostic("spotify queue prefetch stopped: stored authorization expired")
+                return nil
+            }
             diagnostic("spotify queue prefetch stopped: access token refresh failed")
             return nil
         }
@@ -368,6 +381,8 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
             }
         case .invalidateAccessToken:
             invalidateAccessToken()
+            connected = false
+            onAuthorizationRecoveryNeeded?()
             diagnostic("spotify queue prefetch stopped: queue authorization expired (HTTP 401)")
             return nil
         case .disableForAuthorization:
