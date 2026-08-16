@@ -43,6 +43,7 @@ final class SpotifyQueueResponseParserTests: XCTestCase {
     func testEmptyQueueReturnsNil() throws {
         let data = try XCTUnwrap(#"{"queue":[]}"#.data(using: .utf8))
 
+        XCTAssertEqual(SpotifyQueueResponseParser.parse(data), .emptyQueue)
         XCTAssertNil(SpotifyQueueResponseParser.nextTrack(from: data))
     }
 
@@ -63,12 +64,14 @@ final class SpotifyQueueResponseParserTests: XCTestCase {
             """.data(using: .utf8)
         )
 
+        XCTAssertEqual(SpotifyQueueResponseParser.parse(data), .unsupportedItem)
         XCTAssertNil(SpotifyQueueResponseParser.nextTrack(from: data))
     }
 
     func testMalformedImmediateItemReturnsNil() throws {
         let data = try XCTUnwrap(#"{"queue":[{"name":"Missing Type"}]}"#.data(using: .utf8))
 
+        XCTAssertEqual(SpotifyQueueResponseParser.parse(data), .malformedResponse)
         XCTAssertNil(SpotifyQueueResponseParser.nextTrack(from: data))
     }
 
@@ -88,6 +91,7 @@ final class SpotifyQueueResponseParserTests: XCTestCase {
             """.data(using: .utf8)
         )
 
+        XCTAssertEqual(SpotifyQueueResponseParser.parse(data), .unsupportedItem)
         XCTAssertNil(SpotifyQueueResponseParser.nextTrack(from: data))
     }
 
