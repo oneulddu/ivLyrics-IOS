@@ -145,6 +145,22 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.consumeDeferredRecovery())
     }
 
+    func testCancelClearsDeferredRecoveryAndInFlightAuthorization() {
+        var coordinator = SpotifyWebAPIAuthorizationCoordinator()
+
+        XCTAssertEqual(
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: true),
+            .authorize
+        )
+        coordinator.deferRecoveryUntilActive()
+        coordinator.cancel()
+
+        XCTAssertFalse(coordinator.authorizationInFlight)
+        XCTAssertFalse(coordinator.authorizationSuppressed)
+        XCTAssertFalse(coordinator.recoveryDeferredUntilActive)
+        XCTAssertFalse(coordinator.consumeDeferredRecovery())
+    }
+
     func testRefreshFailurePolicyDiscardsOnlyInvalidGrant() {
         XCTAssertEqual(
             SpotifyStoredAuthorizationRefreshFailurePolicy.action(

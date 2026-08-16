@@ -1,6 +1,12 @@
 import Foundation
 import LyricsProviderCore
 
+enum SpotifyMetadataTokenRecoveryPolicy {
+    static func shouldRecover(statusCode: Int) -> Bool {
+        statusCode == 401
+    }
+}
+
 actor LyricsRepository {
     private let lrclibBase = "https://lrclib.net/api"
     private let syncDataBase = "https://lyrics.api.ivl.is/lyrics/sync-data"
@@ -286,6 +292,7 @@ actor LyricsRepository {
     func loadLyrics(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
+        spotifyUserAccessToken: String = "",
         onCachedLyricsLoaded: CachedLyricsLoadedHandler? = nil,
         onProviderLoading: ProviderLoadingHandler? = nil,
         onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler? = nil,
@@ -299,6 +306,7 @@ actor LyricsRepository {
             return try await loadMultiProviderEntry(
                 track: track,
                 settings: settings,
+                spotifyUserAccessToken: spotifyUserAccessToken,
                 onCachedLyricsLoaded: onCachedLyricsLoaded,
                 onProviderLoading: onProviderLoading,
                 onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -308,6 +316,7 @@ actor LyricsRepository {
         return try await loadStandardLyrics(
             track: track,
             settings: settings,
+            spotifyUserAccessToken: spotifyUserAccessToken,
             onCachedLyricsLoaded: onCachedLyricsLoaded,
             onProviderLoading: onProviderLoading,
             onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -318,6 +327,7 @@ actor LyricsRepository {
     private func loadMultiProviderEntry(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
+        spotifyUserAccessToken: String,
         onCachedLyricsLoaded: CachedLyricsLoadedHandler? = nil,
         onProviderLoading: ProviderLoadingHandler? = nil,
         onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler? = nil,
@@ -344,6 +354,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        spotifyUserAccessToken: spotifyUserAccessToken,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -419,6 +430,7 @@ actor LyricsRepository {
                         return try await loadLyrics(
                             track: track,
                             settings: latestSettings,
+                            spotifyUserAccessToken: spotifyUserAccessToken,
                             onCachedLyricsLoaded: onCachedLyricsLoaded,
                             onProviderLoading: onProviderLoading,
                             onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -454,6 +466,7 @@ actor LyricsRepository {
                         return try await loadLyrics(
                             track: track,
                             settings: latestSettings,
+                            spotifyUserAccessToken: spotifyUserAccessToken,
                             onCachedLyricsLoaded: onCachedLyricsLoaded,
                             onProviderLoading: onProviderLoading,
                             onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -485,6 +498,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        spotifyUserAccessToken: spotifyUserAccessToken,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -513,6 +527,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        spotifyUserAccessToken: spotifyUserAccessToken,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -551,7 +566,12 @@ actor LyricsRepository {
             )
             spotifyMatch = nil
         } else {
-            spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
+            spotifyMatch = await fetchSpotifyIsrc(
+                track: track,
+                settings: settings,
+                userAccessToken: spotifyUserAccessToken,
+                log: log
+            ) { match in
                 await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
             }
         }
@@ -597,6 +617,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        spotifyUserAccessToken: spotifyUserAccessToken,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -644,6 +665,7 @@ actor LyricsRepository {
             return try await loadMultiProviderLyrics(
                 track: track,
                 settings: settings,
+                spotifyUserAccessToken: spotifyUserAccessToken,
                 policy: providerPolicy,
                 cacheKey: providerCacheKey,
                 syncData: syncData,
@@ -715,6 +737,7 @@ actor LyricsRepository {
     private func loadStandardLyrics(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
+        spotifyUserAccessToken: String,
         onCachedLyricsLoaded: CachedLyricsLoadedHandler?,
         onProviderLoading: ProviderLoadingHandler?,
         onSpotifyMetadataResolved: SpotifyMetadataResolvedHandler?,
@@ -745,6 +768,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        spotifyUserAccessToken: spotifyUserAccessToken,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -897,7 +921,12 @@ actor LyricsRepository {
             )
             spotifyMatch = nil
         } else {
-            spotifyMatch = await fetchSpotifyIsrc(track: track, settings: settings, log: log) { match in
+            spotifyMatch = await fetchSpotifyIsrc(
+                track: track,
+                settings: settings,
+                userAccessToken: spotifyUserAccessToken,
+                log: log
+            ) { match in
                 await publishResolvedMetadata(isrc: match.isrc, spotifyTrackId: match.spotifyId, artworkURL: match.artworkURL)
             }
         }
@@ -1590,24 +1619,54 @@ actor LyricsRepository {
         AppI18n.t(settings.uiLang, key)
     }
 
-    func resolveSpotifyTrack(_ rawTrackId: String, settings: AppSettings.Snapshot) async throws -> SpotifyResolvedTrack? {
+    func resolveSpotifyTrack(
+        _ rawTrackId: String,
+        settings: AppSettings.Snapshot,
+        spotifyUserAccessToken: String = ""
+    ) async throws -> SpotifyResolvedTrack? {
         let trackId = TrackSnapshot.extractSpotifyTrackId(rawTrackId)
         guard !trackId.isEmpty else { return nil }
         var logs: [String] = []
         func log(_ message: String) { logs.append(message) }
-        let token = try await getSpotifyAccessToken(forceRefresh: false, settings: settings, log: log)
+        var token = try await spotifyMetadataAccessToken(
+            userAccessToken: spotifyUserAccessToken,
+            settings: settings,
+            log: log
+        )
         guard !token.isEmpty else {
             log("spotify manual metadata: Spotify API credentials unavailable")
             return SpotifyResolvedTrack(spotifyId: trackId, title: "", artist: "", album: "", isrc: "", durationMs: 0, artworkURL: nil, logs: logs)
         }
-        guard let match = try await fetchSpotifyTrackById(
-            token: token,
-            trackId: trackId,
-            label: "manual metadata",
-            headers: ["Authorization": "Bearer \(token)"],
-            requireIsrc: false,
-            log: log
-        ) else {
+        let match: SpotifyTrackMatch?
+        do {
+            match = try await fetchSpotifyTrackById(
+                token: token,
+                trackId: trackId,
+                label: "manual metadata",
+                headers: ["Authorization": "Bearer \(token)"],
+                requireIsrc: false,
+                log: log
+            )
+        } catch let error as HTTPStatusError where isSpotifyTokenFailure(error) {
+            token = try await recoverSpotifyMetadataAccessToken(
+                rejectedToken: token,
+                userAccessToken: spotifyUserAccessToken,
+                settings: settings,
+                log: log
+            )
+            guard !token.isEmpty else {
+                return SpotifyResolvedTrack(spotifyId: trackId, title: "", artist: "", album: "", isrc: "", durationMs: 0, artworkURL: nil, logs: logs)
+            }
+            match = try await fetchSpotifyTrackById(
+                token: token,
+                trackId: trackId,
+                label: "manual metadata after fallback",
+                headers: ["Authorization": "Bearer \(token)"],
+                requireIsrc: false,
+                log: log
+            )
+        }
+        guard let match else {
             return nil
         }
         return SpotifyResolvedTrack(
@@ -1713,7 +1772,11 @@ actor LyricsRepository {
         return best
     }
 
-    func hydrateSpotifyTrackMetadata(track: TrackSnapshot, settings: AppSettings.Snapshot) async -> SpotifyTrackHydration {
+    func hydrateSpotifyTrackMetadata(
+        track: TrackSnapshot,
+        settings: AppSettings.Snapshot,
+        spotifyUserAccessToken: String = ""
+    ) async -> SpotifyTrackHydration {
         var logs: [String] = []
         func log(_ message: String) {
             logs.append(message)
@@ -1724,7 +1787,11 @@ actor LyricsRepository {
             return SpotifyTrackHydration(track: track, spotifyArtworkURL: nil, logs: logs)
         }
         do {
-            var token = try await getSpotifyAccessToken(forceRefresh: false, settings: settings, log: log)
+            var token = try await spotifyMetadataAccessToken(
+                userAccessToken: spotifyUserAccessToken,
+                settings: settings,
+                log: log
+            )
             guard !token.isEmpty else {
                 log("spotify live metadata: token unavailable")
                 return SpotifyTrackHydration(track: track, spotifyArtworkURL: nil, logs: logs)
@@ -1741,8 +1808,12 @@ actor LyricsRepository {
                 )
             } catch let error as HTTPStatusError where isSpotifyTokenFailure(error) {
                 log("spotify token: rejected by live metadata request (\(error.localizedDescription)), refreshing")
-                invalidateSpotifyToken()
-                token = try await getSpotifyAccessToken(forceRefresh: true, settings: settings, log: log)
+                token = try await recoverSpotifyMetadataAccessToken(
+                    rejectedToken: token,
+                    userAccessToken: spotifyUserAccessToken,
+                    settings: settings,
+                    log: log
+                )
                 guard !token.isEmpty else {
                     log("spotify live metadata: token refresh failed")
                     return SpotifyTrackHydration(track: track, spotifyArtworkURL: nil, logs: logs)
@@ -2298,6 +2369,7 @@ actor LyricsRepository {
     private func fetchSpotifyIsrc(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
+        userAccessToken: String,
         log: (String) -> Void,
         onResolved: ((SpotifyTrackMatch) async -> Void)? = nil
     ) async -> SpotifyTrackMatch? {
@@ -2306,7 +2378,11 @@ actor LyricsRepository {
             return nil
         }
         do {
-            var token = try await getSpotifyAccessToken(forceRefresh: false, settings: settings, log: log)
+            var token = try await spotifyMetadataAccessToken(
+                userAccessToken: userAccessToken,
+                settings: settings,
+                log: log
+            )
             guard !token.isEmpty else {
                 log("spotify token: unavailable; configure Spotify API client id/secret in settings")
                 return nil
@@ -2325,8 +2401,12 @@ actor LyricsRepository {
                     }
                 } catch let error as HTTPStatusError where isSpotifyTokenFailure(error) {
                     log("spotify token: rejected by direct track request (\(error.localizedDescription)), refreshing")
-                    invalidateSpotifyToken()
-                    token = try await getSpotifyAccessToken(forceRefresh: true, settings: settings, log: log)
+                    token = try await recoverSpotifyMetadataAccessToken(
+                        rejectedToken: token,
+                        userAccessToken: userAccessToken,
+                        settings: settings,
+                        log: log
+                    )
                     if !token.isEmpty,
                        var direct = try await fetchSpotifyTrackById(token: token, trackId: track.trackId, log: log),
                        !direct.isrc.isEmpty {
@@ -2346,8 +2426,12 @@ actor LyricsRepository {
                 matches = try await searchSpotifyCandidates(track: track, token: token, log: log)
             } catch let error as HTTPStatusError where isSpotifyTokenFailure(error) {
                 log("spotify token: rejected by Spotify API (\(error.localizedDescription)), refreshing")
-                invalidateSpotifyToken()
-                token = try await getSpotifyAccessToken(forceRefresh: true, settings: settings, log: log)
+                token = try await recoverSpotifyMetadataAccessToken(
+                    rejectedToken: token,
+                    userAccessToken: userAccessToken,
+                    settings: settings,
+                    log: log
+                )
                 guard !token.isEmpty else {
                     log("spotify token: refresh failed")
                     return nil
@@ -2478,6 +2562,34 @@ actor LyricsRepository {
         }
     }
 
+    private func spotifyMetadataAccessToken(
+        userAccessToken: String,
+        settings: AppSettings.Snapshot,
+        log: (String) -> Void
+    ) async throws -> String {
+        let userToken = userAccessToken.trimmed
+        if !userToken.isEmpty {
+            log("spotify token: user OAuth token reused for metadata")
+            return userToken
+        }
+        return try await getSpotifyAccessToken(forceRefresh: false, settings: settings, log: log)
+    }
+
+    private func recoverSpotifyMetadataAccessToken(
+        rejectedToken: String,
+        userAccessToken: String,
+        settings: AppSettings.Snapshot,
+        log: (String) -> Void
+    ) async throws -> String {
+        let userToken = userAccessToken.trimmed
+        if !userToken.isEmpty, rejectedToken == userToken {
+            log("spotify token: user OAuth token rejected; trying optional Client Secret fallback")
+            return try await getSpotifyAccessToken(forceRefresh: false, settings: settings, log: log)
+        }
+        invalidateSpotifyToken()
+        return try await getSpotifyAccessToken(forceRefresh: true, settings: settings, log: log)
+    }
+
     private func requestSpotifyClientCredentialsToken(credentials: SpotifyCredentials, log: (String) -> Void) async throws -> SpotifyTokenResponse {
         log("spotify token: requesting with Spotify API credentials")
         let basic = Data("\(credentials.clientId):\(credentials.clientSecret)".utf8).base64EncodedString()
@@ -2526,7 +2638,7 @@ actor LyricsRepository {
     }
 
     private func isSpotifyTokenFailure(_ error: HTTPStatusError) -> Bool {
-        error.statusCode == 401 || error.statusCode == 403
+        SpotifyMetadataTokenRecoveryPolicy.shouldRecover(statusCode: error.statusCode)
     }
 
     private func scoreCandidate(track: TrackSnapshot, candidate: LrclibCandidate, hasSyncData: Bool) -> Double {
@@ -3147,6 +3259,7 @@ actor LyricsRepository {
     private func loadMultiProviderLyrics(
         track: TrackSnapshot,
         settings: AppSettings.Snapshot,
+        spotifyUserAccessToken: String,
         policy: EffectiveProviderPolicy,
         cacheKey: LyricsCacheKey,
         syncData: SyncDataResult?,
@@ -3224,6 +3337,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: latestSettings,
+                        spotifyUserAccessToken: spotifyUserAccessToken,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -3332,6 +3446,7 @@ actor LyricsRepository {
                     return try await loadLyrics(
                         track: track,
                         settings: finalSettings,
+                        spotifyUserAccessToken: spotifyUserAccessToken,
                         onCachedLyricsLoaded: onCachedLyricsLoaded,
                         onProviderLoading: onProviderLoading,
                         onSpotifyMetadataResolved: onSpotifyMetadataResolved,
@@ -3354,6 +3469,7 @@ actor LyricsRepository {
                 return try await loadLyrics(
                     track: track,
                     settings: latestSettings,
+                    spotifyUserAccessToken: spotifyUserAccessToken,
                     onCachedLyricsLoaded: onCachedLyricsLoaded,
                     onProviderLoading: onProviderLoading,
                     onSpotifyMetadataResolved: onSpotifyMetadataResolved,

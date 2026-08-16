@@ -7794,7 +7794,7 @@ struct InitialSetupView: View {
                 .foregroundStyle(.green)
             Text(settings.t("spotify.live.title"))
                 .font(.pretendard(21, weight: .bold))
-            Text(settings.t("spotify.live.desc_ios"))
+            Text(settings.t("spotify.live.desc_option"))
                 .font(.pretendard(14))
                 .foregroundStyle(.white.opacity(0.74))
                 .multilineTextAlignment(.center)
@@ -7817,7 +7817,7 @@ struct InitialSetupView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(settings.t("spotify.api.title"))
                 .font(.pretendard(21, weight: .bold))
-            Text(settings.t("spotify.api.desc_ios"))
+            Text(settings.t("spotify.api.desc_option"))
                 .font(.pretendard(14))
                 .foregroundStyle(.white.opacity(0.74))
             TextField(settings.t("field.spotify_client_id"), text: $settings.spotifyClientId)
@@ -7828,6 +7828,11 @@ struct InitialSetupView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .textFieldStyle(PlayerTextFieldStyle())
+            Text(settings.t("field.spotify_client_secret_role"))
+                .font(.pretendard(12))
+                .foregroundStyle(.white.opacity(0.56))
+                .fixedSize(horizontal: false, vertical: true)
+            spotifyWebAPIToggleCard
             LabeledContent(settings.t("field.redirect_uri")) {
                 Text(SpotifyRedirectConfiguration.uri)
                     .font(.caption.monospaced())
@@ -7856,6 +7861,49 @@ struct InitialSetupView: View {
             return settings.t("spotify.status_checking")
         }
         return model.onboardingStep >= 2 ? settings.t("button.save_start") : settings.t("button.next")
+    }
+
+    private var spotifyWebAPIToggleCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(settings.t("setting.spotify_web_api"))
+                        .font(.pretendard(15, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text(settings.t("setting.spotify_web_api_desc"))
+                        .font(.pretendard(13))
+                        .foregroundStyle(.white.opacity(0.66))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Toggle(settings.t("setting.spotify_web_api"), isOn: spotifyWebAPIEnabledBinding)
+                    .labelsHidden()
+                    .fixedSize()
+            }
+            Text(spotifyWebAPIStatusText)
+                .font(.pretendard(12))
+                .foregroundStyle(.white.opacity(0.56))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var spotifyWebAPIEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.spotifyWebAPIEnabled },
+            set: { model.setSpotifyWebAPIEnabled($0) }
+        )
+    }
+
+    private var spotifyWebAPIStatusText: String {
+        guard settings.spotifyWebAPIEnabled else {
+            return settings.t("setting.spotify_web_api_status_off")
+        }
+        return model.spotifyWebAPIConnected
+            ? settings.t("setting.spotify_web_api_status_connected")
+            : settings.t("setting.spotify_web_api_status_pending")
     }
 
     private func handleNext() {
@@ -7922,11 +7970,11 @@ private struct SpotifySetupInstructionsPanel: View {
     }
 
     private var stepTitle: String {
-        settings.t("spotify.step\(step).title")
+        return settings.t("spotify.step\(step).title")
     }
 
     private var stepDescription: String {
-        settings.t("spotify.step\(step).desc")
+        return settings.t("spotify.step\(step).desc")
     }
 
     private var copyItem: (title: String, value: String)? {
@@ -9190,14 +9238,14 @@ struct SettingsView: View {
                 }
             }
 
-            settingsSection(settings.t("section.spotify_api")) {
+            settingsSection(settings.t("section.spotify_api"), description: settings.t("section.spotify_api_option_desc")) {
                 settingsCard(settings.t("section.spotify_api")) {
                     SpotifySetupInstructionsPanel()
                 }
                 settingsCard(settings.t("field.spotify_client_id")) {
                     settingsTextField(settings.t("field.spotify_client_id"), text: $settings.spotifyClientId)
                 }
-                settingsCard(settings.t("field.spotify_client_secret")) {
+                settingsCard(settings.t("field.spotify_client_secret"), description: settings.t("field.spotify_client_secret_role")) {
                     SecureField(settings.t("field.spotify_client_secret"), text: $settings.spotifyClientSecret)
                         .textFieldStyle(PlayerTextFieldStyle())
                 }
@@ -9207,6 +9255,15 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                         .foregroundStyle(.white.opacity(0.72))
                 }
+                settingsToggleCard(
+                    settings.t("setting.spotify_web_api"),
+                    description: settings.t("setting.spotify_web_api_desc"),
+                    binding: spotifyWebAPIEnabledBinding
+                )
+                Text(spotifyWebAPIStatusText)
+                    .font(.pretendard(13))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .fixedSize(horizontal: false, vertical: true)
                 settingsCard(settings.t("field.live_source")) {
                     Text(model.spotifyAppRemoteConnected ? settings.t("spotify.source.app_remote") : (model.spotifyLivePolling ? settings.t("spotify.source.web_api") : settings.t("spotify.source.off")))
                         .foregroundStyle(.white.opacity(0.72))
@@ -9223,10 +9280,15 @@ struct SettingsView: View {
                     model.validateSpotifyApiCredentials(reloadOnChange: true)
                 }
                 .disabled(model.spotifyCredentialsValidationInFlight)
-                settingsActionButton(settings.t("spotify.disconnect_oauth"), role: .destructive) {
-                    model.disconnectSpotifyUser()
+                if model.spotifyWebAPIConnected {
+                    settingsActionButton(settings.t("spotify.disconnect_oauth"), role: .destructive) {
+                        model.disconnectSpotifyUser()
+                    }
+                    Text(settings.t("spotify.disconnect_oauth_desc"))
+                        .font(.pretendard(12))
+                        .foregroundStyle(.white.opacity(0.52))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .disabled(!model.spotifyUserConnected)
             }
 
             settingsSection(settings.t("lyrics.tab.sync"), description: settings.t("lyrics.global_sync.help")) {
@@ -9852,6 +9914,22 @@ struct SettingsView: View {
 
     private func settingsSavedBinding(_ keyPath: ReferenceWritableKeyPath<AppSettings, Bool>) -> Binding<Bool> {
         boolSettingBinding(keyPath, toastKey: "toast.settings_saved")
+    }
+
+    private var spotifyWebAPIEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.spotifyWebAPIEnabled },
+            set: { model.setSpotifyWebAPIEnabled($0) }
+        )
+    }
+
+    private var spotifyWebAPIStatusText: String {
+        guard settings.spotifyWebAPIEnabled else {
+            return settings.t("setting.spotify_web_api_status_off")
+        }
+        return model.spotifyWebAPIConnected
+            ? settings.t("setting.spotify_web_api_status_connected")
+            : settings.t("setting.spotify_web_api_status_pending")
     }
 
     private func boolSettingBinding(_ keyPath: ReferenceWritableKeyPath<AppSettings, Bool>, toastKey: String) -> Binding<Bool> {

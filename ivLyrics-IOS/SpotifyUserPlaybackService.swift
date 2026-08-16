@@ -317,6 +317,11 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         return try await requestPlaybackSnapshot(endpoint: currentlyPlayingEndpoint, token: token)
     }
 
+    func metadataAccessToken(clientId: String) async throws -> String? {
+        prepare(clientId: clientId)
+        return try await accessToken(clientId: clientId)
+    }
+
     func nextQueuedTrack(clientId: String) async -> TrackSnapshot? {
         guard !queueUnavailableForAuthorization else { return nil }
         prepare(clientId: clientId)
