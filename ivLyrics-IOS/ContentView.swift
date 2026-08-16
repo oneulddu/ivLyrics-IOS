@@ -7970,16 +7970,10 @@ private struct SpotifySetupInstructionsPanel: View {
     }
 
     private var stepTitle: String {
-        if step >= 4 {
-            return settings.t("spotify.setup.step\(step).title")
-        }
         return settings.t("spotify.step\(step).title")
     }
 
     private var stepDescription: String {
-        if step >= 4 {
-            return settings.t("spotify.setup.step\(step).desc")
-        }
         return settings.t("spotify.step\(step).desc")
     }
 
