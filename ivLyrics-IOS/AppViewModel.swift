@@ -44,7 +44,7 @@ struct TimelineLineRenderInput {
 struct SpotifyWebAPIAuthorizationCoordinator {
     enum RequestAction: Equatable {
         case authorize
-        case useExistingAuthorization
+        case validateExistingAuthorization
         case waitForInFlightAuthorization
         case suppressedAfterFailure
     }
@@ -68,8 +68,9 @@ struct SpotifyWebAPIAuthorizationCoordinator {
             return .waitForInFlightAuthorization
         }
         if webAPIConnected {
+            authorizationInFlight = true
             pollingFallbackRequested = requiresPollingFallback
-            return .useExistingAuthorization
+            return .validateExistingAuthorization
         }
         guard !authorizationSuppressed else { return .suppressedAfterFailure }
         authorizationInFlight = true
@@ -97,6 +98,12 @@ struct SpotifyWebAPIAuthorizationCoordinator {
 
     mutating func resetForUserInitiatedConnection() {
         guard !authorizationInFlight else { return }
+        authorizationSuppressed = false
+        pollingFallbackRequested = false
+    }
+
+    mutating func retryAfterInvalidStoredAuthorization() {
+        authorizationInFlight = false
         authorizationSuppressed = false
         pollingFallbackRequested = false
     }
@@ -3061,12 +3068,35 @@ final class AppViewModel: ObservableObject {
             requiresPollingFallback: requiresPollingFallback
         )
         switch action {
-        case .useExistingAuthorization:
-            finishSpotifyWebAPIAuthorization(
-                succeeded: true,
-                error: nil,
-                didRequestAuthorization: false
-            )
+        case .validateExistingAuthorization:
+            spotifyWebAPIAuthorizationTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let validation = await spotifyUserPlaybackService.validateStoredAuthorization(
+                    clientId: clientId
+                )
+                guard !Task.isCancelled else { return }
+                spotifyWebAPIAuthorizationTask = nil
+                switch validation {
+                case .reusable:
+                    finishSpotifyWebAPIAuthorization(
+                        succeeded: true,
+                        error: nil,
+                        didRequestAuthorization: false
+                    )
+                case .requiresInteractiveAuthorization:
+                    spotifyWebAPIAuthorizationCoordinator.retryAfterInvalidStoredAuthorization()
+                    ensureSpotifyWebAPIAuthorization(
+                        clientId: clientId,
+                        requiresPollingFallback: requiresPollingFallback
+                    )
+                case .temporarilyUnavailable:
+                    finishSpotifyWebAPIAuthorization(
+                        succeeded: false,
+                        error: nil,
+                        didRequestAuthorization: false
+                    )
+                }
+            }
         case .waitForInFlightAuthorization:
             if requiresPollingFallback {
                 appendLog("spotify live: Web API fallback waiting for active authorization")

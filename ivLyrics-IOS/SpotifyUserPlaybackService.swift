@@ -112,6 +112,27 @@ enum SpotifyQueueHTTPResponsePolicy {
     }
 }
 
+enum SpotifyStoredAuthorizationValidationResult: Equatable {
+    case reusable
+    case requiresInteractiveAuthorization
+    case temporarilyUnavailable
+}
+
+enum SpotifyStoredAuthorizationRefreshFailurePolicy {
+    enum Action: Equatable {
+        case discardAndReauthorize
+        case preserveAndRetryLater
+    }
+
+    static func action(statusCode: Int?, message: String) -> Action {
+        guard statusCode == 400,
+              message.range(of: "invalid_grant", options: .caseInsensitive) != nil else {
+            return .preserveAndRetryLater
+        }
+        return .discardAndReauthorize
+    }
+}
+
 @MainActor
 final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     private let authorizeEndpoint = "https://accounts.spotify.com/authorize"
@@ -344,6 +365,45 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
                 diagnostic("spotify queue prefetch stopped: queue request failed (HTTP \(http.statusCode))")
             }
             return nil
+        }
+    }
+
+    func validateStoredAuthorization(clientId: String) async -> SpotifyStoredAuthorizationValidationResult {
+        prepare(clientId: clientId)
+        if validAccessToken() != nil {
+            connected = true
+            return .reusable
+        }
+        connected = false
+        guard !refreshToken.isEmpty else {
+            return .requiresInteractiveAuthorization
+        }
+        do {
+            try await refreshAccessToken(clientId: clientId.trimmed)
+            guard validAccessToken() != nil else {
+                diagnostic("spotify queue auth: stored authorization returned no access token")
+                return .temporarilyUnavailable
+            }
+            connected = true
+            queueUnavailableForAuthorization = false
+            return .reusable
+        } catch {
+            guard !Self.isCancellation(error) else { return .temporarilyUnavailable }
+            let statusError = error as? HTTPStatusError
+            switch SpotifyStoredAuthorizationRefreshFailurePolicy.action(
+                statusCode: statusError?.statusCode,
+                message: statusError?.message ?? ""
+            ) {
+            case .discardAndReauthorize:
+                clearTokens()
+                connected = false
+                queueUnavailableForAuthorization = false
+                diagnostic("spotify queue auth: stored authorization expired; user authorization required")
+                return .requiresInteractiveAuthorization
+            case .preserveAndRetryLater:
+                diagnostic("spotify queue auth: stored authorization validation temporarily unavailable")
+                return .temporarilyUnavailable
+            }
         }
     }
 
