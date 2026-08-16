@@ -504,6 +504,15 @@ final class AppViewModel: ObservableObject {
                   UIApplication.shared.applicationState != .active,
                   pictureInPictureController.isEngaged,
                   spotifyLivePolling else { return }
+            if spotifyWebAPIAuthorizationCoordinator.authorizationInFlight {
+                let clientId = settings.spotifyClientId.trimmed
+                if !clientId.isEmpty {
+                    ensureSpotifyWebAPIAuthorization(
+                        clientId: clientId,
+                        requiresPollingFallback: true
+                    )
+                }
+            }
             guard spotifyUserPlaybackService.connected else {
                 spotifyPollTask?.cancel()
                 spotifyPollTask = nil
