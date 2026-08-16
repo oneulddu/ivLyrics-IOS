@@ -491,6 +491,7 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             let clientId = settings.spotifyClientId.trimmed
             guard !clientId.isEmpty else { return }
+            spotifyQueuePrefetchSourceKey = ""
             ensureSpotifyWebAPIAuthorization(
                 clientId: clientId,
                 requiresPollingFallback: !spotifyAppRemotePlaybackService.connected && spotifyLivePolling
@@ -3213,14 +3214,20 @@ final class AppViewModel: ObservableObject {
             || spotifyUserPlaybackService.connected
         if completion == .fallbackUnavailable {
             finishSpotifyWebAPIFallbackUnavailable(
-                message: "Spotify Web API authorization validation is temporarily unavailable"
+                message: "Spotify Web API authorization validation is temporarily unavailable",
+                preserveLiveModeForRetry: true
             )
         }
     }
 
-    private func finishSpotifyWebAPIFallbackUnavailable(message: String) {
+    private func finishSpotifyWebAPIFallbackUnavailable(
+        message: String,
+        preserveLiveModeForRetry: Bool = false
+    ) {
         spotifyUserConnected = spotifyUserPlaybackService.connected
-        spotifyLivePolling = false
+        if !preserveLiveModeForRetry {
+            spotifyLivePolling = false
+        }
         spotifyAppRemoteConnected = false
         status = .failed(message)
         appendLog("spotify live auth failed: Web API authorization unavailable")
