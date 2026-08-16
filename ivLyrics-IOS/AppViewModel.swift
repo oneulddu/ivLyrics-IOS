@@ -2873,6 +2873,15 @@ final class AppViewModel: ObservableObject {
                 }
 
                 let sourceLang = detectedSourceLang(lines: loaded.result.lines)
+                guard Self.shouldPrefetchSpotifyQueueSupplements(
+                    settings: settings,
+                    sourceLang: sourceLang
+                ) else {
+#if DEBUG
+                    debugPrint("spotify queue base lyrics ready; supplements deferred for first-language choice: \(sourceLang)")
+#endif
+                    return
+                }
                 async let supplementResponse = aiRepository.loadSupplements(
                     track: nextTrack,
                     baseResult: loaded.result,
@@ -2898,6 +2907,13 @@ final class AppViewModel: ObservableObject {
                 return
             }
         }
+    }
+
+    static func shouldPrefetchSpotifyQueueSupplements(
+        settings: AppSettings,
+        sourceLang: String
+    ) -> Bool {
+        !settings.shouldPromptForFirstLanguage(sourceLang)
     }
 
     private func regenerateCurrentAiSupplements(
