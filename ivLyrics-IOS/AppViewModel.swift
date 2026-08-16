@@ -57,6 +57,7 @@ struct SpotifyWebAPIAuthorizationCoordinator {
 
     private(set) var authorizationInFlight = false
     private(set) var authorizationSuppressed = false
+    private(set) var recoveryDeferredUntilActive = false
     private var pollingFallbackRequested = false
 
     mutating func request(
@@ -99,7 +100,18 @@ struct SpotifyWebAPIAuthorizationCoordinator {
     mutating func resetForUserInitiatedConnection() {
         guard !authorizationInFlight else { return }
         authorizationSuppressed = false
+        recoveryDeferredUntilActive = false
         pollingFallbackRequested = false
+    }
+
+    mutating func deferRecoveryUntilActive() {
+        recoveryDeferredUntilActive = true
+    }
+
+    mutating func consumeDeferredRecovery() -> Bool {
+        let deferred = recoveryDeferredUntilActive
+        recoveryDeferredUntilActive = false
+        return deferred
     }
 
     mutating func retryAfterInvalidStoredAuthorization() -> Bool {
@@ -125,6 +137,7 @@ struct SpotifyWebAPIAuthorizationCoordinator {
     mutating func cancel() {
         authorizationInFlight = false
         authorizationSuppressed = false
+        recoveryDeferredUntilActive = false
         pollingFallbackRequested = false
     }
 }
@@ -492,6 +505,11 @@ final class AppViewModel: ObservableObject {
             let clientId = settings.spotifyClientId.trimmed
             guard !clientId.isEmpty else { return }
             spotifyQueuePrefetchSourceKey = ""
+            guard UIApplication.shared.applicationState == .active else {
+                spotifyWebAPIAuthorizationCoordinator.deferRecoveryUntilActive()
+                appendLog("spotify queue auth: recovery deferred until app becomes active")
+                return
+            }
             ensureSpotifyWebAPIAuthorization(
                 clientId: clientId,
                 requiresPollingFallback: !spotifyAppRemotePlaybackService.connected && spotifyLivePolling
@@ -986,6 +1004,18 @@ final class AppViewModel: ObservableObject {
     }
 
     func appDidBecomeActive() {
+        let deferredAuthorizationRecovery = spotifyWebAPIAuthorizationCoordinator
+            .consumeDeferredRecovery()
+        if deferredAuthorizationRecovery,
+           spotifyAppRemotePlaybackService.connected {
+            let clientId = settings.spotifyClientId.trimmed
+            if !clientId.isEmpty {
+                ensureSpotifyWebAPIAuthorization(
+                    clientId: clientId,
+                    requiresPollingFallback: false
+                )
+            }
+        }
         if spotifyLivePolling,
            spotifyPollTask != nil,
            !spotifyAppRemotePlaybackService.connected {
