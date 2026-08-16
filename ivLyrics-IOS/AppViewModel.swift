@@ -102,10 +102,24 @@ struct SpotifyWebAPIAuthorizationCoordinator {
         pollingFallbackRequested = false
     }
 
-    mutating func retryAfterInvalidStoredAuthorization() {
+    mutating func retryAfterInvalidStoredAuthorization() -> Bool {
+        let requiresPollingFallback = pollingFallbackRequested
         authorizationInFlight = false
         authorizationSuppressed = false
         pollingFallbackRequested = false
+        return requiresPollingFallback
+    }
+
+    mutating func completeTemporaryValidationFailure(
+        appRemoteConnected: Bool
+    ) -> CompletionAction {
+        authorizationInFlight = false
+        authorizationSuppressed = false
+        let requiresPollingFallback = pollingFallbackRequested
+        pollingFallbackRequested = false
+        return requiresPollingFallback && !appRemoteConnected
+            ? .fallbackUnavailable
+            : .keepAppRemote
     }
 
     mutating func cancel() {
@@ -3084,17 +3098,14 @@ final class AppViewModel: ObservableObject {
                         didRequestAuthorization: false
                     )
                 case .requiresInteractiveAuthorization:
-                    spotifyWebAPIAuthorizationCoordinator.retryAfterInvalidStoredAuthorization()
+                    let retryRequiresPollingFallback = spotifyWebAPIAuthorizationCoordinator
+                        .retryAfterInvalidStoredAuthorization()
                     ensureSpotifyWebAPIAuthorization(
                         clientId: clientId,
-                        requiresPollingFallback: requiresPollingFallback
+                        requiresPollingFallback: retryRequiresPollingFallback
                     )
                 case .temporarilyUnavailable:
-                    finishSpotifyWebAPIAuthorization(
-                        succeeded: false,
-                        error: nil,
-                        didRequestAuthorization: false
-                    )
+                    finishSpotifyWebAPITemporaryValidationFailure()
                 }
             }
         case .waitForInFlightAuthorization:
@@ -3172,6 +3183,19 @@ final class AppViewModel: ObservableObject {
         case .fallbackUnavailable:
             finishSpotifyWebAPIFallbackUnavailable(
                 message: error?.localizedDescription ?? "Spotify Web API authorization failed"
+            )
+        }
+    }
+
+    private func finishSpotifyWebAPITemporaryValidationFailure() {
+        let completion = spotifyWebAPIAuthorizationCoordinator.completeTemporaryValidationFailure(
+            appRemoteConnected: spotifyAppRemotePlaybackService.connected
+        )
+        spotifyUserConnected = spotifyAppRemotePlaybackService.connected
+            || spotifyUserPlaybackService.connected
+        if completion == .fallbackUnavailable {
+            finishSpotifyWebAPIFallbackUnavailable(
+                message: "Spotify Web API authorization validation is temporarily unavailable"
             )
         }
     }

@@ -42,10 +42,54 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
             coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
             .validateExistingAuthorization
         )
-        coordinator.retryAfterInvalidStoredAuthorization()
+        XCTAssertFalse(coordinator.retryAfterInvalidStoredAuthorization())
         XCTAssertEqual(
             coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
             .authorize
+        )
+    }
+
+    func testInvalidStoredAuthorizationPreservesQueuedPollingFallback() {
+        var coordinator = SpotifyWebAPIAuthorizationCoordinator()
+
+        XCTAssertEqual(
+            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            .validateExistingAuthorization
+        )
+        XCTAssertEqual(
+            coordinator.request(webAPIConnected: true, requiresPollingFallback: true),
+            .waitForInFlightAuthorization
+        )
+        let requiresPollingFallback = coordinator.retryAfterInvalidStoredAuthorization()
+        XCTAssertTrue(requiresPollingFallback)
+        XCTAssertEqual(
+            coordinator.request(
+                webAPIConnected: false,
+                requiresPollingFallback: requiresPollingFallback
+            ),
+            .authorize
+        )
+        XCTAssertEqual(
+            coordinator.complete(succeeded: true, appRemoteConnected: false),
+            .startWebAPIPolling
+        )
+    }
+
+    func testTemporaryValidationFailureRemainsRetryable() {
+        var coordinator = SpotifyWebAPIAuthorizationCoordinator()
+
+        XCTAssertEqual(
+            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            .validateExistingAuthorization
+        )
+        XCTAssertEqual(
+            coordinator.completeTemporaryValidationFailure(appRemoteConnected: true),
+            .keepAppRemote
+        )
+        XCTAssertFalse(coordinator.authorizationSuppressed)
+        XCTAssertEqual(
+            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            .validateExistingAuthorization
         )
     }
 
