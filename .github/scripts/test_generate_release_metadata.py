@@ -58,6 +58,39 @@ class AltStoreSourceTests(unittest.TestCase):
         self.assertIn("oneulddu/ivLyrics-IOS", current_versions[0]["downloadURL"])
         self.assertEqual(versions[1]["version"], "1.1.1")
 
+    def test_rebuilding_old_version_preserves_newer_catalog_order(self):
+        source = {
+            "apps": [
+                {
+                    "bundleIdentifier": release_metadata.BUNDLE_IDENTIFIER,
+                    "versions": [
+                        {"version": "1.3.5", "buildVersion": "39"},
+                        {"version": "1.3.4", "buildVersion": "38"},
+                    ],
+                }
+            ]
+        }
+        ipa = {
+            "name": "ivLyrics-IOS-v1.3.4-unsigned.ipa",
+            "versionName": "1.3.4",
+            "buildNumber": "38",
+            "size": 123,
+            "sha256": "abc123",
+            "minimumOSVersion": "17.0",
+            "privacy": {},
+        }
+
+        with mock.patch.object(release_metadata, "load_source", return_value=source):
+            result = release_metadata.build_altstore_source("v1.3.4", ipa, {})
+
+        versions = result["apps"][0]["versions"]
+        self.assertEqual([item["version"] for item in versions], ["1.3.5", "1.3.4"])
+        self.assertEqual(versions[1]["buildVersion"], "38")
+        self.assertIn(
+            "/v1.3.4/",
+            release_metadata.release_download_url(result, "1.3.4"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

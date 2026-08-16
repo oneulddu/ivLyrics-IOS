@@ -18,7 +18,9 @@ from pathlib import Path
 
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip() or "ivLis-Studio/ivLyrics-IOS"
 BUNDLE_IDENTIFIER = "kr.ivlis.ivlyrics.ios"
-SOURCE_PATH = Path("altstore-source.json")
+SOURCE_PATH = Path(
+    os.environ.get("ALTSTORE_SOURCE_BASE_PATH", "altstore-source.json")
+)
 TEMPLATE_PATH = Path(".github/release-notes-template.md")
 ICON_URL = (
     f"https://raw.githubusercontent.com/{REPOSITORY}/main/"
@@ -732,7 +734,11 @@ def build_altstore_source(current_tag, ipa, content):
             and str(item.get("version")) == ipa["versionName"]
         )
     ]
-    app["versions"] = [version, *versions]
+    app["versions"] = sorted(
+        [version, *versions],
+        key=lambda item: version_key(str(item.get("version") or "0")),
+        reverse=True,
+    )
     app["appPermissions"] = {
         "entitlements": [],
         "privacy": ipa["privacy"],
@@ -740,6 +746,33 @@ def build_altstore_source(current_tag, ipa, content):
     source["apps"] = [app]
     source["news"] = source.get("news") if isinstance(source.get("news"), list) else []
     return source
+
+
+def release_download_url(source, version_name):
+    apps = source.get("apps") if isinstance(source.get("apps"), list) else []
+    app = next(
+        (
+            item
+            for item in apps
+            if isinstance(item, dict)
+            and item.get("bundleIdentifier") == BUNDLE_IDENTIFIER
+        ),
+        {},
+    )
+    versions = app.get("versions") if isinstance(app.get("versions"), list) else []
+    version = next(
+        (
+            item
+            for item in versions
+            if isinstance(item, dict)
+            and str(item.get("version")) == version_name
+        ),
+        {},
+    )
+    download_url = str(version.get("downloadURL") or "").strip()
+    if not download_url:
+        raise RuntimeError(f"AltStore download URL is missing for version {version_name}")
+    return download_url
 
 
 def write_github_outputs(values):
@@ -765,7 +798,7 @@ def main():
     verify_checksum(ipa, os.environ.get("CHECKSUM_PATH", "").strip())
 
     previous = previous_tag(current_tag)
-    current_ref = resolve_ref(current_tag)
+    current_ref = os.environ.get("RELEASE_TARGET", "").strip() or resolve_ref(current_tag)
     stat_text = git_diff_stat(previous, current_ref)
     commits = release_commits(previous, current_ref)
     content = ai_release_content(
@@ -773,6 +806,7 @@ def main():
     ) or fallback_content(current_tag, commits)
     notes = render_notes(current_tag, previous, ipa, content)
     source = build_altstore_source(current_tag, ipa, content)
+    download_url = release_download_url(source, ipa["versionName"])
 
     out_dir = Path(os.environ.get("RELEASE_METADATA_DIR", "release-metadata"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -785,7 +819,7 @@ def main():
         json.dumps(
             {
                 "tag": current_tag,
-                "commit": resolve_commit(current_tag),
+                "commit": resolve_commit(current_ref),
                 "previousTag": previous,
                 "versionName": ipa["versionName"],
                 "versionCode": int(ipa["buildNumber"]),
@@ -798,7 +832,7 @@ def main():
                         "name": ipa["name"],
                         "size": ipa["size"],
                         "sha256": ipa["sha256"],
-                        "downloadUrl": source["apps"][0]["versions"][0]["downloadURL"],
+                        "downloadUrl": download_url,
                     }
                 ],
             },

@@ -57,19 +57,6 @@ jobs:
           sudo xcode-select -s "$SELECTED_XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Validate translations
-        run: python3 scripts/validate-i18n.py
-
-      - name: Run static analyzer
-        run: |
-          xcodebuild \
-            -project ivLyrics-IOS.xcodeproj \
-            -scheme ivLyrics-IOS \
-            -configuration Release \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO \
-            analyze
-
       - name: Resolve release metadata
         id: release
         shell: bash
@@ -80,37 +67,86 @@ jobs:
           else
             release_tag="${{ inputs.tag }}"
           fi
-          if [[ ! "$release_tag" =~ ^v[0-9]+([.][0-9]+){0,2}$ ]]; then
+          if [[ ! "$release_tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
             echo "Release tag must be a numeric Apple version, for example v1.0.0." >&2
             exit 1
           fi
-          version_name="${release_tag#v}"
           if release_target="$(git rev-parse --verify "${release_tag}^{commit}" 2>/dev/null)"; then
             tag_exists=true
           else
             release_target="$(git rev-parse HEAD)"
             tag_exists=false
           fi
+          source_path="$RUNNER_TEMP/release-source"
+          git worktree add --detach "$source_path" "$release_target"
+          checked_out_target="$(git -C "$source_path" rev-parse HEAD)"
+          if [[ "$checked_out_target" != "$release_target" ]]; then
+            echo "Checked-out commit does not match the release target." >&2
+            exit 1
+          fi
+          build_settings="$(
+            xcodebuild \
+              -project "$source_path/ivLyrics-IOS.xcodeproj" \
+              -target ivLyrics-IOS \
+              -configuration Release \
+              -showBuildSettings
+          )"
+          version_name="$(awk -F ' = ' '/^[[:space:]]*MARKETING_VERSION = / { print $2; exit }' <<< "$build_settings")"
+          build_number="$(awk -F ' = ' '/^[[:space:]]*CURRENT_PROJECT_VERSION = / { print $2; exit }' <<< "$build_settings")"
+          if [[ "$version_name" != "${release_tag#v}" ]]; then
+            echo "Release tag version $release_tag does not match app version $version_name." >&2
+            exit 1
+          fi
+          if [[ ! "$build_number" =~ ^[0-9]+$ ]]; then
+            echo "App build number must be numeric." >&2
+            exit 1
+          fi
+          git fetch origin main
+          catalog_path="$RUNNER_TEMP/altstore-source-main.json"
+          git show FETCH_HEAD:altstore-source.json > "$catalog_path"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "release_target=$release_target" >> "$GITHUB_OUTPUT"
           echo "tag_exists=$tag_exists" >> "$GITHUB_OUTPUT"
           echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
+          echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
+          echo "source_path=$source_path" >> "$GITHUB_OUTPUT"
+          echo "catalog_path=$catalog_path" >> "$GITHUB_OUTPUT"
           echo "artifact_name=ivLyrics-IOS-${release_tag}-release" >> "$GITHUB_OUTPUT"
+
+      - name: Validate translations
+        env:
+          IVLYRICS_SOURCE_ROOT: ${{ steps.release.outputs.source_path }}
+        run: python3 scripts/validate-i18n.py
+
+      - name: Run static analyzer
+        env:
+          IVLYRICS_SOURCE_ROOT: ${{ steps.release.outputs.source_path }}
+        run: |
+          xcodebuild \
+            -project "$IVLYRICS_SOURCE_ROOT/ivLyrics-IOS.xcodeproj" \
+            -scheme ivLyrics-IOS \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            analyze
 
       - name: Build unsigned IPA
         id: package
         env:
           VERSION_NAME: ${{ steps.release.outputs.version_name }}
-          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_NUMBER: ${{ steps.release.outputs.build_number }}
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          IVLYRICS_SOURCE_ROOT: ${{ steps.release.outputs.source_path }}
         run: scripts/build-unsigned-ipa.sh "$RUNNER_TEMP/release"
 
       - name: Generate release notes and AltStore source
         id: release_metadata
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          RELEASE_TARGET: ${{ steps.release.outputs.release_target }}
           IPA_PATH: ${{ steps.package.outputs.ipa_path }}
           CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+          ALTSTORE_SOURCE_BASE_PATH: ${{ steps.release.outputs.catalog_path }}
           VERSION_NAME: ${{ steps.package.outputs.version_name }}
           BUILD_NUMBER: ${{ steps.package.outputs.build_number }}
           RELEASE_METADATA_DIR: ${{ runner.temp }}/release-metadata
@@ -158,28 +194,30 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             if [[ "$PRERELEASE" == "true" ]]; then
               gh release edit "$RELEASE_TAG" \
-                --title "ivLyrics iOS $RELEASE_TAG" \
+                --title "$RELEASE_TAG" \
                 --notes-file "$NOTES_PATH" \
                 --prerelease
             else
               gh release edit "$RELEASE_TAG" \
-                --title "ivLyrics iOS $RELEASE_TAG" \
+                --title "$RELEASE_TAG" \
                 --notes-file "$NOTES_PATH"
             fi
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
             if [[ "$TAG_EXISTS" != "true" ]]; then
-              git tag "$RELEASE_TAG" "$RELEASE_TARGET"
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git tag -a "$RELEASE_TAG" "$RELEASE_TARGET" -m "$RELEASE_TAG"
               git push origin "refs/tags/$RELEASE_TAG"
             fi
             if [[ "$PRERELEASE" == "true" ]]; then
               gh release create "$RELEASE_TAG" "${assets[@]}" \
-                --title "ivLyrics iOS $RELEASE_TAG" \
+                --title "$RELEASE_TAG" \
                 --notes-file "$NOTES_PATH" \
                 --prerelease
             else
               gh release create "$RELEASE_TAG" "${assets[@]}" \
-                --title "ivLyrics iOS $RELEASE_TAG" \
+                --title "$RELEASE_TAG" \
                 --notes-file "$NOTES_PATH"
             fi
           fi

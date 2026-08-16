@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import json
+import os
 import re
 from pathlib import Path
 
 
-source = Path(__file__).resolve().parents[1] / "ivLyrics-IOS/Resources/AppI18nStrings.json"
+source_root = Path(
+    os.environ.get("IVLYRICS_SOURCE_ROOT") or Path(__file__).resolve().parents[1]
+)
+source = source_root / "ivLyrics-IOS/Resources/AppI18nStrings.json"
 locales = json.loads(source.read_text(encoding="utf-8"))
 reference_keys = set(locales["ko"])
 errors: list[str] = []
