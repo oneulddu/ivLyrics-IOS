@@ -155,6 +155,9 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     @Published private(set) var authorizing = false
     @Published private(set) var lastError = ""
     var onDiagnostic: ((String) -> Void)?
+    var hasStoredAuthorization: Bool {
+        validAccessToken() != nil || !refreshToken.isEmpty
+    }
     private var authenticationPresentationAnchor: ASPresentationAnchor?
     private var authenticationSession: ASWebAuthenticationSession?
     private var authorizationTask: Task<Void, Error>?

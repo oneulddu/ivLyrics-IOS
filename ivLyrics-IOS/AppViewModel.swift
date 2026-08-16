@@ -60,14 +60,14 @@ struct SpotifyWebAPIAuthorizationCoordinator {
     private var pollingFallbackRequested = false
 
     mutating func request(
-        webAPIConnected: Bool,
+        storedAuthorizationAvailable: Bool,
         requiresPollingFallback: Bool
     ) -> RequestAction {
         if authorizationInFlight {
             pollingFallbackRequested = pollingFallbackRequested || requiresPollingFallback
             return .waitForInFlightAuthorization
         }
-        if webAPIConnected {
+        if storedAuthorizationAvailable {
             authorizationInFlight = true
             pollingFallbackRequested = requiresPollingFallback
             return .validateExistingAuthorization
@@ -3078,7 +3078,7 @@ final class AppViewModel: ObservableObject {
         requiresPollingFallback: Bool
     ) {
         let action = spotifyWebAPIAuthorizationCoordinator.request(
-            webAPIConnected: spotifyUserPlaybackService.connected,
+            storedAuthorizationAvailable: spotifyUserPlaybackService.hasStoredAuthorization,
             requiresPollingFallback: requiresPollingFallback
         )
         switch action {

@@ -6,11 +6,11 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: false),
             .authorize
         )
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: false),
             .waitForInFlightAuthorization
         )
         XCTAssertEqual(
@@ -25,7 +25,7 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: false),
             .validateExistingAuthorization
         )
         XCTAssertEqual(
@@ -39,12 +39,12 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: false),
             .validateExistingAuthorization
         )
         XCTAssertFalse(coordinator.retryAfterInvalidStoredAuthorization())
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: false),
             .authorize
         )
     }
@@ -53,18 +53,18 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: false),
             .validateExistingAuthorization
         )
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: true, requiresPollingFallback: true),
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: true),
             .waitForInFlightAuthorization
         )
         let requiresPollingFallback = coordinator.retryAfterInvalidStoredAuthorization()
         XCTAssertTrue(requiresPollingFallback)
         XCTAssertEqual(
             coordinator.request(
-                webAPIConnected: false,
+                storedAuthorizationAvailable: false,
                 requiresPollingFallback: requiresPollingFallback
             ),
             .authorize
@@ -79,7 +79,7 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: false),
             .validateExistingAuthorization
         )
         XCTAssertEqual(
@@ -88,7 +88,7 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         )
         XCTAssertFalse(coordinator.authorizationSuppressed)
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: true, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: true, requiresPollingFallback: false),
             .validateExistingAuthorization
         )
     }
@@ -121,7 +121,7 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: false),
             .authorize
         )
         XCTAssertEqual(
@@ -130,13 +130,13 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         )
         XCTAssertTrue(coordinator.authorizationSuppressed)
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: false),
             .suppressedAfterFailure
         )
 
         coordinator.resetForUserInitiatedConnection()
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: false),
             .authorize
         )
     }
@@ -145,11 +145,11 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: false),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: false),
             .authorize
         )
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: true),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: true),
             .waitForInFlightAuthorization
         )
         XCTAssertEqual(
@@ -162,7 +162,7 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 
         XCTAssertEqual(
-            coordinator.request(webAPIConnected: false, requiresPollingFallback: true),
+            coordinator.request(storedAuthorizationAvailable: false, requiresPollingFallback: true),
             .authorize
         )
         XCTAssertEqual(
