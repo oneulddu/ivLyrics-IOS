@@ -117,6 +117,28 @@ final class SpotifyWebAPIAuthorizationCoordinatorTests: XCTestCase {
         )
     }
 
+    func testUnexpiredAccessTokenRequiresRefreshWhenSpotifyRejectsIt() {
+        XCTAssertEqual(
+            SpotifyStoredAccessTokenValidationPolicy.action(statusCode: 204),
+            .reusable
+        )
+        XCTAssertEqual(
+            SpotifyStoredAccessTokenValidationPolicy.action(statusCode: 401),
+            .refreshRequired
+        )
+    }
+
+    func testAccessTokenValidationFailurePreservesStoredAuthorizationForRetry() {
+        XCTAssertEqual(
+            SpotifyStoredAccessTokenValidationPolicy.action(statusCode: 429),
+            .temporarilyUnavailable
+        )
+        XCTAssertEqual(
+            SpotifyStoredAccessTokenValidationPolicy.action(statusCode: 500),
+            .temporarilyUnavailable
+        )
+    }
+
     func testAuthorizationFailureKeepsAppRemoteAndSuppressesReconnectPrompt() {
         var coordinator = SpotifyWebAPIAuthorizationCoordinator()
 

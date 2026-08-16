@@ -133,6 +133,22 @@ enum SpotifyStoredAuthorizationRefreshFailurePolicy {
     }
 }
 
+enum SpotifyStoredAccessTokenValidationPolicy {
+    enum Action: Equatable {
+        case reusable
+        case refreshRequired
+        case temporarilyUnavailable
+    }
+
+    static func action(statusCode: Int) -> Action {
+        switch statusCode {
+        case 200..<300: return .reusable
+        case 401: return .refreshRequired
+        default: return .temporarilyUnavailable
+        }
+    }
+}
+
 @MainActor
 final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     private let authorizeEndpoint = "https://accounts.spotify.com/authorize"
@@ -373,9 +389,26 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
 
     func validateStoredAuthorization(clientId: String) async -> SpotifyStoredAuthorizationValidationResult {
         prepare(clientId: clientId)
-        if validAccessToken() != nil {
-            connected = true
-            return .reusable
+        if let token = validAccessToken() {
+            do {
+                switch try await validateStoredAccessToken(token) {
+                case .reusable:
+                    connected = true
+                    queueUnavailableForAuthorization = false
+                    return .reusable
+                case .refreshRequired:
+                    invalidateAccessToken()
+                case .temporarilyUnavailable:
+                    connected = false
+                    diagnostic("spotify queue auth: access token validation temporarily unavailable")
+                    return .temporarilyUnavailable
+                }
+            } catch {
+                guard !Self.isCancellation(error) else { return .temporarilyUnavailable }
+                connected = false
+                diagnostic("spotify queue auth: access token validation temporarily unavailable")
+                return .temporarilyUnavailable
+            }
         }
         connected = false
         guard !refreshToken.isEmpty else {
@@ -408,6 +441,18 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
                 return .temporarilyUnavailable
             }
         }
+    }
+
+    private func validateStoredAccessToken(_ token: String) async throws -> SpotifyStoredAccessTokenValidationPolicy.Action {
+        var request = URLRequest(url: URL(string: playbackStateEndpoint)!)
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            return .temporarilyUnavailable
+        }
+        return SpotifyStoredAccessTokenValidationPolicy.action(statusCode: http.statusCode)
     }
 
     private func requestPlaybackSnapshot(endpoint: String, token: String) async throws -> SpotifyPlaybackSnapshot? {
