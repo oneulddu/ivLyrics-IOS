@@ -748,6 +748,33 @@ def build_altstore_source(current_tag, ipa, content):
     return source
 
 
+def release_download_url(source, version_name):
+    apps = source.get("apps") if isinstance(source.get("apps"), list) else []
+    app = next(
+        (
+            item
+            for item in apps
+            if isinstance(item, dict)
+            and item.get("bundleIdentifier") == BUNDLE_IDENTIFIER
+        ),
+        {},
+    )
+    versions = app.get("versions") if isinstance(app.get("versions"), list) else []
+    version = next(
+        (
+            item
+            for item in versions
+            if isinstance(item, dict)
+            and str(item.get("version")) == version_name
+        ),
+        {},
+    )
+    download_url = str(version.get("downloadURL") or "").strip()
+    if not download_url:
+        raise RuntimeError(f"AltStore download URL is missing for version {version_name}")
+    return download_url
+
+
 def write_github_outputs(values):
     output_path = os.environ.get("GITHUB_OUTPUT", "").strip()
     if not output_path:
@@ -779,6 +806,7 @@ def main():
     ) or fallback_content(current_tag, commits)
     notes = render_notes(current_tag, previous, ipa, content)
     source = build_altstore_source(current_tag, ipa, content)
+    download_url = release_download_url(source, ipa["versionName"])
 
     out_dir = Path(os.environ.get("RELEASE_METADATA_DIR", "release-metadata"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -804,7 +832,7 @@ def main():
                         "name": ipa["name"],
                         "size": ipa["size"],
                         "sha256": ipa["sha256"],
-                        "downloadUrl": source["apps"][0]["versions"][0]["downloadURL"],
+                        "downloadUrl": download_url,
                     }
                 ],
             },

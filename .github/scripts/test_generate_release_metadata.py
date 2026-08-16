@@ -86,6 +86,10 @@ class AltStoreSourceTests(unittest.TestCase):
         versions = result["apps"][0]["versions"]
         self.assertEqual([item["version"] for item in versions], ["1.3.5", "1.3.4"])
         self.assertEqual(versions[1]["buildVersion"], "38")
+        self.assertIn(
+            "/v1.3.4/",
+            release_metadata.release_download_url(result, "1.3.4"),
+        )
 
 
 if __name__ == "__main__":
