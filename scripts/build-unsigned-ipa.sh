@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "${IVLYRICS_SOURCE_ROOT:-$SCRIPT_ROOT}" && pwd)"
 OUTPUT_DIR_INPUT="${1:-${ROOT_DIR}/build/unsigned-ipa}"
 mkdir -p "$OUTPUT_DIR_INPUT"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR_INPUT" && pwd)"

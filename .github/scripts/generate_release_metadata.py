@@ -18,7 +18,9 @@ from pathlib import Path
 
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip() or "ivLis-Studio/ivLyrics-IOS"
 BUNDLE_IDENTIFIER = "kr.ivlis.ivlyrics.ios"
-SOURCE_PATH = Path("altstore-source.json")
+SOURCE_PATH = Path(
+    os.environ.get("ALTSTORE_SOURCE_BASE_PATH", "altstore-source.json")
+)
 TEMPLATE_PATH = Path(".github/release-notes-template.md")
 ICON_URL = (
     f"https://raw.githubusercontent.com/{REPOSITORY}/main/"
@@ -732,7 +734,11 @@ def build_altstore_source(current_tag, ipa, content):
             and str(item.get("version")) == ipa["versionName"]
         )
     ]
-    app["versions"] = [version, *versions]
+    app["versions"] = sorted(
+        [version, *versions],
+        key=lambda item: version_key(str(item.get("version") or "0")),
+        reverse=True,
+    )
     app["appPermissions"] = {
         "entitlements": [],
         "privacy": ipa["privacy"],
@@ -765,7 +771,7 @@ def main():
     verify_checksum(ipa, os.environ.get("CHECKSUM_PATH", "").strip())
 
     previous = previous_tag(current_tag)
-    current_ref = resolve_ref(current_tag)
+    current_ref = os.environ.get("RELEASE_TARGET", "").strip() or resolve_ref(current_tag)
     stat_text = git_diff_stat(previous, current_ref)
     commits = release_commits(previous, current_ref)
     content = ai_release_content(
@@ -785,7 +791,7 @@ def main():
         json.dumps(
             {
                 "tag": current_tag,
-                "commit": resolve_commit(current_tag),
+                "commit": resolve_commit(current_ref),
                 "previousTag": previous,
                 "versionName": ipa["versionName"],
                 "versionCode": int(ipa["buildNumber"]),
