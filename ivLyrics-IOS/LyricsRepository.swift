@@ -714,7 +714,9 @@ actor LyricsRepository {
                     karaoke: true,
                     isrc: isrc,
                     spotifyTrackId: spotifyTrackId,
-                    contributors: syncData.contributors
+                    contributors: syncData.contributors,
+                    syncType: syncData.syncType,
+                    syncPoints: syncData.syncPoints
                 )
             }
             log("sync-data apply failed for cached lyrics: keeping LRCLIB line lyrics")
@@ -3439,7 +3441,9 @@ actor LyricsRepository {
                 karaoke: preserveProviderKaraoke || syncApplied,
                 isrc: isrc,
                 spotifyTrackId: spotifyTrackId,
-                contributors: syncApplied ? (selectedSyncData?.contributors ?? []) : []
+                contributors: syncApplied ? (selectedSyncData?.contributors ?? []) : [],
+                syncType: syncApplied ? (selectedSyncData?.syncType ?? "unknown") : "unknown",
+                syncPoints: syncApplied ? (selectedSyncData?.syncPoints ?? 0) : 0
             )
             let candidate = selected.matchedCandidate
             let provenance = LyricsCacheProvenance(
