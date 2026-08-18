@@ -1088,7 +1088,7 @@ enum KaraokeSyllableTimingNormalizer {
 
         func flushRun() {
             let merged = coalesceNonEmptyGraphemeRun(run)
-            changed = changed || merged.count != run.count
+            changed = changed || merged != run
             result.append(contentsOf: merged)
             run.removeAll(keepingCapacity: true)
         }
@@ -1122,6 +1122,16 @@ enum KaraokeSyllableTimingNormalizer {
 
         var result: [LyricsLine.Syllable] = []
         result.reserveCapacity(syllables.count)
+        var pendingSourceIndex: Int?
+        var pendingText = ""
+
+        func flushPendingSource() {
+            guard let sourceIndex = pendingSourceIndex, !pendingText.isEmpty else { return }
+            result.append(syllables[sourceIndex].copying(text: pendingText))
+            pendingSourceIndex = nil
+            pendingText = ""
+        }
+
         var graphemeCursor = 0
         for character in text {
             let grapheme = String(character)
@@ -1135,11 +1145,16 @@ enum KaraokeSyllableTimingNormalizer {
             }
             guard let firstIndex = overlappingIndices.first else { continue }
             let first = syllables[firstIndex]
-            if overlappingIndices.count == 1, first.text == grapheme {
-                result.append(first)
+            if overlappingIndices.count == 1 {
+                if pendingSourceIndex != firstIndex {
+                    flushPendingSource()
+                    pendingSourceIndex = firstIndex
+                }
+                pendingText.append(contentsOf: grapheme)
                 continue
             }
 
+            flushPendingSource()
             let startTimeMs = overlappingIndices.reduce(first.startTimeMs) {
                 min($0, syllables[$1].startTimeMs)
             }
@@ -1156,6 +1171,7 @@ enum KaraokeSyllableTimingNormalizer {
                 sourceGranularity: sourceGranularity
             ))
         }
+        flushPendingSource()
         return result
     }
 

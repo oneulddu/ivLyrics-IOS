@@ -5717,7 +5717,10 @@ struct LyricsLineView: View, Equatable {
     var body: some View {
         let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
         let displayVocalParts = LyricsTimelineDisplayBuilder.displayableVocalParts(orderedVocalParts)
-        let linePronunciationText = distinctPronunciation(line.pronunciationText, original: originalText)
+        let linePronunciationText = IvLyricsUtilities.distinctPronunciation(
+            line.pronunciationText,
+            original: originalText
+        )
         let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(
             orderedParts: orderedVocalParts
         )
@@ -5894,7 +5897,7 @@ struct LyricsLineView: View, Equatable {
     private func vocalPartSupplements(_ part: LyricsLine.VocalPart, active: Bool) -> some View {
         let speakerColor = vocalPartActiveColor(part)
         let inactiveColor = vocalPartSupplementInactiveColor(part, active: active)
-        let pronunciationText = distinctPronunciation(
+        let pronunciationText = IvLyricsUtilities.distinctPronunciation(
             part.pronunciationText,
             original: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part)
         )
@@ -5914,15 +5917,6 @@ struct LyricsLineView: View, Equatable {
         } else if translationLoading {
             supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5)
         }
-    }
-
-    private func distinctPronunciation(_ value: String, original: String) -> String {
-        let pronunciation = value.trimmed
-        guard !pronunciation.isEmpty,
-              !IvLyricsUtilities.lyricsTextsEquivalent(pronunciation, original) else {
-            return ""
-        }
-        return pronunciation
     }
 
     private func supplementReserveText(_ text: String, slotId: String, baseSize: CGFloat) -> some View {
@@ -6139,9 +6133,14 @@ struct SyllableKaraokeText: View {
             syllables: sourceSyllables,
             annotations: culturalAnnotations
         )
-        let bounceWindowActive = positionMs >= startTimeMs
-            && positionMs < endTimeMs + 280
-        let bounceActiveIndex = bounceEnabled && !accessibilityReduceMotion && bounceWindowActive && !displaySyllables.isEmpty
+        let bounceActiveIndex = KaraokeBouncePolicy.isWindowActive(
+            positionMs: positionMs,
+            lineStartTimeMs: startTimeMs,
+            lineEndTimeMs: endTimeMs,
+            bounceEnabled: bounceEnabled,
+            reduceMotion: accessibilityReduceMotion,
+            hasSegments: !displaySyllables.isEmpty
+        )
             ? activeSegmentIndex(in: displaySyllables, fillTimings: fillTimings)
             : nil
         var timedSegments: [KaraokeSyllableSegment] = []
@@ -6433,7 +6432,8 @@ struct SyllableKaraokeText: View {
         }
         let distance = isWordDisplayGranularity ? 0 : abs(CGFloat(index - activeIndex))
         guard distance <= 3,
-              let rawStrength = bounceStrength(
+              let rawStrength = KaraokeBouncePolicy.strength(
+                positionMs: positionMs,
                 startTimeMs: fillTiming.startTimeMs,
                 endTimeMs: fillTiming.endTimeMs
               ) else {
@@ -6485,7 +6485,31 @@ struct SyllableKaraokeText: View {
         return nextIndex ?? fallbackIndex
     }
 
-    private func bounceStrength(startTimeMs: Int64, endTimeMs: Int64) -> CGFloat? {
+}
+
+enum KaraokeBouncePolicy {
+    static let maximumReleaseWindowMs: Int64 = 280
+
+    static func isWindowActive(
+        positionMs: Int64,
+        lineStartTimeMs: Int64,
+        lineEndTimeMs: Int64,
+        bounceEnabled: Bool,
+        reduceMotion: Bool,
+        hasSegments: Bool
+    ) -> Bool {
+        bounceEnabled
+            && !reduceMotion
+            && hasSegments
+            && positionMs >= lineStartTimeMs
+            && positionMs < lineEndTimeMs + maximumReleaseWindowMs
+    }
+
+    static func strength(
+        positionMs: Int64,
+        startTimeMs: Int64,
+        endTimeMs: Int64
+    ) -> CGFloat? {
         let duration = CGFloat(max(1, endTimeMs - startTimeMs))
         let rise = min(180, max(60, duration * 0.38))
         let release = min(280, max(180, duration * 0.45))
@@ -6507,7 +6531,7 @@ struct SyllableKaraokeText: View {
         return pow(1 - progress, 1.25)
     }
 
-    private func easeOutCubic(_ value: CGFloat) -> CGFloat {
+    private static func easeOutCubic(_ value: CGFloat) -> CGFloat {
         let t = min(1, max(0, value))
         return 1 - pow(1 - t, 3)
     }

@@ -631,6 +631,8 @@ actor LyricsRepository {
             if forceContributorRefresh {
                 if let syncData {
                     cachedBase.contributors = syncData.contributors
+                    cachedBase.syncType = syncData.syncType
+                    cachedBase.syncPoints = syncData.syncPoints
                     log("sync-data contributors refreshed for cached lyrics: count=\(syncData.contributors.count)")
                 } else {
                     cachedBase = privacySafeContributorFallback(cachedBase)
@@ -727,14 +729,32 @@ actor LyricsRepository {
             : (syncData == nil || !allowKaraoke
                 ? cachedBase.detail
                 : ui("repo.detail.sync_apply_failed", settings: settings))
-        return LyricsResult(
-            lines: baseLines,
+        return Self.cachedFallbackResult(
+            from: cachedBase,
+            detail: detail,
+            isrc: IvLyricsUtilities.firstNonEmpty(isrc, cachedBase.isrc),
+            spotifyTrackId: IvLyricsUtilities.firstNonEmpty(spotifyTrackId, cachedBase.spotifyTrackId)
+        )
+    }
+
+    nonisolated static func cachedFallbackResult(
+        from cachedBase: LyricsResult,
+        detail: String,
+        isrc: String,
+        spotifyTrackId: String
+    ) -> LyricsResult {
+        LyricsResult(
+            lines: cachedBase.lines,
             providerLabel: cachedBase.providerLabel,
             detail: detail,
             karaoke: false,
-            isrc: IvLyricsUtilities.firstNonEmpty(isrc, cachedBase.isrc),
-            spotifyTrackId: IvLyricsUtilities.firstNonEmpty(spotifyTrackId, cachedBase.spotifyTrackId),
-            contributors: cachedBase.contributors
+            isrc: isrc,
+            spotifyTrackId: spotifyTrackId,
+            contributors: cachedBase.contributors,
+            providerId: cachedBase.providerId,
+            selectionPolicyKey: cachedBase.selectionPolicyKey,
+            syncType: cachedBase.syncType,
+            syncPoints: cachedBase.syncPoints
         )
     }
 
