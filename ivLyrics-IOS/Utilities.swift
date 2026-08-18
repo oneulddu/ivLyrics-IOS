@@ -173,6 +173,15 @@ enum IvLyricsUtilities {
             == replacingMatches(in: right, regex: lyricsComparableWhitespaceRegex, with: "")
     }
 
+    static func distinctPronunciation(_ value: String?, original: String?) -> String {
+        let pronunciation = (value ?? "").trimmed
+        guard !pronunciation.isEmpty,
+              !lyricsTextsEquivalent(pronunciation, original) else {
+            return ""
+        }
+        return pronunciation
+    }
+
     private static func replacingMatches(
         in value: String,
         regex: NSRegularExpression,

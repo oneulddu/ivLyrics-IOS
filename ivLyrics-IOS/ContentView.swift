@@ -4491,30 +4491,32 @@ private struct LyricsContributorCredit: View {
 
     @ViewBuilder
     private func contributorNameView(_ contributor: LyricsResult.SyncContributor) -> some View {
-        if interactive,
-           !contributor.identityHidden,
-           contributor.profileAvailable,
-           !contributor.userHash.trimmed.isEmpty {
-            Button {
-                Task {
-                    await model.openSyncContributorProfile(contributor)
+        HStack(spacing: 4) {
+            if interactive,
+               !contributor.identityHidden,
+               contributor.profileAvailable,
+               !contributor.userHash.trimmed.isEmpty {
+                Button {
+                    Task {
+                        await model.openSyncContributorProfile(contributor)
+                    }
+                } label: {
+                    CreatorContributorNameText(
+                        name: contributorDisplayName(contributor),
+                        presentation: model.creatorSupportPresentation(for: contributor),
+                        fallbackOpacity: linkedNameOpacity,
+                        supporterOpacity: subdued ? 0.45 : 1
+                    )
                 }
-            } label: {
+                .buttonStyle(.plain)
+            } else {
                 CreatorContributorNameText(
                     name: contributorDisplayName(contributor),
                     presentation: model.creatorSupportPresentation(for: contributor),
-                    fallbackOpacity: linkedNameOpacity,
+                    fallbackOpacity: nameOpacity,
                     supporterOpacity: subdued ? 0.45 : 1
                 )
             }
-            .buttonStyle(.plain)
-        } else {
-            CreatorContributorNameText(
-                name: contributorDisplayName(contributor),
-                presentation: model.creatorSupportPresentation(for: contributor),
-                fallbackOpacity: nameOpacity,
-                supporterOpacity: subdued ? 0.45 : 1
-            )
         }
     }
 
@@ -5715,6 +5717,10 @@ struct LyricsLineView: View, Equatable {
     var body: some View {
         let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
         let displayVocalParts = LyricsTimelineDisplayBuilder.displayableVocalParts(orderedVocalParts)
+        let linePronunciationText = IvLyricsUtilities.distinctPronunciation(
+            line.pronunciationText,
+            original: originalText
+        )
         let useVocalPartSupplements = LyricsTimelineDisplayBuilder.shouldUseVocalPartSupplements(
             orderedParts: orderedVocalParts
         )
@@ -5724,8 +5730,8 @@ struct LyricsLineView: View, Equatable {
                 useVocalPartSupplements: useVocalPartSupplements
             )
                 .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: 25))
-            if !useVocalPartSupplements, !line.pronunciationText.trimmed.isEmpty {
-                Text(line.pronunciationText)
+            if !useVocalPartSupplements, !linePronunciationText.isEmpty {
+                Text(linePronunciationText)
                     .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 14))
                     .foregroundStyle(active ? lineActiveColor.opacity(212.0 / 255.0) : lineSupplementInactiveColor)
                     .multilineTextAlignment(textAlignment)
@@ -5891,8 +5897,12 @@ struct LyricsLineView: View, Equatable {
     private func vocalPartSupplements(_ part: LyricsLine.VocalPart, active: Bool) -> some View {
         let speakerColor = vocalPartActiveColor(part)
         let inactiveColor = vocalPartSupplementInactiveColor(part, active: active)
-        if !part.pronunciationText.trimmed.isEmpty {
-            Text(part.pronunciationText)
+        let pronunciationText = IvLyricsUtilities.distinctPronunciation(
+            part.pronunciationText,
+            original: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part)
+        )
+        if !pronunciationText.isEmpty {
+            Text(pronunciationText)
                 .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5))
                 .foregroundStyle(active ? speakerColor.opacity(212.0 / 255.0) : inactiveColor)
                 .multilineTextAlignment(textAlignment)
@@ -6123,7 +6133,14 @@ struct SyllableKaraokeText: View {
             syllables: sourceSyllables,
             annotations: culturalAnnotations
         )
-        let bounceActiveIndex = bounceEnabled && !accessibilityReduceMotion && active && !displaySyllables.isEmpty
+        let bounceActiveIndex = KaraokeBouncePolicy.isWindowActive(
+            positionMs: positionMs,
+            lineStartTimeMs: startTimeMs,
+            lineEndTimeMs: endTimeMs,
+            bounceEnabled: bounceEnabled,
+            reduceMotion: accessibilityReduceMotion,
+            hasSegments: !displaySyllables.isEmpty
+        )
             ? activeSegmentIndex(in: displaySyllables, fillTimings: fillTimings)
             : nil
         var timedSegments: [KaraokeSyllableSegment] = []
@@ -6385,7 +6402,12 @@ struct SyllableKaraokeText: View {
     }
 
     private func fillFraction(startTimeMs: Int64, endTimeMs: Int64) -> CGFloat {
-        guard active else { return 0 }
+        // Retain the completed paint while the parent line moves and fades away.
+        // Previously `active == false` reset every segment to its inactive color
+        // in one frame at the line boundary.
+        if endTimeMs > startTimeMs, positionMs >= endTimeMs {
+            return 1
+        }
         if isWordDisplayGranularity {
             return positionMs >= startTimeMs ? 1 : 0
         }
@@ -6404,13 +6426,17 @@ struct SyllableKaraokeText: View {
         activeIndex: Int?
     ) -> KaraokeBounceMetrics {
         guard bounceEnabled,
-              active,
               fillTiming.endTimeMs > fillTiming.startTimeMs,
               let activeIndex else {
             return .idle
         }
-        let distance = abs(CGFloat(index - activeIndex))
-        guard distance <= 3, let rawStrength = bounceStrength(startTimeMs: fillTiming.startTimeMs) else {
+        let distance = isWordDisplayGranularity ? 0 : abs(CGFloat(index - activeIndex))
+        guard distance <= 3,
+              let rawStrength = KaraokeBouncePolicy.strength(
+                positionMs: positionMs,
+                startTimeMs: fillTiming.startTimeMs,
+                endTimeMs: fillTiming.endTimeMs
+              ) else {
             return .idle
         }
         let attenuation = max(0.22, 1 - distance * 0.23)
@@ -6459,21 +6485,53 @@ struct SyllableKaraokeText: View {
         return nextIndex ?? fallbackIndex
     }
 
-    private func bounceStrength(startTimeMs: Int64) -> CGFloat? {
-        let rise: CGFloat = 220
-        let release: CGFloat = 640
-        let elapsed = CGFloat(positionMs - startTimeMs)
-        if elapsed < 0 || elapsed > rise + release {
-            return nil
-        }
-        if elapsed <= rise {
-            return easeOutCubic(elapsed / rise)
-        }
-        let progress = min(1, (elapsed - rise) / release)
-        return pow(1 - progress, 1.38)
+}
+
+enum KaraokeBouncePolicy {
+    static let maximumReleaseWindowMs: Int64 = 280
+
+    static func isWindowActive(
+        positionMs: Int64,
+        lineStartTimeMs: Int64,
+        lineEndTimeMs: Int64,
+        bounceEnabled: Bool,
+        reduceMotion: Bool,
+        hasSegments: Bool
+    ) -> Bool {
+        bounceEnabled
+            && !reduceMotion
+            && hasSegments
+            && positionMs >= lineStartTimeMs
+            && positionMs < lineEndTimeMs + maximumReleaseWindowMs
     }
 
-    private func easeOutCubic(_ value: CGFloat) -> CGFloat {
+    static func strength(
+        positionMs: Int64,
+        startTimeMs: Int64,
+        endTimeMs: Int64
+    ) -> CGFloat? {
+        let duration = CGFloat(max(1, endTimeMs - startTimeMs))
+        let rise = min(180, max(60, duration * 0.38))
+        let release = min(280, max(180, duration * 0.45))
+        let peakTimeMs = min(CGFloat(endTimeMs), CGFloat(startTimeMs) + rise)
+        let currentTimeMs = CGFloat(positionMs)
+        if currentTimeMs < CGFloat(startTimeMs) || currentTimeMs >= CGFloat(endTimeMs) + release {
+            return nil
+        }
+        if currentTimeMs <= peakTimeMs {
+            return easeOutCubic(
+                (currentTimeMs - CGFloat(startTimeMs))
+                    / max(1, peakTimeMs - CGFloat(startTimeMs))
+            )
+        }
+        if currentTimeMs <= CGFloat(endTimeMs) {
+            return 1
+        }
+        let progress = min(1, (currentTimeMs - CGFloat(endTimeMs)) / release)
+        return pow(1 - progress, 1.25)
+    }
+
+    private static func easeOutCubic(_ value: CGFloat) -> CGFloat {
         let t = min(1, max(0, value))
         return 1 - pow(1 - t, 3)
     }
@@ -8206,6 +8264,19 @@ struct SettingsView: View {
                     .settingsMenuSurface()
                 }
 
+                settingsCard(settings.t("setting.pronunciation_notation"), description: settings.t("setting.pronunciation_notation_desc")) {
+                    Picker("", selection: pronunciationNotationBinding) {
+                        Text(settings.t("pronunciation.notation.translation"))
+                            .tag(AppSettings.pronunciationNotationTranslation)
+                        Text(settings.t("pronunciation.notation.latin"))
+                            .tag(AppSettings.pronunciationNotationLatin)
+                        Text(settings.t("pronunciation.notation.ipa"))
+                            .tag(AppSettings.pronunciationNotationIPA)
+                    }
+                    .labelsHidden()
+                    .settingsMenuSurface()
+                }
+
                 settingsToggleCard(
                     settings.t("setting.metadata_translation"),
                     description: settings.t("setting.metadata_translation_desc"),
@@ -9719,6 +9790,18 @@ struct SettingsView: View {
                 guard settings.outputLang != normalized else { return }
                 settings.outputLang = normalized
                 model.outputLanguageChanged()
+            }
+        )
+    }
+
+    private var pronunciationNotationBinding: Binding<String> {
+        Binding(
+            get: { settings.pronunciationNotation },
+            set: { value in
+                let normalized = AppSettings.normalizePronunciationNotation(value)
+                guard settings.pronunciationNotation != normalized else { return }
+                settings.pronunciationNotation = normalized
+                model.pronunciationNotationChanged()
             }
         )
     }
