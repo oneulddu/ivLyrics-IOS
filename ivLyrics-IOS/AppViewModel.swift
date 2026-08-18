@@ -2204,7 +2204,9 @@ final class AppViewModel: ObservableObject {
             spotifyTrackId: result.spotifyTrackId,
             contributors: result.contributors,
             providerId: result.providerId,
-            selectionPolicyKey: result.selectionPolicyKey
+            selectionPolicyKey: result.selectionPolicyKey,
+            syncType: result.syncType,
+            syncPoints: result.syncPoints
         )
     }
 
@@ -2278,6 +2280,15 @@ final class AppViewModel: ObservableObject {
         showSavedToast(settings.t("toast.pronunciation_language_saved"))
         regenerateCurrentAiSupplements(
             statusKey: "toast.pronunciation_language_saved",
+            bypassSupplementCache: false,
+            refreshMetadataTranslation: false
+        )
+    }
+
+    func pronunciationNotationChanged() {
+        showSavedToast(settings.t("toast.settings_saved"))
+        regenerateCurrentAiSupplements(
+            statusKey: "toast.settings_saved",
             bypassSupplementCache: false,
             refreshMetadataTranslation: false
         )
@@ -3753,7 +3764,9 @@ final class AppViewModel: ObservableObject {
             spotifyTrackId: target.spotifyTrackId,
             contributors: target.contributors,
             providerId: target.providerId,
-            selectionPolicyKey: target.selectionPolicyKey
+            selectionPolicyKey: target.selectionPolicyKey,
+            syncType: target.syncType,
+            syncPoints: target.syncPoints
         )
     }
 
@@ -3974,7 +3987,9 @@ final class AppViewModel: ObservableObject {
             spotifyTrackId: safeSpotifyTrackId,
             contributors: source.contributors,
             providerId: source.providerId,
-            selectionPolicyKey: source.selectionPolicyKey
+            selectionPolicyKey: source.selectionPolicyKey,
+            syncType: source.syncType,
+            syncPoints: source.syncPoints
         )
     }
 

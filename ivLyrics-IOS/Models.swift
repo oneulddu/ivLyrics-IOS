@@ -971,7 +971,7 @@ enum KaraokeSyllableTimingNormalizer {
                 && visibleSourceUnits.contains { $0.text.count > 1 }
         )
         if preservesSourceUnits {
-            return groupedPreservingSourceWordUnits(syllables)
+            return groupedPreservingSourceWordUnits(coalesceGraphemeBoundaries(syllables))
         }
         let source = expandTimedChunks(syllables).filter { !$0.text.isEmpty }
         guard !source.isEmpty else { return [] }
@@ -1064,11 +1064,99 @@ enum KaraokeSyllableTimingNormalizer {
     private static func normalizedTimedChunksUnchecked(
         _ syllables: [LyricsLine.Syllable]
     ) -> [LyricsLine.Syllable] {
-        let compensated = compensatePreWhitespaceTimings(expandTimedChunksUnchecked(syllables))
+        let graphemes = coalesceGraphemeBoundaries(expandTimedChunksUnchecked(syllables))
+        let compensated = compensatePreWhitespaceTimings(graphemes)
         if LyricsTextShaping.requiresContinuousShaping(compensated.map(\.text).joined()) {
             return mergeWordRuns(compensated)
         }
         return compensated
+    }
+
+    /// Provider boundaries are not guaranteed to follow Swift `Character`
+    /// boundaries. Re-segment each complete logical run so separately timed
+    /// Arabic/Thai/Indic marks stay attached to their base character while the
+    /// resulting cluster retains the full timing span of its source units.
+    private static func coalesceGraphemeBoundaries(
+        _ syllables: [LyricsLine.Syllable]
+    ) -> [LyricsLine.Syllable] {
+        guard !syllables.isEmpty else { return syllables }
+
+        var result: [LyricsLine.Syllable] = []
+        result.reserveCapacity(syllables.count)
+        var run: [LyricsLine.Syllable] = []
+        var changed = false
+
+        func flushRun() {
+            let merged = coalesceNonEmptyGraphemeRun(run)
+            changed = changed || merged.count != run.count
+            result.append(contentsOf: merged)
+            run.removeAll(keepingCapacity: true)
+        }
+
+        for syllable in syllables {
+            if syllable.text.isEmpty {
+                flushRun()
+                result.append(syllable)
+            } else {
+                run.append(syllable)
+            }
+        }
+        flushRun()
+        return changed ? result : syllables
+    }
+
+    private static func coalesceNonEmptyGraphemeRun(
+        _ syllables: [LyricsLine.Syllable]
+    ) -> [LyricsLine.Syllable] {
+        guard syllables.count > 1 else { return syllables }
+
+        let text = syllables.map(\.text).joined()
+        var sourceRanges: [Range<Int>] = []
+        sourceRanges.reserveCapacity(syllables.count)
+        var sourceCursor = 0
+        for syllable in syllables {
+            let nextCursor = sourceCursor + syllable.text.utf16.count
+            sourceRanges.append(sourceCursor..<nextCursor)
+            sourceCursor = nextCursor
+        }
+
+        var result: [LyricsLine.Syllable] = []
+        result.reserveCapacity(syllables.count)
+        var graphemeCursor = 0
+        for character in text {
+            let grapheme = String(character)
+            let nextCursor = graphemeCursor + grapheme.utf16.count
+            let graphemeRange = graphemeCursor..<nextCursor
+            graphemeCursor = nextCursor
+
+            let overlappingIndices = sourceRanges.indices.filter {
+                sourceRanges[$0].upperBound > graphemeRange.lowerBound
+                    && sourceRanges[$0].lowerBound < graphemeRange.upperBound
+            }
+            guard let firstIndex = overlappingIndices.first else { continue }
+            let first = syllables[firstIndex]
+            if overlappingIndices.count == 1, first.text == grapheme {
+                result.append(first)
+                continue
+            }
+
+            let startTimeMs = overlappingIndices.reduce(first.startTimeMs) {
+                min($0, syllables[$1].startTimeMs)
+            }
+            let endTimeMs = overlappingIndices.reduce(first.endTimeMs) {
+                max($0, syllables[$1].endTimeMs)
+            }
+            let sourceGranularity = overlappingIndices
+                .compactMap { syllables[$0].sourceGranularity }
+                .first ?? first.sourceGranularity
+            result.append(first.copying(
+                text: grapheme,
+                startTimeMs: startTimeMs,
+                endTimeMs: max(startTimeMs, endTimeMs),
+                sourceGranularity: sourceGranularity
+            ))
+        }
+        return result
     }
 
     private static func expandTimedChunksUnchecked(
@@ -1301,6 +1389,22 @@ enum KaraokeSyllableTimingNormalizer {
         assert(complex.last?.endTimeMs == 500)
         assert(zip(complex, complex.dropFirst()).allSatisfy { $0.endTimeMs == $1.startTimeMs })
 
+        let thaiCluster = normalizedTimedChunksUnchecked([
+            LyricsLine.Syllable(text: "น", startTimeMs: 0, endTimeMs: 100),
+            LyricsLine.Syllable(text: "้", startTimeMs: 100, endTimeMs: 200),
+            LyricsLine.Syllable(text: "ำ", startTimeMs: 200, endTimeMs: 300)
+        ])
+        assert(thaiCluster.map(\.text) == ["น้ำ"])
+        assert(thaiCluster.first?.startTimeMs == 0)
+        assert(thaiCluster.first?.endTimeMs == 300)
+
+        let arabicCluster = normalizedTimedChunksUnchecked([
+            LyricsLine.Syllable(text: "ر", startTimeMs: 0, endTimeMs: 120),
+            LyricsLine.Syllable(text: "َ", startTimeMs: 120, endTimeMs: 180)
+        ])
+        assert(arabicCluster.map(\.text) == ["رَ"])
+        assert(arabicCluster.first?.endTimeMs == 180)
+
         let untimed = LyricsLine.Syllable(text: "word", startTimeMs: 800, endTimeMs: 800)
         assert(expandTimedChunksUnchecked([untimed]) == [untimed])
 
@@ -1355,6 +1459,8 @@ struct LyricsResult: Codable, Equatable, Sendable {
     var contributors: [SyncContributor]
     var providerId: String
     var selectionPolicyKey: String
+    var syncType: String
+    var syncPoints: Int
 
     init(
         lines: [LyricsLine],
@@ -1365,7 +1471,9 @@ struct LyricsResult: Codable, Equatable, Sendable {
         spotifyTrackId: String = "",
         contributors: [SyncContributor] = [],
         providerId: String = "",
-        selectionPolicyKey: String = ""
+        selectionPolicyKey: String = "",
+        syncType: String = "unknown",
+        syncPoints: Int = 0
     ) {
         self.lines = lines
         self.providerLabel = providerLabel
@@ -1376,6 +1484,8 @@ struct LyricsResult: Codable, Equatable, Sendable {
         self.contributors = contributors
         self.providerId = providerId.trimmed.lowercased()
         self.selectionPolicyKey = selectionPolicyKey.trimmed
+        self.syncType = Self.normalizedSyncType(syncType)
+        self.syncPoints = max(0, syncPoints)
     }
 
     func withSelection(providerId: String, selectionPolicyKey: String) -> LyricsResult {
@@ -1388,7 +1498,9 @@ struct LyricsResult: Codable, Equatable, Sendable {
             spotifyTrackId: spotifyTrackId,
             contributors: contributors,
             providerId: providerId,
-            selectionPolicyKey: selectionPolicyKey
+            selectionPolicyKey: selectionPolicyKey,
+            syncType: syncType,
+            syncPoints: syncPoints
         )
     }
 
@@ -1398,7 +1510,7 @@ struct LyricsResult: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case lines, providerLabel, detail, karaoke, isrc, spotifyTrackId, contributors
-        case providerId, selectionPolicyKey
+        case providerId, selectionPolicyKey, syncType, syncPoints
     }
 
     init(from decoder: Decoder) throws {
@@ -1412,7 +1524,9 @@ struct LyricsResult: Codable, Equatable, Sendable {
             spotifyTrackId: try container.decodeIfPresent(String.self, forKey: .spotifyTrackId) ?? "",
             contributors: try container.decodeIfPresent([SyncContributor].self, forKey: .contributors) ?? [],
             providerId: try container.decodeIfPresent(String.self, forKey: .providerId) ?? "",
-            selectionPolicyKey: try container.decodeIfPresent(String.self, forKey: .selectionPolicyKey) ?? ""
+            selectionPolicyKey: try container.decodeIfPresent(String.self, forKey: .selectionPolicyKey) ?? "",
+            syncType: try container.decodeIfPresent(String.self, forKey: .syncType) ?? "unknown",
+            syncPoints: try container.decodeIfPresent(Int.self, forKey: .syncPoints) ?? 0
         )
     }
 
@@ -1427,6 +1541,8 @@ struct LyricsResult: Codable, Equatable, Sendable {
         try container.encode(contributors, forKey: .contributors)
         try container.encode(providerId, forKey: .providerId)
         try container.encode(selectionPolicyKey, forKey: .selectionPolicyKey)
+        try container.encode(syncType, forKey: .syncType)
+        try container.encode(syncPoints, forKey: .syncPoints)
     }
 
     struct SyncContributor: Codable, Equatable, Hashable, Sendable {
@@ -1444,6 +1560,8 @@ struct LyricsResult: Codable, Equatable, Sendable {
         var anonymous: Bool
         var isPrivate: Bool
         var decoration: Decoration?
+        var syncType: String
+        var syncPoints: Int
 
         var identityHidden: Bool {
             anonymous || isPrivate
@@ -1455,7 +1573,9 @@ struct LyricsResult: Codable, Equatable, Sendable {
             profileAvailable: Bool = false,
             anonymous: Bool = false,
             isPrivate: Bool = false,
-            decoration: Decoration? = nil
+            decoration: Decoration? = nil,
+            syncType: String = "unknown",
+            syncPoints: Int = 0
         ) {
             let safeName = name.trimmed
             let safeHash = userHash.trimmed
@@ -1466,10 +1586,12 @@ struct LyricsResult: Codable, Equatable, Sendable {
             self.anonymous = shouldHideIdentity
             self.isPrivate = isPrivate
             self.decoration = shouldHideIdentity ? nil : decoration
+            self.syncType = LyricsResult.normalizedSyncType(syncType)
+            self.syncPoints = max(0, syncPoints)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case name, userHash, profileAvailable, anonymous, isPrivate, decoration
+            case name, userHash, profileAvailable, anonymous, isPrivate, decoration, syncType, syncPoints
         }
 
         init(from decoder: Decoder) throws {
@@ -1480,7 +1602,9 @@ struct LyricsResult: Codable, Equatable, Sendable {
                 profileAvailable: try container.decodeIfPresent(Bool.self, forKey: .profileAvailable) ?? false,
                 anonymous: try container.decodeIfPresent(Bool.self, forKey: .anonymous) ?? false,
                 isPrivate: try container.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false,
-                decoration: try container.decodeIfPresent(Decoration.self, forKey: .decoration)
+                decoration: try container.decodeIfPresent(Decoration.self, forKey: .decoration),
+                syncType: try container.decodeIfPresent(String.self, forKey: .syncType) ?? "unknown",
+                syncPoints: try container.decodeIfPresent(Int.self, forKey: .syncPoints) ?? 0
             )
         }
 
@@ -1492,7 +1616,16 @@ struct LyricsResult: Codable, Equatable, Sendable {
             try container.encode(anonymous, forKey: .anonymous)
             try container.encode(isPrivate, forKey: .isPrivate)
             try container.encodeIfPresent(decoration, forKey: .decoration)
+            try container.encode(syncType, forKey: .syncType)
+            try container.encode(syncPoints, forKey: .syncPoints)
         }
+    }
+
+    private static func normalizedSyncType(_ value: String) -> String {
+        let normalized = value.trimmed.lowercased()
+        return ["line", "word", "character", "mixed"].contains(normalized)
+            ? normalized
+            : "unknown"
     }
 }
 
