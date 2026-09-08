@@ -130,45 +130,37 @@ final class UpstreamIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(fallback.contributors, cached.contributors)
     }
 
-    func testKaraokeBouncePolicyHonorsTimingAndReduceMotionBoundaries() {
-        XCTAssertFalse(KaraokeBouncePolicy.isWindowActive(
-            positionMs: 99,
-            lineStartTimeMs: 100,
-            lineEndTimeMs: 600,
-            bounceEnabled: true,
-            reduceMotion: false,
-            hasSegments: true
-        ))
-        XCTAssertTrue(KaraokeBouncePolicy.isWindowActive(
-            positionMs: 879,
-            lineStartTimeMs: 100,
-            lineEndTimeMs: 600,
-            bounceEnabled: true,
-            reduceMotion: false,
-            hasSegments: true
-        ))
-        XCTAssertFalse(KaraokeBouncePolicy.isWindowActive(
-            positionMs: 880,
-            lineStartTimeMs: 100,
-            lineEndTimeMs: 600,
-            bounceEnabled: true,
-            reduceMotion: false,
-            hasSegments: true
-        ))
-        XCTAssertFalse(KaraokeBouncePolicy.isWindowActive(
-            positionMs: 300,
-            lineStartTimeMs: 100,
-            lineEndTimeMs: 600,
-            bounceEnabled: true,
-            reduceMotion: true,
-            hasSegments: true
-        ))
-
-        XCTAssertNil(KaraokeBouncePolicy.strength(positionMs: 99, startTimeMs: 100, endTimeMs: 600))
-        XCTAssertEqual(KaraokeBouncePolicy.strength(positionMs: 100, startTimeMs: 100, endTimeMs: 600), 0)
-        XCTAssertGreaterThan(KaraokeBouncePolicy.strength(positionMs: 300, startTimeMs: 100, endTimeMs: 600) ?? 0, 0)
-        XCTAssertEqual(KaraokeBouncePolicy.strength(positionMs: 600, startTimeMs: 100, endTimeMs: 600), 1)
-        XCTAssertGreaterThan(KaraokeBouncePolicy.strength(positionMs: 700, startTimeMs: 100, endTimeMs: 600) ?? 0, 0)
-        XCTAssertNil(KaraokeBouncePolicy.strength(positionMs: 825, startTimeMs: 100, endTimeMs: 600))
+    func testKaraokeMotionProfileHonorsTimingAndReleaseBoundaries() {
+        let profile = KaraokeMotionProfile(startMs: 100, holdEndMs: 600, cadenceMs: 250, gapMs: 100)
+        XCTAssertEqual(profile.values(positionMs: 99, textSize: 44).offsetY, 0)
+        XCTAssertEqual(profile.values(positionMs: 100, textSize: 44).offsetY, 0)
+        XCTAssertLessThan(profile.values(positionMs: 300, textSize: 44).offsetY, 0)
+        XCTAssertGreaterThan(profile.values(positionMs: 300, textSize: 44).scale, 1)
+        XCTAssertLessThan(profile.values(positionMs: 650, textSize: 44).offsetY, 0)
+        XCTAssertEqual(profile.values(positionMs: profile.holdEndMs + profile.releaseMs, textSize: 44).offsetY, 0)
+        XCTAssertEqual(profile.values(positionMs: .nan, textSize: 44).scale, 1)
     }
+    func testQueueRetryPreservesLongServerDelayAndFractionalRemainder() async throws {
+        let seconds = try XCTUnwrap(SpotifyPlaybackRetryPolicy.retryAfterSeconds("600.25"))
+        var chunks: [UInt64] = []
+        try await SpotifyPlaybackRetryPolicy.waitForRetry(seconds: seconds) { chunks.append($0) }
+        XCTAssertEqual(chunks, [300_000_000_000, 300_000_000_000, 250_000_000])
+        XCTAssertEqual(chunks.reduce(0, +), 600_250_000_000)
+    }
+
+    func testQueueRetryStopsWhenSleepIsCancelled() async {
+        var calls = 0
+        do {
+            try await SpotifyPlaybackRetryPolicy.waitForRetry(seconds: 600) { _ in
+                calls += 1
+                throw CancellationError()
+            }
+            XCTFail("Cancelled retry should not complete")
+        } catch is CancellationError {
+            XCTAssertEqual(calls, 1)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
 }

@@ -16,8 +16,14 @@ enum SpotifyQueueResponseParser {
         case malformedResponse
     }
 
-    private struct QueueResponse: Decodable {
-        var queue: [QueueItem]
+    private struct QueueResponse: Decodable { var queue: [LossyQueueItem] }
+
+    private struct LossyQueueItem: Decodable {
+        var item: QueueItem?
+
+        init(from decoder: Decoder) throws {
+            item = try? QueueItem(from: decoder)
+        }
     }
 
     private struct QueueItem: Decodable {
@@ -36,30 +42,37 @@ enum SpotifyQueueResponseParser {
         }
     }
 
-    private struct Artist: Decodable {
-        var name: String
-    }
+    private struct Artist: Decodable { var name: String }
+    private struct Album: Decodable { var name: String?; var images: [Image]? }
+    private struct Image: Decodable { var url: String; var width: Int? }
+    private struct ExternalIDs: Decodable { var isrc: String? }
 
-    private struct Album: Decodable {
-        var name: String?
-        var images: [Image]?
-    }
-
-    private struct Image: Decodable {
-        var url: String
-        var width: Int?
-    }
-
-    private struct ExternalIDs: Decodable {
-        var isrc: String?
-    }
-
-    static func parse(_ data: Data) -> ParseResult {
+    static func parse(_ data: Data, excludingSourceKey: String = "") -> ParseResult {
         guard let response = try? JSONDecoder().decode(QueueResponse.self, from: data) else {
             return .malformedResponse
         }
-        guard let item = response.queue.first else { return .emptyQueue }
-        guard item.type.caseInsensitiveCompare("track") == .orderedSame else { return .unsupportedItem }
+        guard !response.queue.isEmpty else { return .emptyQueue }
+        var sawMalformedItem = false
+        for decoded in response.queue {
+            guard let item = decoded.item else {
+                sawMalformedItem = true
+                continue
+            }
+            guard item.type.caseInsensitiveCompare("track") == .orderedSame else { continue }
+            guard let track = track(from: item) else {
+                sawMalformedItem = true
+                continue
+            }
+            guard !track.isSpotifyDjSegment,
+                  excludingSourceKey.isEmpty || track.stableKey != excludingSourceKey else {
+                continue
+            }
+            return .track(track)
+        }
+        return sawMalformedItem ? .malformedResponse : .unsupportedItem
+    }
+
+    private static func track(from item: QueueItem) -> TrackSnapshot? {
         let artists = (item.artists ?? [])
             .map(\.name)
             .map(\.trimmed)
@@ -81,13 +94,11 @@ enum SpotifyQueueResponseParser {
             playing: false,
             artworkURL: artworkURL
         )
-        guard track.hasUsableMetadata else { return .malformedResponse }
-        guard !track.isSpotifyDjSegment else { return .unsupportedItem }
-        return .track(track)
+        return track.hasUsableMetadata ? track : nil
     }
 
-    static func nextTrack(from data: Data) -> TrackSnapshot? {
-        guard case .track(let track) = parse(data) else { return nil }
+    static func nextTrack(from data: Data, excludingSourceKey: String = "") -> TrackSnapshot? {
+        guard case .track(let track) = parse(data, excludingSourceKey: excludingSourceKey) else { return nil }
         return track
     }
 }
@@ -110,6 +121,12 @@ enum SpotifyQueueHTTPResponsePolicy {
         default: return .ignore
         }
     }
+}
+
+enum SpotifyQueueLookupResult {
+    case track(TrackSnapshot)
+    case retry(afterSeconds: TimeInterval)
+    case unavailable
 }
 
 enum SpotifyStoredAuthorizationValidationResult: Equatable {
@@ -180,6 +197,15 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     private var authorizationTask: Task<Void, Error>?
     private var authorizationClientId = ""
     private var queueUnavailableForAuthorization = false
+    private var playbackRetryPolicy = SpotifyPlaybackRetryPolicy()
+
+    var playbackPollingDelay: TimeInterval {
+        max(3, playbackRetryPolicy.remainingDelay(now: ProcessInfo.processInfo.systemUptime))
+    }
+
+    func requestImmediatePlaybackRefresh() {
+        playbackRetryPolicy.requestImmediateRefresh()
+    }
 
     override init() {
         super.init()
@@ -271,6 +297,7 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
     }
 
     func disconnect() {
+        playbackRetryPolicy = SpotifyPlaybackRetryPolicy()
         authorizationTask?.cancel()
         authenticationSession?.cancel()
         clearTokens()
@@ -310,11 +337,29 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
 
     func currentPlayback(clientId: String) async throws -> SpotifyPlaybackSnapshot? {
         prepare(clientId: clientId)
-        guard let token = try await accessToken(clientId: clientId) else { return nil }
-        if let playback = try await requestPlaybackSnapshot(endpoint: playbackStateEndpoint, token: token) {
-            return playback
+        guard playbackRetryPolicy.remainingDelay(now: ProcessInfo.processInfo.systemUptime) <= 0 else {
+            throw SpotifyPlaybackPollDeferred()
         }
-        return try await requestPlaybackSnapshot(endpoint: currentlyPlayingEndpoint, token: token)
+        do {
+            guard let token = try await accessToken(clientId: clientId) else { return nil }
+            let primary = try await requestPlaybackSnapshot(endpoint: playbackStateEndpoint, token: token)
+            let playback: SpotifyPlaybackSnapshot?
+            if let primary {
+                playback = primary
+            } else {
+                playback = try await requestPlaybackSnapshot(endpoint: currentlyPlayingEndpoint, token: token)
+            }
+            playbackRetryPolicy.receivedPlayback(hasTrack: playback != nil, now: ProcessInfo.processInfo.systemUptime)
+            return playback
+        } catch {
+            if !Self.isCancellation(error) {
+                playbackRetryPolicy.receivedFailure(
+                    now: ProcessInfo.processInfo.systemUptime,
+                    retryAfter: (error as? SpotifyPlaybackRateLimitError)?.retryAfterSeconds
+                )
+            }
+            throw error
+        }
     }
 
     func metadataAccessToken(clientId: String) async throws -> String? {
@@ -322,32 +367,20 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         return try await accessToken(clientId: clientId)
     }
 
-    func nextQueuedTrack(clientId: String) async -> TrackSnapshot? {
-        guard !queueUnavailableForAuthorization else { return nil }
+    func nextQueuedTrack(clientId: String, excludingSourceKey: String = "") async -> SpotifyQueueLookupResult {
+        guard !queueUnavailableForAuthorization else { return .unavailable }
         prepare(clientId: clientId)
         let token: String
         do {
             guard let resolvedToken = try await accessToken(clientId: clientId), !resolvedToken.isEmpty else {
                 diagnostic("spotify queue prefetch stopped: Web API authorization unavailable")
-                return nil
+                return .unavailable
             }
             token = resolvedToken
         } catch {
-            guard !Self.isCancellation(error) else { return nil }
-            let statusError = error as? HTTPStatusError
-            if SpotifyStoredAuthorizationRefreshFailurePolicy.action(
-                statusCode: statusError?.statusCode,
-                message: statusError?.message ?? ""
-            ) == .discardAndReauthorize {
-                clearTokens()
-                connected = false
-                queueUnavailableForAuthorization = false
-                onAuthorizationRecoveryNeeded?()
-                diagnostic("spotify queue prefetch stopped: stored authorization expired")
-                return nil
-            }
+            guard !Self.isCancellation(error) else { return .unavailable }
             diagnostic("spotify queue prefetch stopped: access token refresh failed")
-            return nil
+            return .retry(afterSeconds: 30)
         }
         var request = URLRequest(url: URL(string: queueEndpoint)!)
         request.timeoutInterval = 10
@@ -360,51 +393,57 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
             data = response.0
             guard let resolvedHTTP = response.1 as? HTTPURLResponse else {
                 diagnostic("spotify queue prefetch stopped: invalid HTTP response")
-                return nil
+                return .retry(afterSeconds: 30)
             }
             http = resolvedHTTP
         } catch {
-            guard !Self.isCancellation(error) else { return nil }
+            guard !Self.isCancellation(error) else { return .unavailable }
             diagnostic("spotify queue prefetch stopped: queue network request failed")
-            return nil
+            return .retry(afterSeconds: 15)
         }
         switch SpotifyQueueHTTPResponsePolicy.action(for: http.statusCode) {
         case .parseBody:
             queueUnavailableForAuthorization = false
-            switch SpotifyQueueResponseParser.parse(data) {
+            switch SpotifyQueueResponseParser.parse(data, excludingSourceKey: excludingSourceKey) {
             case .track(let track):
-                return track
+                return .track(track)
             case .emptyQueue:
-                diagnostic("spotify queue prefetch stopped: queue is empty")
-                return nil
+                diagnostic("spotify queue prefetch waiting: queue is empty")
+                return .retry(afterSeconds: 15)
             case .unsupportedItem:
-                diagnostic("spotify queue prefetch stopped: next queue item is unsupported")
-                return nil
+                diagnostic("spotify queue prefetch waiting: queue has no distinct usable track")
+                return .retry(afterSeconds: 20)
             case .malformedResponse:
-                diagnostic("spotify queue prefetch stopped: queue response parsing failed")
-                return nil
+                diagnostic("spotify queue prefetch waiting: queue response parsing failed")
+                return .retry(afterSeconds: 30)
             }
         case .invalidateAccessToken:
             invalidateAccessToken()
             connected = false
             onAuthorizationRecoveryNeeded?()
             diagnostic("spotify queue prefetch stopped: queue authorization expired (HTTP 401)")
-            return nil
+            return .unavailable
         case .disableForAuthorization:
             queueUnavailableForAuthorization = true
             diagnostic("spotify queue prefetch stopped: queue access forbidden for this authorization (HTTP 403)")
-            return nil
+            return .unavailable
         case .noContent:
-            diagnostic("spotify queue prefetch stopped: queue unavailable (HTTP 204)")
-            return nil
+            diagnostic("spotify queue prefetch waiting: queue unavailable (HTTP 204)")
+            return .retry(afterSeconds: 15)
         case .ignore:
             if http.statusCode == 429 {
-                diagnostic("spotify queue prefetch stopped: queue rate limited (HTTP 429)")
+                let retryAfter = Self.retryAfterSeconds(http) ?? 30
+                diagnostic("spotify queue prefetch waiting: queue rate limited (HTTP 429), retrying in \(Int(retryAfter))s")
+                return .retry(afterSeconds: retryAfter)
             } else {
-                diagnostic("spotify queue prefetch stopped: queue request failed (HTTP \(http.statusCode))")
+                diagnostic("spotify queue prefetch waiting: queue request failed (HTTP \(http.statusCode))")
+                return .retry(afterSeconds: 30)
             }
-            return nil
         }
+    }
+
+    private static func retryAfterSeconds(_ response: HTTPURLResponse) -> TimeInterval? {
+        SpotifyPlaybackRetryPolicy.retryAfterSeconds(response.value(forHTTPHeaderField: "Retry-After"))
     }
 
     func validateStoredAuthorization(clientId: String) async -> SpotifyStoredAuthorizationValidationResult {
@@ -485,6 +524,10 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { return nil }
         if http.statusCode == 204 { return nil }
+        if http.statusCode == 429 {
+            throw SpotifyPlaybackRateLimitError(retryAfterSeconds:
+                SpotifyPlaybackRetryPolicy.retryAfterSeconds(http.value(forHTTPHeaderField: "Retry-After")) ?? 30)
+        }
         if http.statusCode == 401 {
             invalidateAccessToken()
             throw HTTPStatusError(statusCode: http.statusCode, message: String(data: data, encoding: .utf8) ?? "")
@@ -541,7 +584,23 @@ final class SpotifyUserPlaybackService: NSObject, ObservableObject, ASWebAuthent
             connected = false
             return nil
         }
-        try await refreshAccessToken(clientId: clientId.trimmed)
+        do {
+            try await refreshAccessToken(clientId: clientId.trimmed)
+        } catch {
+            guard !Self.isCancellation(error) else { throw error }
+            let statusError = error as? HTTPStatusError
+            if SpotifyStoredAuthorizationRefreshFailurePolicy.action(
+                statusCode: statusError?.statusCode,
+                message: statusError?.message ?? ""
+            ) == .discardAndReauthorize {
+                clearTokens()
+                connected = false
+                queueUnavailableForAuthorization = false
+                onAuthorizationRecoveryNeeded?()
+                diagnostic("spotify Web API: stored authorization expired; user authorization required")
+            }
+            throw error
+        }
         return validAccessToken()
     }
 

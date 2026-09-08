@@ -170,6 +170,34 @@ final class PictureInPictureKaraokeLayoutTests: XCTestCase {
         }
     }
 
+    func testOverlappingRowsMeasureLongTranslationsAndFitEachFullImage() {
+        let controller = LyricsPictureInPictureController()
+        for orientation in [AppSettings.pipOrientationLandscape, AppSettings.pipOrientationPortrait] {
+            _ = controller.debugFrameImage(
+                orientation: orientation, showArtwork: true,
+                vocalPartCount: 1, translationText: "", independentLineCount: 2
+            )
+            let originalSizes = controller.debugOverlappingImageSizes
+            _ = controller.debugFrameImage(
+                orientation: orientation, showArtwork: true, vocalPartCount: 1,
+                translationText: String(repeating: "A long translation must remain fully visible. ", count: 8),
+                independentLineCount: 2
+            )
+            XCTAssertEqual(originalSizes.count, 2)
+            XCTAssertEqual(controller.debugOverlappingImageSizes.count, 2)
+            XCTAssertEqual(controller.debugOverlappingDrawRects.count, 2)
+            guard originalSizes.count == 2, controller.debugOverlappingImageSizes.count == 2,
+                  controller.debugOverlappingDrawRects.count == 2 else { continue }
+            for index in 0..<2 {
+                XCTAssertGreaterThan(controller.debugOverlappingImageSizes[index].height, originalSizes[index].height)
+                let rect = controller.debugOverlappingDrawRects[index]
+                XCTAssertGreaterThan(rect.height, 0)
+                XCTAssertTrue(controller.debugLastLyricsRect.insetBy(dx: -0.5, dy: -0.5).contains(rect))
+            }
+            XCTAssertLessThanOrEqual(controller.debugOverlappingDrawRects[0].maxY, controller.debugOverlappingDrawRects[1].minY)
+        }
+    }
+
     private func assertPrimaryContentIsContained(
         _ controller: LyricsPictureInPictureController,
         context: String,

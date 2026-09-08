@@ -162,7 +162,10 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private(set) var debugLastLyricsRect = CGRect.zero
     private(set) var debugLastPrimaryImageSize = CGSize.zero
     private(set) var debugLastPrimaryDrawRect = CGRect.zero
+    private(set) var debugOverlappingImageSizes: [CGSize] = []
+    private(set) var debugOverlappingDrawRects: [CGRect] = []
 #endif
+    private let karaokePreparationStore = KaraokeRenderPreparationStore()
 
     override init() {
         super.init()
@@ -260,6 +263,9 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             lastRenderIdentityInput = nextRenderIdentityInput
         }
         let forceRender = nextRenderIdentity != lastRenderIdentityValue
+        if state.track?.stableKey != nextState.track?.stableKey {
+            karaokePreparationStore.removeAll()
+        }
         state = nextState
         resolvedActiveLine = nextActiveLine
         lastRenderIdentityValue = nextRenderIdentity
@@ -595,7 +601,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         showArtwork: Bool,
         backgroundMode: String = AppSettings.pipBackgroundCover,
         vocalPartCount: Int = 2,
-        translationText: String = "Android PiP visual parity"
+        translationText: String = "Android PiP visual parity",
+        independentLineCount: Int = 1
     ) -> UIImage {
         let previousState = state
         let previousResolvedActiveLine = resolvedActiveLine
@@ -647,6 +654,13 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             vocalParts: parts,
             translationText: translationText
         )]
+        if independentLineCount > 1, let first = state.lines.first {
+            state.lines = (0..<independentLineCount).map { index in
+                var line = first
+                line.startTimeMs += Int64(index) * 100
+                return line
+            }
+        }
         state.positionMs = 4_800
         state.title = "Midnight Signal"
         state.artist = "ivLyrics"
@@ -853,6 +867,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         debugLastLyricsRect = lyricRect
         debugLastPrimaryImageSize = .zero
         debugLastPrimaryDrawRect = .zero
+        debugOverlappingImageSizes = []
+        debugOverlappingDrawRects = []
 #endif
         guard let active = resolvedActiveLine else {
             let hasStatusText = state.lines.isEmpty && !state.statusText.isEmpty
@@ -871,6 +887,39 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 alignment: state.textAlignment,
                 lineLimit: 2
             )
+            return
+        }
+
+        let visibleLines = state.activeLines
+        if visibleLines.count > 1 {
+            // Render each independent source line separately. Sharing a viewport
+            // must not turn another primary singer into a smaller background part.
+            let gap: CGFloat = 5
+            let rowHeight = max(1, (lyricRect.height - gap * CGFloat(visibleLines.count - 1)) / CGFloat(visibleLines.count))
+            let scale = Double(max(70, min(280, state.lyricsSizePercent))) / 100
+            let primarySize = max(12, min(34, lyricRect.width * 0.061 * scale, rowHeight / 2.8))
+            for (offset, visible) in visibleLines.enumerated() {
+                let rect = CGRect(x: lyricRect.minX, y: lyricRect.minY + CGFloat(offset) * (rowHeight + gap), width: lyricRect.width, height: rowHeight)
+                let supplementSize = max(9, primarySize * 0.48 * CGFloat(AppSettings.clampPipTranslationSizePercent(state.translationSizePercent)) / 100)
+                guard let image = currentLyricsImage(
+                    visible, width: rect.width, primaryFontSize: primarySize,
+                    supplementFontSize: supplementSize
+                ), image.size.width > 0, image.size.height > 0 else { continue }
+                let imageScale = min(1, rect.width / image.size.width, rect.height / image.size.height)
+                let size = CGSize(width: image.size.width * imageScale, height: image.size.height * imageScale)
+                let x: CGFloat
+                switch state.textAlignment {
+                case .right: x = rect.maxX - size.width
+                case .center: x = rect.midX - size.width / 2
+                default: x = rect.minX
+                }
+                let drawRect = CGRect(x: x, y: rect.midY - size.height / 2, width: size.width, height: size.height)
+#if DEBUG
+                debugOverlappingImageSizes.append(image.size)
+                debugOverlappingDrawRects.append(drawRect)
+#endif
+                image.draw(in: drawRect)
+            }
             return
         }
 
@@ -896,7 +945,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             height: currentLyricsImage.size.height * currentLyricsScale
         )
 
-        let next = state.nextLineText(after: resolvedActiveLine)
+        let next = state.nextLineText
         let nextFont = typographyFont(slotId: AppSettings.typoLyricsOriginal, baseSize: nextSize)
         let nextHeight = next.map {
             measuredTextHeight($0, width: lyricRect.width, font: nextFont, lineLimit: 0)
@@ -975,7 +1024,9 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                 karaokeDisplayGranularity: state.karaokeDisplayGranularity,
                 syncedLyricsKaraokeAnimationEnabled: state.syncedLyricsKaraokeAnimationEnabled,
                 bounceEnabled: state.karaokeBounceEffectEnabled,
-                typography: state.typography
+                typography: state.typography,
+                preparationStore: karaokePreparationStore,
+                sourceLineIndex: active.index
             )
             .padding(.vertical, effectInset)
 
@@ -1338,7 +1389,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             lyricsSizePercent: 150,
             translationSizePercent: 100,
             solidColor: "#1e3a8a",
-            syncedLyricsKaraokeAnimationEnabled: true,
+            syncedLyricsKaraokeAnimationEnabled: false,
             karaokeBounceEffectEnabled: true,
             karaokeDisplayGranularity: AppSettings.karaokeDisplayCharacter,
             useSyncCreatorSpeakerColors: true,
@@ -1408,20 +1459,48 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             return ActiveLine(line: line, index: activeLineIndex, progress: progress)
         }
 
-        func nextLineText(after activeLine: ActiveLine?) -> String? {
-            guard let activeLine else { return nil }
-            let index = activeLine.index + 1
-            guard lines.indices.contains(index) else { return nil }
-            let value = lines[index].text.trimmed
+        var activeLines: [ActiveLine] {
+            let singing = lines.indices.compactMap { index -> ActiveLine? in
+                let line = lines[index]
+                guard line.isTimed,
+                      !InstrumentalBreakMarker.isMarkerText(line.text),
+                      positionMs >= line.startTimeMs,
+                      positionMs < line.endTimeMs else { return nil }
+                let duration = max(1, line.endTimeMs - line.startTimeMs)
+                let progress = max(0, min(1, CGFloat(positionMs - line.startTimeMs) / CGFloat(duration)))
+                return ActiveLine(line: line, index: index, progress: progress)
+            }
+            return singing.isEmpty ? activeLine.map { [$0] } ?? [] : singing
+        }
+
+        var nextLineText: String? {
+            guard let next = lines.first(where: { $0.startTimeMs > positionMs }) else { return nil }
+            let value = next.text.trimmed
             return value.isEmpty ? nil : value
         }
 
+        var usesTimedKaraoke: Bool {
+            guard syncedLyricsKaraokeAnimationEnabled,
+                  AppSettings.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity)
+                    != AppSettings.karaokeDisplayLine,
+                  !activeLines.isEmpty else { return false }
+            return activeLines.contains { active in
+                active.line.syllables.contains(where: { $0.endTimeMs > $0.startTimeMs })
+                    || active.line.vocalParts.contains { part in
+                        part.syllables.contains(where: { $0.endTimeMs > $0.startTimeMs })
+                    }
+            }
+        }
+
         func framesPerSecond(activeLine: ActiveLine?) -> Int32 {
-            PictureInPictureRenderCadence.framesPerSecond(
-                line: activeLine?.line,
-                syncedAnimationEnabled: syncedLyricsKaraokeAnimationEnabled,
-                displayGranularity: karaokeDisplayGranularity
-            )
+            let visible = activeLines
+            return (visible.isEmpty ? [activeLine].compactMap { $0 } : visible).map {
+                PictureInPictureRenderCadence.framesPerSecond(
+                    line: $0.line,
+                    syncedAnimationEnabled: syncedLyricsKaraokeAnimationEnabled,
+                    displayGranularity: karaokeDisplayGranularity
+                )
+            }.max() ?? PictureInPictureRenderCadence.staticFramesPerSecond
         }
 
         func preferredFrameInterval(activeLine: ActiveLine?) -> TimeInterval {
@@ -1433,6 +1512,17 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             identity.reserveCapacity(256)
             identity.append("|")
             identity.append(String(line?.index ?? -1))
+            for visible in activeLines {
+                identity.append("|source:\(visible.index):\(visible.line.id)")
+                identity.append(visible.line.pronunciationText)
+                identity.append(visible.line.translationText)
+                identity.append(visible.line.furiganaText)
+                for part in visible.line.vocalParts {
+                    identity.append(part.pronunciationText)
+                    identity.append(part.translationText)
+                    identity.append(part.furiganaText)
+                }
+            }
             identity.append("|")
             identity.append(title)
             identity.append("|")
@@ -1537,12 +1627,14 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private struct RenderIdentityInput {
         let state: RenderState
         let activeLine: ActiveLine?
+        let visibleLines: [ActiveLine]
 
         init(state: RenderState, activeLine: ActiveLine?) {
             var identityState = state
             identityState.lines = []
             self.state = identityState
             self.activeLine = activeLine
+            self.visibleLines = state.activeLines
         }
 
         func definitelyMatches(_ other: RenderIdentityInput) -> Bool {
@@ -1566,6 +1658,12 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
                   state.typography == other.state.typography,
                   state.speakerColors == other.state.speakerColors else {
                 return false
+            }
+            guard visibleLines.count == other.visibleLines.count else { return false }
+            for index in visibleLines.indices {
+                let left = visibleLines[index]
+                let right = other.visibleLines[index]
+                guard left.index == right.index, left.line == right.line else { return false }
             }
             return definitelyMatchesActiveLine(other.activeLine)
         }
@@ -1618,6 +1716,8 @@ struct PictureInPictureKaraokeContent: View {
     var syncedLyricsKaraokeAnimationEnabled: Bool
     var bounceEnabled: Bool
     var typography: AppSettings.TypographySettings = .defaults
+    var preparationStore: KaraokeRenderPreparationStore? = nil
+    var sourceLineIndex: Int = -1
 
     var body: some View {
         let visibleParts = displayParts
@@ -1634,7 +1734,8 @@ struct PictureInPictureKaraokeContent: View {
                     speakerFallback: line.speakerFallback,
                     kind: line.kind,
                     active: true,
-                    inactiveDistance: 0
+                    inactiveDistance: 0,
+                    preparationSlot: "line:\(sourceLineIndex)"
                 )
             } else {
                 VStack(alignment: horizontalAlignment, spacing: 0) {
@@ -1653,7 +1754,8 @@ struct PictureInPictureKaraokeContent: View {
                             kind: part.kind,
                             active: partActive,
                             inactiveDistance: partActive ? 0 : 0.45,
-                            effectRowSeed: index
+                            effectRowSeed: index,
+                            preparationSlot: "line:\(sourceLineIndex):part:\(index):\(part.id)"
                         )
                         .padding(.top, vocalPartTopSpacing(index: index, parts: visibleParts))
                     }
@@ -1695,7 +1797,8 @@ struct PictureInPictureKaraokeContent: View {
         kind: String,
         active: Bool,
         inactiveDistance: Double,
-        effectRowSeed: Int = 0
+        effectRowSeed: Int = 0,
+        preparationSlot: String = "line"
     ) -> some View {
         let displayGranularity = AppSettings.normalizeKaraokeDisplayGranularity(
             karaokeDisplayGranularity
@@ -1737,7 +1840,8 @@ struct PictureInPictureKaraokeContent: View {
             bounceEnabled: bounceEnabled,
             bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: fontSize),
             syntheticTimingEnabled: !hasTimedSyllables && syncedLyricsKaraokeAnimationEnabled,
-            effectRowSeed: effectRowSeed
+            effectRowSeed: effectRowSeed,
+            sharedPreparationCache: preparationStore?.cache(for: preparationSlot)
         )
         .frame(maxWidth: .infinity, alignment: frameAlignment)
     }
