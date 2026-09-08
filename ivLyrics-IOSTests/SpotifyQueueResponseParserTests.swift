@@ -47,7 +47,7 @@ final class SpotifyQueueResponseParserTests: XCTestCase {
         XCTAssertNil(SpotifyQueueResponseParser.nextTrack(from: data))
     }
 
-    func testLeadingEpisodeDoesNotSkipAheadToLaterTrack() throws {
+    func testLeadingEpisodeSkipsAheadToNextUsableTrack() throws {
         let data = try XCTUnwrap(
             """
             {
@@ -64,8 +64,7 @@ final class SpotifyQueueResponseParserTests: XCTestCase {
             """.data(using: .utf8)
         )
 
-        XCTAssertEqual(SpotifyQueueResponseParser.parse(data), .unsupportedItem)
-        XCTAssertNil(SpotifyQueueResponseParser.nextTrack(from: data))
+        XCTAssertEqual(SpotifyQueueResponseParser.nextTrack(from: data)?.title, "Later Song")
     }
 
     func testMalformedImmediateItemReturnsNil() throws {

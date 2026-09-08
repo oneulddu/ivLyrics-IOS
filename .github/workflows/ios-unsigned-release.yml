@@ -15,6 +15,11 @@ on:
         required: true
         type: boolean
         default: false
+      notify_discord:
+        description: "Send release notes to Discord"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -117,6 +122,19 @@ jobs:
         env:
           IVLYRICS_SOURCE_ROOT: ${{ steps.release.outputs.source_path }}
         run: python3 scripts/validate-i18n.py
+
+      - name: Validate playback, motion and provider regressions
+        env:
+          IVLYRICS_SOURCE_ROOT: ${{ steps.release.outputs.source_path }}
+        run: |
+          for regression in test-playback-regressions.py test-timeline-cache.py test-provider-overlap.py; do
+            script="$IVLYRICS_SOURCE_ROOT/scripts/$regression"
+            if [[ -f "$script" ]]; then
+              python3 "$script"
+            else
+              echo "$regression is not part of this historical release target."
+            fi
+          done
 
       - name: Run static analyzer
         env:
@@ -224,6 +242,7 @@ jobs:
 
       - name: Send iOS release notes to Discord
         continue-on-error: true
+        if: github.event_name != 'workflow_dispatch' || inputs.notify_discord
         env:
           RELEASE_WEBHOOK_URL: ${{ secrets.RELEASE_NOTES_WEBHOOK_URL }}
           RELEASE_PLATFORM: ios

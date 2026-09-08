@@ -871,7 +871,7 @@ struct ContentView: View {
 
 private struct PortraitPlayerProgressSection: View {
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var metadataControlsSpacing: CGFloat
 
@@ -1154,7 +1154,7 @@ struct PlayerBackgroundView: View {
 
 private struct YouTubeBackdropSection: View {
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var info: YouTubeVideoInfo
     var background: AppSettings.BackgroundSettings
@@ -2269,7 +2269,7 @@ private struct LandscapeArtworkView: View {
 private struct LandscapeTransportControls: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
 
     var body: some View {
@@ -3399,7 +3399,7 @@ private struct TmiSheetView: View {
 struct TransportPanel: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
 
     var body: some View {
@@ -3623,7 +3623,7 @@ struct MainLyricPreviewPanel: View {
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var chromeless = false
     var typographyOverride: AppSettings.TypographySettings? = nil
@@ -3683,6 +3683,15 @@ struct MainLyricPreviewPanel: View {
     private func previewRows(previewItems: Int) -> [MainLyricPreviewRow] {
         if model.lyricsResult.lines.isEmpty {
             return emptyPreviewRows()
+        }
+        let activeIndices = LyricsTimelineDisplayBuilder.activeLineIndices(
+            context: model.timelineContext,
+            positionMs: model.adjustedPositionMs
+        )
+        if !activeIndices.isEmpty {
+            return activeIndices.flatMap { index in
+                previewRows(for: model.lyricsResult.lines[index], lineIndex: index, previewItems: previewItems)
+            }
         }
         guard let entry = LyricsTimelineDisplayBuilder.previewItem(
             context: model.timelineContext,
@@ -3772,6 +3781,7 @@ struct MainLyricPreviewPanel: View {
         }
         return rows.map { row in
             var syncedRow = row
+            syncedRow.sourceLineIndex = lineIndex
             syncedRow.lineStartTimeMs = line.startTimeMs
             syncedRow.lineEndTimeMs = line.endTimeMs
             return syncedRow
@@ -4023,9 +4033,10 @@ private struct MainLyricPreviewRow: Identifiable {
     var slotId: String = AppSettings.typoMainPreviewOriginal
     var lineStartTimeMs: Int64 = 0
     var lineEndTimeMs: Int64 = 0
+    var sourceLineIndex: Int = -1
 
     var id: String {
-        "\(type.rawValue)-\(slotId)-\(primary)-\(text)-\(rubyText)-\(syllables.count)"
+        "\(sourceLineIndex)-\(type.rawValue)-\(slotId)-\(primary)-\(text)-\(rubyText)-\(syllables.count)"
     }
 
     var effectRowSeed: Int {
@@ -4263,7 +4274,7 @@ private struct MainLyricPreviewRowView: View {
 
 private struct MainLyricPreviewInterludeIcon: View {
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
             let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
             HStack(spacing: 4) {
                 ForEach(0..<4, id: \.self) { index in
@@ -4607,7 +4618,7 @@ private struct EnumeratedRandomAccessCollection<Base: RandomAccessCollection>: R
 struct LyricsTimelineView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var animatedCenterIndex: Double?
@@ -4636,7 +4647,23 @@ struct LyricsTimelineView: View {
             }
             return false
         } ?? 0)
-        let visualCenterIndex = animatedCenterIndex ?? Double(activeDisplayIndex)
+        let anticipatedItemID = settings.syncedLyricsKaraokeAnimationEnabled && !accessibilityReduceMotion
+            ? LyricsTimelineDisplayBuilder.previewItem(
+                context: timelineContext,
+                positionMs: position + 300,
+                trackDurationMs: model.lyricsDurationMs,
+                autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+            )?.id
+            : nil
+        let anticipatedDisplayIndex = anticipatedItemID.flatMap { id in
+            items.firstIndex { $0.id == id }
+        }
+        // PC starts moving up to one row 300 ms before the next line. Never
+        // skip an intermediate row when several short lines share that window.
+        let targetDisplayIndex = anticipatedDisplayIndex.flatMap { index in
+            index == activeDisplayIndex + 1 ? index : nil
+        } ?? activeDisplayIndex
+        let visualCenterIndex = animatedCenterIndex ?? Double(targetDisplayIndex)
         LazyVStack(spacing: 12) {
             if model.lyricsResult.lines.isEmpty {
                 if model.status == .loading {
@@ -4673,7 +4700,15 @@ struct LyricsTimelineView: View {
                     Group {
                         switch item {
                         case .line(let index, let line, _):
-                            let lineActive = itemActive || index == fallbackActiveLineIndex
+                            let visualState = LyricsTimelineDisplayBuilder.playbackVisualState(
+                                context: timelineContext,
+                                lineIndex: index,
+                                positionMs: position,
+                                trackDurationMs: model.lyricsDurationMs,
+                                autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+                            )
+                            let lineActive = visualState.highlighted
+                                || (activeItemID == nil && index == model.activeLineIndex)
                             let renderInput = model.timelineLineRenderInput(for: line, at: index)
                             LyricsLineView(
                                 lineIndex: index,
@@ -4683,9 +4718,11 @@ struct LyricsTimelineView: View {
                                     ? renderInput.culturalAnnotations
                                     : [],
                                 active: lineActive,
+                                animationActive: visualState.animating,
+                                completedColorOpacity: visualState.completedColorOpacity,
                                 displayDistance: displayDistance,
                                 progress: lineActive ? model.progress(for: line) : 0,
-                                positionMs: lineActive ? position : 0,
+                                positionMs: visualState.renderPositionMs,
                                 alignment: settings.lyricsTextAlignment,
                                 pronunciationLoading: model.lyricsSupplementPronunciationLoading,
                                 translationLoading: model.lyricsSupplementTranslationLoading,
@@ -4709,15 +4746,24 @@ struct LyricsTimelineView: View {
             }
         }
         .onAppear {
-            animatedCenterIndex = Double(activeDisplayIndex)
+            animatedCenterIndex = Double(targetDisplayIndex)
         }
-        .onChange(of: activeDisplayIndex) { _, nextIndex in
+        .onChange(of: targetDisplayIndex) { _, nextIndex in
             let next = Double(nextIndex)
             guard let current = animatedCenterIndex, abs(next - current) <= 3.2 else {
                 animatedCenterIndex = next
                 return
             }
-            withAnimation(accessibilityReduceMotion ? nil : LyricsMotion.centering) {
+            withAnimation(
+                accessibilityReduceMotion
+                    ? nil
+                    : LyricsMotion.centering(
+                        duration: LyricsMotion.centeringDuration(
+                            items: items,
+                            targetIndex: nextIndex
+                        )
+                    )
+            ) {
                 animatedCenterIndex = next
             }
         }
@@ -4786,7 +4832,7 @@ private struct LyricsProviderAttribution: View {
 private struct LyricsTimelineScrollView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var autoScrollPaused = false
@@ -4894,13 +4940,44 @@ private struct LyricsTimelineScrollView: View {
     }
 
     private var activeTargetID: String? {
-        LyricsTimelineDisplayBuilder.scrollTargetID(
+        let currentTargetID = LyricsTimelineDisplayBuilder.scrollTargetID(
             context: model.timelineContext,
             positionMs: model.adjustedPositionMs,
             trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled,
             vocalPartAnchorsEnabled: !settings.karaokeDataAsLineSynced
         )
+        guard !accessibilityReduceMotion,
+              settings.syncedLyricsKaraokeAnimationEnabled,
+              let currentItem = LyricsTimelineDisplayBuilder.previewItem(
+                context: model.timelineContext,
+                positionMs: model.adjustedPositionMs,
+                trackDurationMs: model.lyricsDurationMs,
+                autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+              ),
+              let advancedItem = LyricsTimelineDisplayBuilder.previewItem(
+                context: model.timelineContext,
+                positionMs: model.adjustedPositionMs + 300,
+                trackDurationMs: model.lyricsDurationMs,
+                autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+              ),
+              currentItem.id != advancedItem.id else {
+            return currentTargetID
+        }
+        let items = LyricsTimelineDisplayBuilder.items(
+            context: model.timelineContext,
+            positionMs: model.adjustedPositionMs,
+            trackDurationMs: model.lyricsDurationMs,
+            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+        )
+        guard let currentIndex = items.firstIndex(where: { $0.id == currentItem.id }),
+              let advancedIndex = items.firstIndex(where: { $0.id == advancedItem.id }),
+              advancedIndex == currentIndex + 1 else {
+            return currentTargetID
+        }
+        // Pre-center at most one row so very short lyrics cannot skip an
+        // intermediate line inside the look-ahead window.
+        return advancedItem.id
     }
 
     private func topEdgeInset(for height: CGFloat) -> CGFloat {
@@ -4935,7 +5012,16 @@ private struct LyricsTimelineScrollView: View {
             )
         }
         if animated && !accessibilityReduceMotion {
-            withAnimation(LyricsMotion.centering, action)
+            let items = LyricsTimelineDisplayBuilder.items(
+                context: model.timelineContext,
+                positionMs: model.adjustedPositionMs,
+                trackDurationMs: model.lyricsDurationMs,
+                autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+            )
+            let duration = items.firstIndex(where: { $0.id == targetID }).map {
+                LyricsMotion.centeringDuration(items: items, targetIndex: $0)
+            } ?? LyricsMotion.defaultCenteringDuration
+            withAnimation(LyricsMotion.centering(duration: duration), action)
         } else {
             action()
         }
@@ -4943,8 +5029,37 @@ private struct LyricsTimelineScrollView: View {
 }
 
 private enum LyricsMotion {
-    // Android approaches the target with a 230 ms exponential time constant.
-    static let centering = Animation.timingCurve(0.20, 0.70, 0.42, 0.96, duration: 0.82)
+    static let defaultCenteringDuration = 0.30
+    private static let defaultCenteringBudget = 0.412
+    private static let minimumCenteringBudget = 0.08
+    private static let settleReserveSeconds = 0.024
+
+    // Keep the mobile hand-off on the same symmetric S-curve and adaptive
+    // short-line duration as PC.
+    static func centering(duration: Double = defaultCenteringDuration) -> Animation {
+        .timingCurve(0.42, 0, 0.58, 1, duration: duration)
+    }
+
+    static func centeringDuration(
+        items: [LyricsTimelineDisplayItem],
+        targetIndex: Int
+    ) -> Double {
+        guard items.indices.contains(targetIndex) else {
+            return defaultCenteringDuration
+        }
+        let targetStart = items[targetIndex].startTimeMs
+        guard let nextStart = items.dropFirst(targetIndex + 1)
+            .map(\.startTimeMs)
+            .first(where: { $0 > targetStart }) else {
+            return defaultCenteringDuration
+        }
+        let available = max(
+            minimumCenteringBudget,
+            Double(nextStart - targetStart) / 1_000 - settleReserveSeconds
+        )
+        let timingScale = min(1, available / defaultCenteringBudget)
+        return max(0.001, defaultCenteringDuration * timingScale)
+    }
 }
 
 private struct LyricsTimelineEdgeFadeMask: View {
@@ -4989,6 +5104,15 @@ enum LyricsTimelineDisplayItem: Identifiable {
             return "interlude-\(info.kind)-\(info.startTimeMs)-\(info.endTimeMs)"
         }
     }
+
+    var startTimeMs: Int64 {
+        switch self {
+        case .line(_, let line, _):
+            return line.startTimeMs
+        case .interlude(let info):
+            return info.startTimeMs
+        }
+    }
 }
 
 struct InterludeInfo {
@@ -5017,6 +5141,11 @@ struct LyricsTimelineContext {
     fileprivate let automaticInterludeSeeds: [AutomaticInterludeSeed?]
     fileprivate let automaticInterludeIndices: [Int]
     let baseItems: [LyricsTimelineDisplayItem]
+    let itemQueries: TimelineIntervalCache<[LyricsTimelineDisplayItem]>
+    let previewQueries: TimelineIntervalCache<LyricsTimelineDisplayItem?>
+    let activeLineQueries: TimelineIntervalCache<[Int]>
+    let precedingLyricEndTimes: [Int64]
+    let lastLyricEndTimes: [Int64]?
 
     init(lines: [LyricsLine], cacheLyricEndTimes: Bool = true) {
         self.lines = lines
@@ -5058,6 +5187,14 @@ struct LyricsTimelineContext {
         let lastLyricEndTimes = cacheLyricEndTimes
             ? lines.map(LyricsTimelineDisplayBuilder.lastLyricEndTime)
             : nil
+        self.lastLyricEndTimes = lastLyricEndTimes
+        var precedingEnd: Int64 = -1
+        precedingLyricEndTimes = lines.indices.map { index in
+            if !isMarker[index] {
+                precedingEnd = max(precedingEnd, LyricsTimelineDisplayBuilder.lastLyricEndTime(lines[index]))
+            }
+            return precedingEnd
+        }
         let markerInterludeInfos = LyricsTimelineDisplayBuilder.markerInterludeInfos(
             lines: lines,
             isMarker: isMarker,
@@ -5068,7 +5205,7 @@ struct LyricsTimelineContext {
             lines: lines,
             isMarker: isMarker,
             markerInterludeInfos: markerInterludeInfos,
-            lastLyricEndTimes: lastLyricEndTimes
+            lastLyricEndTimes: cacheLyricEndTimes ? precedingLyricEndTimes : nil
         )
         automaticInterludeSeeds = automaticInterludes.seeds
         automaticInterludeIndices = automaticInterludes.indices
@@ -5082,7 +5219,27 @@ struct LyricsTimelineContext {
             baseItems.append(.line(index: 0, line: first, id: lineIDs[0]))
         }
         self.baseItems = baseItems
+        let boundaries = LyricsTimelineDisplayBuilder.queryBoundaries(
+            lines: lines, markers: markerInterludeInfos, lyricEndTimes: lastLyricEndTimes
+        )
+        itemQueries = TimelineIntervalCache(boundaries: boundaries)
+        previewQueries = TimelineIntervalCache(boundaries: boundaries)
+        activeLineQueries = TimelineIntervalCache(boundaries: boundaries)
     }
+}
+
+struct LyricsLinePlaybackVisualState {
+    static let inactive = LyricsLinePlaybackVisualState(
+        highlighted: false,
+        animating: false,
+        completedColorOpacity: 0,
+        renderPositionMs: 0
+    )
+
+    var highlighted: Bool
+    var animating: Bool
+    var completedColorOpacity: CGFloat
+    var renderPositionMs: Int64
 }
 
 enum LyricsTimelineDisplayBuilder {
@@ -5090,6 +5247,22 @@ enum LyricsTimelineDisplayBuilder {
     private static let trailingInterludeDelayMs: Int64 = 3_500
     private static let vocalPartCenterThreshold = 4
     private static let displayWhitespace = CharacterSet.whitespacesAndNewlines
+    private static let karaokeReleaseWindowMs: Int64 = 820
+    private static let karaokeCompletionPositionOffsetMs: Int64 = 900
+    private static let completedColorFadeMs: Int64 = 520
+
+    // A scroll anchor is one line; the set of singing rows can contain several.
+    // Keep the original source order and individual end times in compact previews.
+    static func activeLineIndices(context: LyricsTimelineContext, positionMs: Int64) -> [Int] {
+        context.activeLineQueries.value(position: positionMs, duration: 0, automaticInterludes: false) {
+            context.lines.indices.filter { index in
+                let line = context.lines[index]
+                let end = context.lastLyricEndTimes?[index] ?? lastLyricEndTime(line)
+                return !context.isMarker[index] && line.isTimed
+                    && positionMs >= line.startTimeMs && positionMs < max(line.endTimeMs, end)
+            }
+        }
+    }
 
     static func lineID(index: Int, line: LyricsLine) -> String {
         "line-\(index)-\(line.id)"
@@ -5195,6 +5368,19 @@ enum LyricsTimelineDisplayBuilder {
         trackDurationMs: Int64,
         autoInstrumentalBreakEnabled: Bool
     ) -> [LyricsTimelineDisplayItem] {
+        context.itemQueries.value(position: positionMs, duration: trackDurationMs,
+                                  automaticInterludes: autoInstrumentalBreakEnabled) {
+            uncachedItems(context: context, positionMs: positionMs, trackDurationMs: trackDurationMs,
+                          autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled)
+        }
+    }
+
+    fileprivate static func uncachedItems(
+        context: LyricsTimelineContext,
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> [LyricsTimelineDisplayItem] {
         let lines = context.lines
         guard !lines.isEmpty else { return [] }
         guard hasActiveInterlude(
@@ -5259,6 +5445,19 @@ enum LyricsTimelineDisplayBuilder {
         trackDurationMs: Int64,
         autoInstrumentalBreakEnabled: Bool
     ) -> LyricsTimelineDisplayItem? {
+        context.previewQueries.value(position: positionMs, duration: trackDurationMs,
+                                     automaticInterludes: autoInstrumentalBreakEnabled) {
+            uncachedPreviewItem(context: context, positionMs: positionMs, trackDurationMs: trackDurationMs,
+                                autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled)
+        }
+    }
+
+    fileprivate static func uncachedPreviewItem(
+        context: LyricsTimelineContext,
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> LyricsTimelineDisplayItem? {
         let lines = context.lines
         guard !lines.isEmpty else { return nil }
         let count = lines.count
@@ -5278,10 +5477,10 @@ enum LyricsTimelineDisplayBuilder {
         for index in lines.indices {
             let line = lines[index]
             guard line.isTimed, !context.isMarker[index] else { continue }
-            if positionMs >= line.startTimeMs, positionMs < line.endTimeMs {
-                return .line(index: index, line: line, id: context.lineIDs[index])
-            }
             if positionMs >= line.startTimeMs {
+                // Anchor to the latest start. A previous line can remain
+                // highlighted while its timed content finishes, but it must not
+                // block the following line from becoming the center row.
                 fallbackIndex = index
             }
         }
@@ -5301,6 +5500,58 @@ enum LyricsTimelineDisplayBuilder {
 
         guard fallbackIndex >= 0 else { return nil }
         return .line(index: fallbackIndex, line: lines[fallbackIndex], id: context.lineIDs[fallbackIndex])
+    }
+
+    static func playbackVisualState(
+        context: LyricsTimelineContext,
+        lineIndex: Int,
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> LyricsLinePlaybackVisualState {
+        guard context.lines.indices.contains(lineIndex),
+              !context.isMarker[lineIndex] else {
+            return .inactive
+        }
+        let line = context.lines[lineIndex]
+        guard line.isTimed, positionMs >= line.startTimeMs else {
+            return .inactive
+        }
+        let cachedEnd = context.lastLyricEndTimes?[lineIndex] ?? lastLyricEndTime(line)
+        let contentEndTimeMs = max(line.endTimeMs, cachedEnd, line.startTimeMs)
+        let nextStartTimeMs = nextRenderableLineStartAfter(context: context, index: lineIndex)
+        var holdEndTimeMs = nextStartTimeMs > line.startTimeMs
+            ? max(contentEndTimeMs, nextStartTimeMs)
+            : contentEndTimeMs
+        if let trailing = trailingInterludeInfo(
+            context: context,
+            index: lineIndex,
+            positionMs: positionMs,
+            trackDurationMs: trackDurationMs,
+            autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled
+        ), contains(trailing, positionMs) {
+            holdEndTimeMs = min(holdEndTimeMs, trailing.startTimeMs)
+        }
+        let highlighted = positionMs < holdEndTimeMs
+        let animating = positionMs < contentEndTimeMs + karaokeReleaseWindowMs
+        let completedColorOpacity: CGFloat
+        if highlighted {
+            completedColorOpacity = 1
+        } else {
+            completedColorOpacity = 1 - min(
+                1,
+                max(0, CGFloat(positionMs - holdEndTimeMs) / CGFloat(completedColorFadeMs))
+            )
+        }
+        let renderPositionMs = animating
+            ? positionMs
+            : contentEndTimeMs + karaokeCompletionPositionOffsetMs
+        return LyricsLinePlaybackVisualState(
+            highlighted: highlighted,
+            animating: animating,
+            completedColorOpacity: completedColorOpacity,
+            renderPositionMs: renderPositionMs
+        )
     }
 
     static func scrollTargetID(
@@ -5563,6 +5814,16 @@ enum LyricsTimelineDisplayBuilder {
         context.firstRenderableLineIndex
     }
 
+    private static func nextRenderableLineStartAfter(context: LyricsTimelineContext, index: Int) -> Int64 {
+        for nextIndex in (index + 1)..<context.lines.count {
+            let candidate = context.lines[nextIndex]
+            guard candidate.isTimed else { continue }
+            if context.isMarker[nextIndex] { continue }
+            return candidate.startTimeMs
+        }
+        return 0
+    }
+
     fileprivate static func lastLyricEndTime(_ line: LyricsLine) -> Int64 {
         var lastEnd = maxSyllableEnd(line.syllables, fallbackLineEndMs: line.endTimeMs)
         for part in line.vocalParts {
@@ -5570,6 +5831,26 @@ enum LyricsTimelineDisplayBuilder {
         }
         if lastEnd >= 0 { return lastEnd }
         return line.endTimeMs > line.startTimeMs ? line.endTimeMs : -1
+    }
+
+    fileprivate static func queryBoundaries(
+        lines: [LyricsLine], markers: [InterludeInfo?], lyricEndTimes: [Int64]?
+    ) -> [Int64] {
+        // Structural items change only at starts, marker edges and automatic-break
+        // starts. The cache key also splits at the current track duration.
+        var boundaries: [Int64] = [0]
+        for index in lines.indices {
+            boundaries.append(lines[index].startTimeMs)
+            if let marker = markers[index] {
+                boundaries.append(marker.startTimeMs)
+                boundaries.append(marker.endTimeMs)
+            }
+            let end = lyricEndTimes?[index] ?? lastLyricEndTime(lines[index])
+            boundaries.append(max(lines[index].endTimeMs, end))
+            let (breakStart, overflow) = end.addingReportingOverflow(trailingInterludeDelayMs)
+            if end >= 0, !overflow { boundaries.append(breakStart) }
+        }
+        return boundaries
     }
 
     private static func maxSyllableEnd(_ syllables: [LyricsLine.Syllable], fallbackLineEndMs: Int64) -> Int64 {
@@ -5641,7 +5922,7 @@ struct LyricsInterludeView: View {
     }
 
     private var interludeBars: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !active)) { timeline in
             let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
             HStack(spacing: 3.8) {
                 ForEach(0..<4, id: \.self) { index in
@@ -5687,6 +5968,8 @@ struct LyricsLineView: View, Equatable {
     var originalText: String
     var culturalAnnotations: [CulturalAnnotation] = []
     var active: Bool
+    var animationActive: Bool
+    var completedColorOpacity: CGFloat
     var displayDistance: Double
     var progress: Double
     var positionMs: Int64
@@ -5704,6 +5987,8 @@ struct LyricsLineView: View, Equatable {
             && lhs.originalText == rhs.originalText
             && lhs.culturalAnnotations == rhs.culturalAnnotations
             && lhs.active == rhs.active
+            && lhs.animationActive == rhs.animationActive
+            && lhs.completedColorOpacity == rhs.completedColorOpacity
             && lhs.displayDistance == rhs.displayDistance
             && lhs.progress == rhs.progress
             && lhs.positionMs == rhs.positionMs
@@ -5731,18 +6016,24 @@ struct LyricsLineView: View, Equatable {
             )
                 .font(typography.font(slotId: AppSettings.typoLyricsOriginal, baseSize: 25))
             if !useVocalPartSupplements, !linePronunciationText.isEmpty {
-                Text(linePronunciationText)
-                    .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: 14))
-                    .foregroundStyle(active ? lineActiveColor.opacity(212.0 / 255.0) : lineSupplementInactiveColor)
-                    .multilineTextAlignment(textAlignment)
+                fadingSupplementText(
+                    linePronunciationText,
+                    slotId: AppSettings.typoLyricsPronunciation,
+                    baseSize: 14,
+                    activeColor: lineActiveColor.opacity(212.0 / 255.0),
+                    inactiveColor: lineSupplementInactiveColor
+                )
             } else if !useVocalPartSupplements, pronunciationLoading {
                 supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsPronunciation, baseSize: 14)
             }
             if !useVocalPartSupplements, !line.translationText.trimmed.isEmpty {
-                Text(line.translationText)
-                    .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: 14))
-                    .foregroundStyle(active ? lineActiveColor.opacity(184.0 / 255.0) : lineSupplementInactiveColor)
-                    .multilineTextAlignment(textAlignment)
+                fadingSupplementText(
+                    line.translationText,
+                    slotId: AppSettings.typoLyricsTranslation,
+                    baseSize: 14,
+                    activeColor: lineActiveColor.opacity(184.0 / 255.0),
+                    inactiveColor: lineSupplementInactiveColor
+                )
             } else if !useVocalPartSupplements, translationLoading {
                 supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(line), slotId: AppSettings.typoLyricsTranslation, baseSize: 14)
             }
@@ -5790,6 +6081,9 @@ struct LyricsLineView: View, Equatable {
                 ForEach(displayVocalParts.indices, id: \.self) { index in
                     let part = displayVocalParts[index]
                     let partActive = active && positionMs >= part.startTimeMs
+                    let partAnimating = animationActive
+                        && positionMs >= part.startTimeMs
+                        && positionMs < max(part.endTimeMs, part.startTimeMs) + 820
                     VStack(alignment: stackAlignment, spacing: 2) {
                         SyllableKaraokeText(
                             text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
@@ -5800,7 +6094,8 @@ struct LyricsLineView: View, Equatable {
                             startTimeMs: part.startTimeMs,
                             endTimeMs: part.endTimeMs,
                             positionMs: positionMs,
-                            active: partActive,
+                            active: partAnimating,
+                            completedColorOpacity: completedColorOpacity,
                             activeColor: vocalPartActiveColor(part),
                             alignment: textAlignment,
                             kind: part.kind,
@@ -5830,7 +6125,8 @@ struct LyricsLineView: View, Equatable {
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
-                active: active,
+                active: animationActive,
+                completedColorOpacity: completedColorOpacity,
                 activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
@@ -5851,7 +6147,8 @@ struct LyricsLineView: View, Equatable {
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
-                active: active,
+                active: animationActive,
+                completedColorOpacity: completedColorOpacity,
                 activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
@@ -5873,7 +6170,8 @@ struct LyricsLineView: View, Equatable {
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
-                active: active,
+                active: animationActive,
+                completedColorOpacity: completedColorOpacity,
                 activeColor: lineActiveColor,
                 alignment: textAlignment,
                 kind: line.kind,
@@ -5902,21 +6200,56 @@ struct LyricsLineView: View, Equatable {
             original: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part)
         )
         if !pronunciationText.isEmpty {
-            Text(pronunciationText)
-                .font(typography.font(slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5))
-                .foregroundStyle(active ? speakerColor.opacity(212.0 / 255.0) : inactiveColor)
-                .multilineTextAlignment(textAlignment)
+            fadingSupplementText(
+                pronunciationText,
+                slotId: AppSettings.typoLyricsPronunciation,
+                baseSize: active ? 14 : 12.5,
+                activeColor: speakerColor.opacity(212.0 / 255.0),
+                inactiveColor: inactiveColor
+            )
         } else if pronunciationLoading {
             supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsPronunciation, baseSize: active ? 14 : 12.5)
         }
         if !part.translationText.trimmed.isEmpty {
-            Text(part.translationText)
-                .font(typography.font(slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5))
-                .foregroundStyle(active ? speakerColor.opacity(184.0 / 255.0) : inactiveColor)
-                .multilineTextAlignment(textAlignment)
+            fadingSupplementText(
+                part.translationText,
+                slotId: AppSettings.typoLyricsTranslation,
+                baseSize: active ? 14 : 12.5,
+                activeColor: speakerColor.opacity(184.0 / 255.0),
+                inactiveColor: inactiveColor
+            )
         } else if translationLoading {
             supplementReserveText(LyricsTimelineDisplayBuilder.supplementPlaceholderText(part), slotId: AppSettings.typoLyricsTranslation, baseSize: active ? 14 : 12.5)
         }
+    }
+
+    private func distinctPronunciation(_ value: String, original: String) -> String {
+        let pronunciation = value.trimmed
+        guard !pronunciation.isEmpty,
+              !IvLyricsUtilities.lyricsTextsEquivalent(pronunciation, original) else {
+            return ""
+        }
+        return pronunciation
+    }
+
+    private func fadingSupplementText(
+        _ text: String,
+        slotId: String,
+        baseSize: CGFloat,
+        activeColor: Color,
+        inactiveColor: Color
+    ) -> some View {
+        let font = typography.font(slotId: slotId, baseSize: baseSize)
+        return Text(text)
+            .font(font)
+            .foregroundStyle(inactiveColor)
+            .overlay {
+                Text(text)
+                    .font(font)
+                    .foregroundStyle(activeColor)
+                    .opacity(completedColorOpacity)
+            }
+            .multilineTextAlignment(textAlignment)
     }
 
     private func supplementReserveText(_ text: String, slotId: String, baseSize: CGFloat) -> some View {
@@ -6030,6 +6363,7 @@ struct LyricsLineView: View, Equatable {
 }
 
 struct SyllableKaraokeText: View {
+    @State private var preparationCache = KaraokeRenderPreparationCache()
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.lyricsSegmentationLocale) private var lyricsSegmentationLocale
     var text: String
@@ -6041,6 +6375,7 @@ struct SyllableKaraokeText: View {
     var endTimeMs: Int64
     var positionMs: Int64
     var active: Bool
+    var completedColorOpacity: CGFloat = 1
     var activeColor: Color
     var alignment: TextAlignment
     var kind: String = "vocal"
@@ -6054,10 +6389,11 @@ struct SyllableKaraokeText: View {
     var syntheticTimingEnabled: Bool = false
     var effectRowSeed: Int = 0
     var singleLine: Bool = false
+    var sharedPreparationCache: KaraokeRenderPreparationCache? = nil
 
     var body: some View {
         let displayKind = normalizedKind
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: accessibilityReduceMotion || !requiresContinuousEffect(displayKind))) { timeline in
+        TimelineView(.animation(paused: accessibilityReduceMotion || !requiresContinuousEffect(displayKind))) { timeline in
             karaokeBody(
                 nowMs: accessibilityReduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate * 1_000,
                 displayKind: displayKind
@@ -6079,7 +6415,11 @@ struct SyllableKaraokeText: View {
                     .modifier(LyricGlyphEffectModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, segmentIndex: 0, rowSeed: effectRowSeed, color: activeColor))
                     .modifier(LyricLineMotionModifier(kind: displayKind, active: active, nowMs: nowMs, textSize: bounceTextSize, rowSeed: effectRowSeed))
             } else if LyricsTextShaping.requiresContinuousShaping(text) {
-                Text(continuouslyShapedText(segments))
+                Text(continuouslyShapedText(segments, activeLayer: false))
+                    .overlay {
+                        Text(continuouslyShapedText(segments, activeLayer: true))
+                            .opacity(completedColorOpacity)
+                    }
                     .multilineTextAlignment(alignment)
                     .lineLimit(singleLine ? 1 : nil)
                     .fixedSize(horizontal: singleLine, vertical: false)
@@ -6106,43 +6446,26 @@ struct SyllableKaraokeText: View {
     }
 
     private func continuouslyShapedText(
-        _ segments: [KaraokeSyllableSegment]
+        _ segments: [KaraokeSyllableSegment],
+        activeLayer: Bool
     ) -> AttributedString {
         var result = AttributedString()
         for segment in segments {
             var run = AttributedString(segment.text)
-            run.foregroundColor = segment.fill > 0 ? segment.activeColor : segment.baseColor
+            run.foregroundColor = activeLayer && segment.fill > 0
+                ? segment.activeColor
+                : segment.baseColor
             result.append(run)
         }
         return result
     }
 
     private var karaokeSegments: [KaraokeSyllableSegment] {
-        let annotations = rubyAnnotations
-        let sourceSyllables = effectiveSyllables
-        let fillTimings = isWordDisplayGranularity
-            ? sourceSyllables.map {
-                KaraokeSyllableTimingNormalizer.FillTiming(
-                    startTimeMs: $0.startTimeMs,
-                    endTimeMs: $0.endTimeMs
-                )
-            }
-            : KaraokeSyllableTimingNormalizer.latinWordFillTimings(sourceSyllables)
-        let displaySyllables = CulturalAnnotation.annotateSyllables(
-            text: text,
-            syllables: sourceSyllables,
-            annotations: culturalAnnotations
-        )
-        let bounceActiveIndex = KaraokeBouncePolicy.isWindowActive(
-            positionMs: positionMs,
-            lineStartTimeMs: startTimeMs,
-            lineEndTimeMs: endTimeMs,
-            bounceEnabled: bounceEnabled,
-            reduceMotion: accessibilityReduceMotion,
-            hasSegments: !displaySyllables.isEmpty
-        )
-            ? activeSegmentIndex(in: displaySyllables, fillTimings: fillTimings)
-            : nil
+        let prepared = preparedKaraoke
+        let annotations = prepared.annotations
+        let sourceSyllables = prepared.source
+        let fillTimings = prepared.fillTimings
+        let displaySyllables = prepared.display
         var timedSegments: [KaraokeSyllableSegment] = []
         timedSegments.reserveCapacity(displaySyllables.count)
         var sourceOffset = 0
@@ -6158,11 +6481,8 @@ struct SyllableKaraokeText: View {
             )
             defer { sourceOffset += sourceLength }
             guard !syllable.text.isEmpty else { continue }
-            let bounce = karaokeBounce(
-                fillTiming: fillTiming,
-                index: index,
-                activeIndex: bounceActiveIndex
-            )
+            let bounce = karaokeBounce(profile: prepared.motionProfiles.indices.contains(index)
+                ? prepared.motionProfiles[index] : nil)
             timedSegments.append(KaraokeSyllableSegment(
                 id: index,
                 text: syllable.text,
@@ -6176,6 +6496,7 @@ struct SyllableKaraokeText: View {
                 kind: segmentKind(for: syllable),
                 bounceOffsetY: bounce.offsetY,
                 bounceScale: bounce.scale,
+                completedColorOpacity: completedColorOpacity,
                 isWhitespace: syllable.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
             ))
         }
@@ -6206,6 +6527,7 @@ struct SyllableKaraokeText: View {
                 kind: normalizedKind,
                 bounceOffsetY: 0,
                 bounceScale: 1,
+                completedColorOpacity: completedColorOpacity,
                 isWhitespace: value.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
             ))
             nextID += 1
@@ -6420,121 +6742,86 @@ struct SyllableKaraokeText: View {
         return min(1, max(0, CGFloat(positionMs - startTimeMs) / CGFloat(endTimeMs - startTimeMs)))
     }
 
-    private func karaokeBounce(
-        fillTiming: KaraokeSyllableTimingNormalizer.FillTiming,
-        index: Int,
-        activeIndex: Int?
-    ) -> KaraokeBounceMetrics {
-        guard bounceEnabled,
-              fillTiming.endTimeMs > fillTiming.startTimeMs,
-              let activeIndex else {
-            return .idle
+    private var preparedKaraoke: KaraokeRenderPreparationCache.Value {
+        let key = KaraokeRenderPreparationCache.Key(
+            text: text, ruby: rubyText, syllables: syllables, granularity: normalizedDisplayGranularity,
+            locale: lyricsSegmentationLocale, annotations: culturalAnnotations,
+            start: startTimeMs, end: endTimeMs, synthetic: syntheticTimingEnabled
+        )
+        return (sharedPreparationCache ?? preparationCache).value(for: key) {
+            let source = effectiveSyllables
+            let timings = isWordDisplayGranularity
+                ? source.map { KaraokeSyllableTimingNormalizer.FillTiming(startTimeMs: $0.startTimeMs, endTimeMs: $0.endTimeMs) }
+                : KaraokeSyllableTimingNormalizer.latinWordFillTimings(source)
+            let sourceUnits = (syllables.isEmpty ? source : syllables).map {
+                KaraokeMotionProfile.Unit(text: $0.text, startMs: Double($0.startTimeMs), endMs: Double($0.endTimeMs))
+            }
+            let displayUnits = source.enumerated().map { index, syllable in
+                KaraokeMotionProfile.Unit(text: syllable.text, startMs: Double(timings[index].startTimeMs), endMs: Double(timings[index].endTimeMs))
+            }
+            return KaraokeRenderPreparationCache.Value(
+                source: source,
+                display: CulturalAnnotation.annotateSyllables(text: text, syllables: source, annotations: culturalAnnotations),
+                fillTimings: timings, annotations: rubyAnnotations,
+                motionProfiles: KaraokeMotionProfile.prepare(source: sourceUnits, display: displayUnits)
+            )
         }
-        let distance = isWordDisplayGranularity ? 0 : abs(CGFloat(index - activeIndex))
-        guard distance <= 3,
-              let rawStrength = KaraokeBouncePolicy.strength(
-                positionMs: positionMs,
-                startTimeMs: fillTiming.startTimeMs,
-                endTimeMs: fillTiming.endTimeMs
-              ) else {
-            return .idle
-        }
-        let attenuation = max(0.22, 1 - distance * 0.23)
-        let strength = rawStrength * attenuation
-        guard strength >= 0.025 else {
-            return .idle
-        }
-        let offsetY = ((-bounceTextSize * 0.23 * strength) * 2).rounded() / 2
-        let scale = ((1 + 0.055 * strength) * 100).rounded() / 100
-        return KaraokeBounceMetrics(offsetY: offsetY, scale: scale)
     }
 
-    private func activeSegmentIndex(
-        in syllables: [LyricsLine.Syllable],
-        fillTimings: [KaraokeSyllableTimingNormalizer.FillTiming]
-    ) -> Int? {
-        var fallbackIndex: Int?
-        var fallbackEnd = Int64.min
-        var nextIndex: Int?
-        var nextStart = Int64.max
-        for (index, syllable) in syllables.enumerated() {
-            guard !syllable.text.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else {
-                continue
-            }
-            let timing = fillTimings.indices.contains(index)
-                ? fillTimings[index]
-                : KaraokeSyllableTimingNormalizer.FillTiming(
-                    startTimeMs: syllable.startTimeMs,
-                    endTimeMs: syllable.endTimeMs
-                )
-            if positionMs >= timing.startTimeMs, positionMs < timing.endTimeMs {
-                return index
-            }
-            if positionMs >= timing.endTimeMs, timing.endTimeMs >= fallbackEnd {
-                fallbackEnd = timing.endTimeMs
-                fallbackIndex = index
-            }
-            if positionMs < timing.startTimeMs, timing.startTimeMs < nextStart {
-                nextStart = timing.startTimeMs
-                nextIndex = index
-            }
-        }
-        if let fallbackIndex, positionMs - fallbackEnd < 2_000 {
-            return nextIndex ?? fallbackIndex
-        }
-        return nextIndex ?? fallbackIndex
+    private func karaokeBounce(profile: KaraokeMotionProfile?) -> KaraokeBounceMetrics {
+        guard bounceEnabled, !accessibilityReduceMotion, let profile else { return .idle }
+        let values = profile.values(positionMs: Double(positionMs), textSize: Double(bounceTextSize))
+        return KaraokeBounceMetrics(offsetY: CGFloat(values.offsetY), scale: CGFloat(values.scale))
     }
 
 }
 
-enum KaraokeBouncePolicy {
-    static let maximumReleaseWindowMs: Int64 = 280
+/// One preparation per unchanged row. Position, focus, color and font changes do not
+/// invalidate timing/text work; those remain render inputs so user settings stay live.
+final class KaraokeRenderPreparationCache {
+    struct Key: Equatable {
+        var text: String
+        var ruby: String
+        var syllables: [LyricsLine.Syllable]
+        var granularity: String
+        var locale: String
+        var annotations: [CulturalAnnotation]
+        var start: Int64
+        var end: Int64
+        var synthetic: Bool
+    }
+    struct Value {
+        var source: [LyricsLine.Syllable]
+        var display: [LyricsLine.Syllable]
+        var fillTimings: [KaraokeSyllableTimingNormalizer.FillTiming]
+        var annotations: [FuriganaRepository.RubyAnnotation]
+        var motionProfiles: [KaraokeMotionProfile?]
+    }
+    private var key: Key?
+    private var prepared: Value?
 
-    static func isWindowActive(
-        positionMs: Int64,
-        lineStartTimeMs: Int64,
-        lineEndTimeMs: Int64,
-        bounceEnabled: Bool,
-        reduceMotion: Bool,
-        hasSegments: Bool
-    ) -> Bool {
-        bounceEnabled
-            && !reduceMotion
-            && hasSegments
-            && positionMs >= lineStartTimeMs
-            && positionMs < lineEndTimeMs + maximumReleaseWindowMs
+    func value(for next: Key, prepare: () -> Value) -> Value {
+        if key == next, let prepared { return prepared }
+        let value = prepare()
+        key = next
+        prepared = value
+        return value
+    }
+}
+
+/// A PiP frame gets a fresh SwiftUI root. Keep expensive text/timing preparation
+/// outside that root while retaining independent caches for simultaneous voices.
+final class KaraokeRenderPreparationStore {
+    private var rows = BoundedLRUCache<String, KaraokeRenderPreparationCache>(capacity: 32)
+
+    func cache(for slot: String) -> KaraokeRenderPreparationCache {
+        if let cached = rows.value(forKey: slot) { return cached }
+        let cache = KaraokeRenderPreparationCache()
+        rows.insert(cache, forKey: slot)
+        return cache
     }
 
-    static func strength(
-        positionMs: Int64,
-        startTimeMs: Int64,
-        endTimeMs: Int64
-    ) -> CGFloat? {
-        let duration = CGFloat(max(1, endTimeMs - startTimeMs))
-        let rise = min(180, max(60, duration * 0.38))
-        let release = min(280, max(180, duration * 0.45))
-        let peakTimeMs = min(CGFloat(endTimeMs), CGFloat(startTimeMs) + rise)
-        let currentTimeMs = CGFloat(positionMs)
-        if currentTimeMs < CGFloat(startTimeMs) || currentTimeMs >= CGFloat(endTimeMs) + release {
-            return nil
-        }
-        if currentTimeMs <= peakTimeMs {
-            return easeOutCubic(
-                (currentTimeMs - CGFloat(startTimeMs))
-                    / max(1, peakTimeMs - CGFloat(startTimeMs))
-            )
-        }
-        if currentTimeMs <= CGFloat(endTimeMs) {
-            return 1
-        }
-        let progress = min(1, (currentTimeMs - CGFloat(endTimeMs)) / release)
-        return pow(1 - progress, 1.25)
-    }
-
-    private static func easeOutCubic(_ value: CGFloat) -> CGFloat {
-        let t = min(1, max(0, value))
-        return 1 - pow(1 - t, 3)
-    }
+    func removeAll() { rows.removeAll() }
 }
 
 private struct KaraokeBounceMetrics {
@@ -6554,6 +6841,7 @@ private struct KaraokeSyllableSegment: Identifiable {
     var kind: String
     var bounceOffsetY: CGFloat
     var bounceScale: CGFloat
+    var completedColorOpacity: CGFloat
     var isWhitespace: Bool
 }
 
@@ -6576,7 +6864,14 @@ private struct KaraokeSyllableSegmentView: View {
                 Text(segment.rubyText)
                     .font(.system(size: max(9, textSize * 0.42), weight: .semibold))
                     .minimumScaleFactor(dynamicTypeSize.isAccessibilitySize ? 0.85 : 1)
-                    .foregroundStyle((segment.fill > 0 ? segment.activeColor : segment.baseColor).opacity(0.84))
+                    .foregroundStyle(segment.baseColor.opacity(0.84))
+                    .overlay {
+                        if segment.fill > 0 {
+                            Text(segment.rubyText)
+                                .font(.system(size: max(9, textSize * 0.42), weight: .semibold))
+                                .foregroundStyle(segment.activeColor.opacity(0.84 * segment.completedColorOpacity))
+                        }
+                    }
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
@@ -6586,6 +6881,7 @@ private struct KaraokeSyllableSegmentView: View {
                     if segment.fill > 0 {
                         Text(segment.text)
                             .foregroundStyle(segment.activeColor)
+                            .opacity(segment.completedColorOpacity)
                             .mask(KaraokeFillMask(fill: segment.fill))
                             .allowsHitTesting(false)
                     }
@@ -6593,7 +6889,7 @@ private struct KaraokeSyllableSegmentView: View {
                 .fixedSize(horizontal: true, vertical: false)
         }
         .fixedSize(horizontal: true, vertical: false)
-            .scaleEffect(segment.bounceScale, anchor: .center)
+            .scaleEffect(segment.bounceScale, anchor: .bottom)
             .offset(y: segment.bounceOffsetY)
             .modifier(LyricGlyphEffectModifier(kind: kind, active: active, nowMs: nowMs, textSize: textSize, segmentIndex: segment.id, rowSeed: rowSeed, color: segment.activeColor))
             .layoutValue(key: KaraokeWhitespaceLayoutKey.self, value: segment.isWhitespace)
@@ -6625,19 +6921,18 @@ private struct LyricLineMotionModifier: ViewModifier {
             let y: [CGFloat] = [0, 0.25, -0.25, -0.35]
             return (x[step], y[step], 0, 1)
         case "adlib":
-            return (0, -1.5 * signedSine(effectNowMs, periodMs: 1_050), 0, 1)
+            return (0, CGFloat(KaraokeEffectTiming.adlibOffset(timeMs: effectNowMs)) * textSize, 0, 1)
         case "pulse":
             return (0, 0, 0, 1 + positiveSine(effectNowMs, periodMs: 940) * 0.025)
         case "bounce":
-            return (0, -positiveSine(effectNowMs, periodMs: 780) * textSize * 0.12, 0, 1)
+            return (0, CGFloat(KaraokeEffectTiming.bounceOffset(timeMs: effectNowMs)) * textSize, 0, 1)
         case "sway":
             let wave = signedSine(effectNowMs, periodMs: 1_350)
             return (wave * textSize * 0.0245, 0, Double(wave * 0.84), 1)
         case "float":
             return (0, -positiveSine(effectNowMs, periodMs: 1_650) * textSize * 0.09, Double(signedSine(effectNowMs, periodMs: 1_650) * 0.45), 1)
         case "pop":
-            let phase = effectNowMs.truncatingRemainder(dividingBy: 1_080) / 1_080
-            return (0, 0, 0, phase < 0.18 ? 1.035 : (phase < 0.34 ? 0.996 : 1))
+            return (0, 0, 0, CGFloat(KaraokeEffectTiming.popScale(timeMs: effectNowMs)))
         case "glitch":
             let step = Int(effectNowMs / 35) % 32
             if step == 5 || step == 19 { return (textSize * 0.035, -textSize * 0.01, 0, 1) }
@@ -6687,9 +6982,7 @@ private struct LyricGlyphEffectModifier: ViewModifier {
         let waveOffset: CGFloat
         if kind == "wave" {
             let phaseTime = nowMs + Double(rowSeed) * 95 + Double(segmentIndex) * 62
-            let wave = CGFloat(sin(phaseTime.truncatingRemainder(dividingBy: 980) / 980 * .pi * 2))
-            let lift = positiveSine(nowMs + Double(segmentIndex) * 42, periodMs: 760) * textSize * 0.018
-            waveOffset = wave * textSize * 0.145 - lift
+            waveOffset = CGFloat(KaraokeEffectTiming.waveOffset(timeMs: phaseTime)) * textSize
         } else {
             waveOffset = 0
         }
@@ -6761,23 +7054,46 @@ private struct KaraokeSegmentFlowLayout: Layout {
     var rowSpacing: CGFloat = 0
     var wraps: Bool = true
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    struct Cache {
+        var sizes: [CGSize]
+        var whitespace: [Bool]
+        var rows: [KaraokeSegmentLayoutRow] = []
+        var rowWidth: CGFloat?
+        var rowSpacing: CGFloat = 0
+    }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache(sizes: subviews.map { $0.sizeThatFits(.unspecified) },
+              whitespace: subviews.map { $0[KaraokeWhitespaceLayoutKey.self] })
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let whitespace = subviews.map { $0[KaraokeWhitespaceLayoutKey.self] }
+        // Fill/motion changes leave intrinsic sizes intact. Fonts, ruby, content and
+        // Dynamic Type still invalidate the measured layout when their sizes change.
+        if sizes != cache.sizes || whitespace != cache.whitespace {
+            cache = Cache(sizes: sizes, whitespace: whitespace)
+        }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         let maxWidth = wraps
             ? max(1, proposal.width ?? CGFloat.greatestFiniteMagnitude)
             : CGFloat.greatestFiniteMagnitude
-        let rows = makeRows(subviews: subviews, maxWidth: maxWidth)
+        let rows = cachedRows(cache: &cache, maxWidth: maxWidth)
         let contentWidth = rows.map(\.width).max() ?? 0
         let contentHeight = rows.last.map { $0.y + $0.height } ?? 0
         return CGSize(width: wraps ? (proposal.width ?? contentWidth) : contentWidth, height: contentHeight)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
         let maxWidth = wraps ? max(1, bounds.width) : CGFloat.greatestFiniteMagnitude
-        let rows = makeRows(subviews: subviews, maxWidth: maxWidth)
+        let rows = cachedRows(cache: &cache, maxWidth: maxWidth)
         for row in rows {
             var x = bounds.minX + horizontalOffset(rowWidth: row.width, containerWidth: bounds.width)
             for index in row.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
+                let size = cache.sizes[index]
                 subviews[index].place(
                     at: CGPoint(x: x, y: bounds.minY + row.y + max(0, row.height - size.height)),
                     anchor: .topLeading,
@@ -6788,7 +7104,8 @@ private struct KaraokeSegmentFlowLayout: Layout {
         }
     }
 
-    private func makeRows(subviews: Subviews, maxWidth: CGFloat) -> [KaraokeSegmentLayoutRow] {
+    private func cachedRows(cache: inout Cache, maxWidth: CGFloat) -> [KaraokeSegmentLayoutRow] {
+        if cache.rowWidth == maxWidth, cache.rowSpacing == rowSpacing { return cache.rows }
         var rows: [KaraokeSegmentLayoutRow] = []
         var currentIndices: [Int] = []
         var currentWidth: CGFloat = 0
@@ -6804,10 +7121,10 @@ private struct KaraokeSegmentFlowLayout: Layout {
             currentHeight = 0
         }
 
-        let units = makeWrapUnits(subviews: subviews)
+        let units = makeWrapUnits(whitespace: cache.whitespace)
         for unit in units {
-            let sizes = unit.map { subviews[$0].sizeThatFits(.unspecified) }
-            let separatorCount = unit.prefix { subviews[$0][KaraokeWhitespaceLayoutKey.self] }.count
+            let sizes = unit.map { cache.sizes[$0] }
+            let separatorCount = unit.prefix { cache.whitespace[$0] }.count
             let phraseIndices = Array(unit.dropFirst(separatorCount))
             let separatorWidth = sizes.prefix(separatorCount).reduce(0) { $0 + $1.width }
             let phraseWidth = sizes.dropFirst(separatorCount).reduce(0) { $0 + $1.width }
@@ -6827,7 +7144,7 @@ private struct KaraokeSegmentFlowLayout: Layout {
             }
             // Only an oversized single phrase falls back to its constituent glyph/syllable segments.
             for index in phraseIndices {
-                let size = subviews[index].sizeThatFits(.unspecified)
+                let size = cache.sizes[index]
                 if !currentIndices.isEmpty, currentWidth + size.width > maxWidth {
                     flushRow()
                 }
@@ -6837,15 +7154,18 @@ private struct KaraokeSegmentFlowLayout: Layout {
             }
         }
         flushRow()
+        cache.rows = rows
+        cache.rowWidth = maxWidth
+        cache.rowSpacing = rowSpacing
         return rows
     }
 
-    private func makeWrapUnits(subviews: Subviews) -> [[Int]] {
+    private func makeWrapUnits(whitespace: [Bool]) -> [[Int]] {
         var units: [[Int]] = []
         var current: [Int] = []
-        for index in subviews.indices {
-            if subviews[index][KaraokeWhitespaceLayoutKey.self] {
-                if current.contains(where: { !subviews[$0][KaraokeWhitespaceLayoutKey.self] }) {
+        for index in whitespace.indices {
+            if whitespace[index] {
+                if current.contains(where: { !whitespace[$0] }) {
                     units.append(current)
                     current = []
                 }
@@ -6854,7 +7174,7 @@ private struct KaraokeSegmentFlowLayout: Layout {
                 current.append(index)
             }
         }
-        if current.contains(where: { !subviews[$0][KaraokeWhitespaceLayoutKey.self] }) {
+        if current.contains(where: { !whitespace[$0] }) {
             units.append(current)
         }
         return units
@@ -7172,6 +7492,8 @@ private struct KaraokeDebugPreview: View {
                 line: multiVocalLine,
                 originalText: multiVocalLine.text,
                 active: true,
+                animationActive: true,
+                completedColorOpacity: 1,
                 displayDistance: 0,
                 progress: 0.52,
                 positionMs: 2_100,
@@ -7536,7 +7858,7 @@ enum LyricSpeakerPalette {
 struct LogsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 30 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @Binding var visible: Bool
 
@@ -7866,6 +8188,7 @@ struct InitialSetupView: View {
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.58))
             }
+            spotifyWebAPIOptInSetupCard
         }
         .padding(16)
         .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -7887,10 +8210,9 @@ struct InitialSetupView: View {
                 .autocorrectionDisabled()
                 .textFieldStyle(PlayerTextFieldStyle())
             Text(settings.t("field.spotify_client_secret_role"))
-                .font(.pretendard(12))
-                .foregroundStyle(.white.opacity(0.56))
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.58))
                 .fixedSize(horizontal: false, vertical: true)
-            spotifyWebAPIToggleCard
             LabeledContent(settings.t("field.redirect_uri")) {
                 Text(SpotifyRedirectConfiguration.uri)
                     .font(.caption.monospaced())
@@ -7921,31 +8243,33 @@ struct InitialSetupView: View {
         return model.onboardingStep >= 2 ? settings.t("button.save_start") : settings.t("button.next")
     }
 
-    private var spotifyWebAPIToggleCard: some View {
+    private var spotifyWebAPIOptInSetupCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text(settings.t("setting.spotify_web_api"))
-                        .font(.pretendard(15, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .font(.pretendard(14, weight: .semibold))
                     Text(settings.t("setting.spotify_web_api_desc"))
-                        .font(.pretendard(13))
-                        .foregroundStyle(.white.opacity(0.66))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                Toggle(settings.t("setting.spotify_web_api"), isOn: spotifyWebAPIEnabledBinding)
+                Toggle("", isOn: spotifyWebAPIEnabledBinding)
                     .labelsHidden()
                     .fixedSize()
+                    .accessibilityLabel(settings.t("setting.spotify_web_api"))
             }
             Text(spotifyWebAPIStatusText)
-                .font(.pretendard(12))
-                .foregroundStyle(.white.opacity(0.56))
+                .font(.caption)
+                .foregroundStyle(spotifyWebAPIStatusTint)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .multilineTextAlignment(.leading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var spotifyWebAPIEnabledBinding: Binding<Bool> {
@@ -7962,6 +8286,11 @@ struct InitialSetupView: View {
         return model.spotifyWebAPIConnected
             ? settings.t("setting.spotify_web_api_status_connected")
             : settings.t("setting.spotify_web_api_status_pending")
+    }
+
+    private var spotifyWebAPIStatusTint: Color {
+        guard settings.spotifyWebAPIEnabled else { return .white.opacity(0.5) }
+        return model.spotifyWebAPIConnected ? .green : .white.opacity(0.68)
     }
 
     private func handleNext() {
@@ -8077,25 +8406,18 @@ struct SettingsView: View {
         case general
         case lyrics
         case appearance
-        case player
         case ai
         case system
 
         var id: String { rawValue }
         var titleKey: String { "tab.\(rawValue)" }
-        var systemImage: String {
-            switch self {
-            case .general: return "slider.horizontal.3"
-            case .lyrics: return "text.quote"
-            case .appearance: return "paintbrush"
-            case .player: return "play.rectangle"
-            case .ai: return "sparkles"
-            case .system: return "gearshape.2"
-            }
-        }
+
     }
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var selectedSpeakerColor = AppSettings.speakerColorNormal
+    @State private var expandedAIProvider: String?
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
     @State private var settingsLogsPresented = false
@@ -8109,41 +8431,44 @@ struct SettingsView: View {
     @State private var cloudDeleteConfirmationPresented = false
 
     var body: some View {
-        ZStack {
-            Color(red: 12.0 / 255.0, green: 13.0 / 255.0, blue: 17.0 / 255.0)
-                .ignoresSafeArea()
+        VStack(spacing: 0) {
+            VStack(spacing: 9) {
+                settingsHeader
+                settingsTabs
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 13)
+            .padding(.bottom, 12)
+            .background(SettingsDesign.background.opacity(0.96))
+            .overlay(alignment: .bottom) { SettingsDesign.border.frame(height: 1) }
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    settingsHeader
-
-                    Text(settings.t(aiStatusKey))
-                        .font(.pretendard(14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .padding(.top, 22)
-
-                    settingsTabs
-                        .padding(.top, 20)
-
-                    VStack(alignment: .leading, spacing: 14) {
-                        Text(settings.t(selectedTab.titleKey))
-                            .font(.pretendard(21, weight: .bold))
-                            .foregroundStyle(.white)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Color.clear.frame(height: 0).id("settings-top")
                         selectedSettingsPage
                     }
+                    .frame(maxWidth: 640)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 20)
                     .padding(.top, 22)
+                    .padding(.bottom, 40)
                 }
-                .padding(.horizontal, 22)
-                .padding(.top, 18)
-                .padding(.bottom, 34)
+                .onChange(of: selectedTab) { _, _ in
+                    proxy.scrollTo("settings-top", anchor: .top)
+                }
             }
         }
+        .background(SettingsDesign.background.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .tint(Color(red: 0.48, green: 0.80, blue: 0.78))
+        .foregroundStyle(SettingsDesign.text)
+        .font(.pretendard(15))
+        .tint(SettingsDesign.accent)
+        .toggleStyle(SettingsSwitchStyle())
         .onAppear {
 #if DEBUG
             if let rawTab = ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_SETTINGS_TAB"],
-               let tab = SettingsTab(rawValue: rawTab) {
+               let tab = SettingsTab(rawValue: rawTab == "player" ? "appearance" : rawTab) {
                 selectedTab = tab
             }
 #endif
@@ -8165,25 +8490,20 @@ struct SettingsView: View {
     }
 
     private var settingsHeader: some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(settings.t("settings.title"))
-                    .font(.pretendard(26, weight: .bold))
-                    .foregroundStyle(.white)
-                Text(settings.t("settings.subtitle"))
-                    .font(.pretendard(14))
-                    .foregroundStyle(.white.opacity(0.62))
-                    .lineLimit(2)
-            }
+        HStack(spacing: 16) {
+            Text(settings.t("settings.title"))
+                .font(.pretendard(22, weight: .heavy))
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
-            Button {
-                dismiss()
-            } label: {
+            Button { dismiss() } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(SettingsDesign.secondary)
+                    .frame(width: 34, height: 34)
+                    .background(SettingsDesign.control, in: Circle())
+                    .overlay(Circle().stroke(SettingsDesign.strongBorder, lineWidth: 1))
                     .frame(width: 44, height: 44)
-                    .background(Color(red: 0.23, green: 0.23, blue: 0.25), in: RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(settings.t("button.close"))
@@ -8192,31 +8512,25 @@ struct SettingsView: View {
 
     private var settingsTabs: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+            HStack(spacing: 6) {
                 ForEach(SettingsTab.allCases) { tab in
                     Button {
-                        withAnimation(.easeOut(duration: 0.16)) {
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
                             selectedTab = tab
                         }
                     } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: tab.systemImage)
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(settings.t(tab.titleKey))
-                                .font(.pretendard(14, weight: .semibold))
-                        }
-                        .foregroundStyle(selectedTab == tab ? Color(red: 0.05, green: 0.10, blue: 0.11) : .white.opacity(0.82))
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 13)
-                        .frame(minWidth: 88, minHeight: 40)
-                        .background(
-                            selectedTab == tab
-                                ? Color(red: 0.75, green: 0.88, blue: 0.86)
-                                : Color.white.opacity(0.07),
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        )
+                        Text(settings.t(tab.titleKey))
+                            .font(.pretendard(14.5, weight: .semibold))
+                            .foregroundStyle(selectedTab == tab ? SettingsDesign.background : SettingsDesign.secondary)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(selectedTab == tab ? SettingsDesign.text : .clear, in: Capsule())
+                            .frame(minHeight: 44)
+                            .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
                 }
             }
         }
@@ -8230,9 +8544,10 @@ struct SettingsView: View {
         case .lyrics:
             lyricsSettingsPage
         case .appearance:
-            appearanceSettingsPage
-        case .player:
-            playerSettingsPage
+            VStack(alignment: .leading, spacing: 28) {
+                appearanceSettingsPage
+                playerSettingsPage
+            }
         case .ai:
             aiSettingsPage
         case .system:
@@ -8297,7 +8612,12 @@ struct SettingsView: View {
                 }
             }
 
-            settingsSection(settings.t("section.player"), description: settings.t("section.player_desc")) {
+        }
+    }
+
+    private var lyricsSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            settingsSection(settings.t("section.player")) {
                 settingsToggleCard(
                     settings.t("setting.keep_screen_on"),
                     description: settings.t("setting.keep_screen_on_desc"),
@@ -8313,15 +8633,6 @@ struct SettingsView: View {
                     description: settings.t("setting.landscape_center_no_lyrics_desc"),
                     binding: landscapeCenterNoLyricsBinding
                 )
-            }
-        }
-    }
-
-    private var lyricsSettingsPage: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            lyricsProviderSettingsSection
-
-            settingsSection(settings.t("tab.lyrics")) {
                 settingsToggleCard(settings.t("setting.auto_interlude"), description: settings.t("setting.auto_interlude_desc"), binding: autoInterludeBinding)
                 settingsToggleCard(settings.t("setting.interlude_labels"), description: settings.t("setting.interlude_labels_desc"), binding: settingsSavedBinding(\.interludeLabelsEnabled))
                 settingsToggleCard(settings.t("setting.synced_karaoke_animation"), description: settings.t("setting.synced_karaoke_animation_desc"), binding: settingsSavedBinding(\.syncedLyricsKaraokeAnimationEnabled))
@@ -8330,8 +8641,8 @@ struct SettingsView: View {
                     settings.t("setting.karaoke_display_granularity"),
                     description: settings.t("setting.karaoke_display_granularity_desc")
                 ) {
-                    Picker(
-                        "",
+                    SettingsSegmentedPicker(
+                        title: settings.t("setting.karaoke_display_granularity"),
                         selection: Binding(
                             get: {
                                 AppSettings.normalizeKaraokeDisplayGranularity(
@@ -8342,19 +8653,17 @@ struct SettingsView: View {
                                 settings.karaokeDisplayGranularity = value
                                 model.showSavedToast(settings.t("toast.settings_saved"))
                             }
-                        )
-                    ) {
-                        Text(settings.t("karaoke.display.character"))
-                            .tag(AppSettings.karaokeDisplayCharacter)
-                        Text(settings.t("karaoke.display.word"))
-                            .tag(AppSettings.karaokeDisplayWord)
-                        Text(settings.t("karaoke.display.line"))
-                            .tag(AppSettings.karaokeDisplayLine)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                        ),
+                        options: [
+                            (AppSettings.karaokeDisplayCharacter, settings.t("karaoke.display.character")),
+                            (AppSettings.karaokeDisplayWord, settings.t("karaoke.display.word")),
+                            (AppSettings.karaokeDisplayLine, settings.t("karaoke.display.line"))
+                        ]
+                    )
                 }
             }
+
+            lyricsProviderSettingsSection
         }
     }
 
@@ -8682,39 +8991,44 @@ struct SettingsView: View {
         )
     }
 
+    private func providerOrderControls(index: Int, count: Int, move: @escaping (Int) -> Void) -> some View {
+        VStack(spacing: 0) {
+            Button { move(-1) } label: {
+                Image(systemName: "triangle.fill").font(.system(size: 8))
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .disabled(index == 0)
+            .accessibilityLabel(settings.t("accessibility.move_up"))
+            Button { move(1) } label: {
+                Image(systemName: "triangle.fill").rotationEffect(.degrees(180)).font(.system(size: 8))
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .disabled(index == count - 1)
+            .accessibilityLabel(settings.t("accessibility.move_down"))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(SettingsDesign.secondary)
+    }
+
     private var appearanceSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
-            settingsSection(settings.t("section.typography"), description: settings.t("section.typography_desc")) {
+            settingsSection(settings.t("section.layout")) {
                 settingsCard(settings.t("setting.lyrics_alignment"), description: settings.t("setting.lyrics_alignment_desc")) {
-                    Picker("", selection: lyricsAlignmentBinding) {
-                        Text(settings.t("alignment.left")).tag("left")
-                        Text(settings.t("alignment.center")).tag("center")
-                        Text(settings.t("alignment.right")).tag("right")
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                    SettingsSegmentedPicker(
+                        title: settings.t("setting.lyrics_alignment"),
+                        selection: lyricsAlignmentBinding,
+                        options: [
+                            ("left", settings.t("alignment.left")),
+                            ("center", settings.t("alignment.center")),
+                            ("right", settings.t("alignment.right"))
+                        ]
+                    )
                 }
+            }
+
+            settingsSection(settings.t("section.typography"), description: settings.t("section.typography_desc")) {
                 ForEach(AppSettings.typographySlots) { slot in
-                    settingsCard(
-                        settings.t("typography.slot.\(slot.id)"),
-                        description: settings.t("typography.slot.\(slot.id)_desc")
-                    ) {
-                        VStack(spacing: 10) {
-                            HStack {
-                                Slider(value: typographySizeBinding(slot), in: 70...160, step: 1, onEditingChanged: { editing in
-                                    if !editing { model.showSavedToast(settings.t("toast.typography_saved")) }
-                                })
-                                Text("\(typographyStyle(slot).sizePercent)%")
-                                    .foregroundStyle(.white.opacity(0.68))
-                            }
-                            Picker(settings.t("field.weight"), selection: typographyWeightBinding(slot)) {
-                                Text(settings.t("typography.weight.regular")).tag(AppSettings.typoWeightRegular)
-                                Text(settings.t("typography.weight.semibold")).tag(AppSettings.typoWeightSemibold)
-                                Text(settings.t("typography.weight.bold")).tag(AppSettings.typoWeightBold)
-                            }
-                            .pickerStyle(.segmented)
-                        }
-                    }
+                    typographySettingsRow(slot)
                 }
             }
 
@@ -8724,16 +9038,13 @@ struct SettingsView: View {
                     description: settings.t("setting.creator_speaker_colors_desc"),
                     binding: settingsSavedBinding(\.useSyncCreatorSpeakerColors)
                 )
-                settingsCard(settings.t("section.speaker_colors")) {
-                    VStack(spacing: 12) {
-                        ForEach(AppSettings.speakerColorSlots) { slot in
-                            SpeakerColorRow(slot: slot)
-                                .environmentObject(settings)
-                        }
-                        settingsActionButton(settings.t("button.reset"), role: .destructive) {
-                            settings.resetSpeakerColors()
-                            model.showSavedToast(settings.t("toast.speaker_colors_reset"))
-                        }
+                ForEach(["normal", "duet", "male", "female"], id: \.self) { group in
+                    speakerSwatchGroup(group)
+                }
+                settingsCard("") {
+                    settingsActionButton(settings.t("button.reset"), role: .destructive) {
+                        settings.resetSpeakerColors()
+                        model.showSavedToast(settings.t("toast.speaker_colors_reset"))
                     }
                 }
             }
@@ -8752,51 +9063,57 @@ struct SettingsView: View {
                     binding: pipShowArtworkBinding
                 )
                 settingsCard(settings.t("setting.pip_background"), description: settings.t("setting.pip_background_desc")) {
-                    Picker("", selection: Binding(get: {
+                    SettingsSegmentedPicker(
+                        title: settings.t("setting.pip_background"),
+                        selection: Binding(get: {
                         AppSettings.normalizePipBackgroundMode(settings.pipBackgroundMode)
                     }, set: { value in
                         settings.pipBackgroundMode = value
                         model.showSavedToast(settings.t("toast.pip_settings_saved"))
-                    })) {
-                        Text(settings.t("pip.background.cover")).tag(AppSettings.pipBackgroundCover)
-                        Text(settings.t("pip.background.blur")).tag(AppSettings.pipBackgroundBlur)
-                        Text(settings.t("pip.background.gradient")).tag(AppSettings.pipBackgroundGradient)
-                        Text(settings.t("background.mode.solid")).tag(AppSettings.pipBackgroundSolid)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                    }),
+                        options: [
+                            (AppSettings.pipBackgroundCover, settings.t("pip.background.cover")),
+                            (AppSettings.pipBackgroundBlur, settings.t("pip.background.blur")),
+                            (AppSettings.pipBackgroundGradient, settings.t("pip.background.gradient")),
+                            (AppSettings.pipBackgroundSolid, settings.t("background.mode.solid"))
+                        ]
+                    )
                 }
                 settingsCard(settings.t("setting.pip_orientation"), description: settings.t("setting.pip_orientation_desc")) {
-                    Picker("", selection: Binding(get: {
+                    SettingsSegmentedPicker(
+                        title: settings.t("setting.pip_orientation"),
+                        selection: Binding(get: {
                         AppSettings.normalizePipOrientation(settings.pipOrientation)
                     }, set: { value in
                         settings.pipOrientation = value
                         model.showSavedToast(settings.t("toast.pip_settings_saved"))
-                    })) {
-                        Text(settings.t("pip.orientation.landscape")).tag(AppSettings.pipOrientationLandscape)
-                        Text(settings.t("pip.orientation.portrait")).tag(AppSettings.pipOrientationPortrait)
-                        Text(settings.t("pip.orientation.square")).tag(AppSettings.pipOrientationSquare)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                    }),
+                        options: [
+                            (AppSettings.pipOrientationLandscape, settings.t("pip.orientation.landscape")),
+                            (AppSettings.pipOrientationPortrait, settings.t("pip.orientation.portrait")),
+                            (AppSettings.pipOrientationSquare, settings.t("pip.orientation.square"))
+                        ]
+                    )
                 }
                 settingsCard(settings.t("setting.pip_lyrics_alignment"), description: settings.t("setting.pip_lyrics_alignment_desc")) {
-                    Picker("", selection: Binding(get: {
+                    SettingsSegmentedPicker(
+                        title: settings.t("setting.pip_lyrics_alignment"),
+                        selection: Binding(get: {
                         AppSettings.normalizeLyricsAlignment(settings.pipLyricsTextAlignment)
                     }, set: { value in
                         settings.pipLyricsTextAlignment = value
                         model.showSavedToast(settings.t("toast.pip_settings_saved"))
-                    })) {
-                        Text(settings.t("alignment.left")).tag("left")
-                        Text(settings.t("alignment.center")).tag("center")
-                        Text(settings.t("alignment.right")).tag("right")
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                    }),
+                        options: [
+                            ("left", settings.t("alignment.left")),
+                            ("center", settings.t("alignment.center")),
+                            ("right", settings.t("alignment.right"))
+                        ]
+                    )
                 }
                 settingsCard(settings.t("setting.pip_lyrics_size"), description: settings.t("setting.pip_lyrics_size_desc")) {
                     HStack {
-                        Slider(value: Binding(get: {
+                        SettingsSlider(value: Binding(get: {
                             Double(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent))
                         }, set: { value in
                             settings.pipLyricsSizePercent = AppSettings.clampPipLyricsSizePercent(Int(value.rounded()))
@@ -8805,12 +9122,12 @@ struct SettingsView: View {
                         })
                         Text("\(AppSettings.clampPipLyricsSizePercent(settings.pipLyricsSizePercent))%")
                             .font(.pretendard(13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.68))
+                            .foregroundStyle(SettingsDesign.secondary)
                     }
                 }
                 settingsCard(settings.t("setting.pip_translation_size"), description: settings.t("setting.pip_translation_size_desc")) {
                     HStack {
-                        Slider(value: Binding(get: {
+                        SettingsSlider(value: Binding(get: {
                             Double(AppSettings.clampPipTranslationSizePercent(settings.pipTranslationSizePercent))
                         }, set: { value in
                             settings.pipTranslationSizePercent = AppSettings.clampPipTranslationSizePercent(Int(value.rounded()))
@@ -8819,7 +9136,7 @@ struct SettingsView: View {
                         })
                         Text("\(AppSettings.clampPipTranslationSizePercent(settings.pipTranslationSizePercent))%")
                             .font(.pretendard(13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.68))
+                            .foregroundStyle(SettingsDesign.secondary)
                     }
                 }
             }
@@ -8830,7 +9147,7 @@ struct SettingsView: View {
                     description: settings.t("vinyl.settings.album_size_desc")
                 ) {
                     HStack {
-                        Slider(value: Binding(get: {
+                        SettingsSlider(value: Binding(get: {
                             Double(AppSettings.clampVinylSizePercent(settings.vinylAlbumSizePercent))
                         }, set: { value in
                             settings.vinylAlbumSizePercent = AppSettings.clampVinylSizePercent(Int(value.rounded()))
@@ -8839,7 +9156,7 @@ struct SettingsView: View {
                         })
                         Text("\(AppSettings.clampVinylSizePercent(settings.vinylAlbumSizePercent))%")
                             .font(.pretendard(13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.68))
+                            .foregroundStyle(SettingsDesign.secondary)
                     }
                 }
 
@@ -8848,7 +9165,7 @@ struct SettingsView: View {
                     description: settings.t("vinyl.settings.record_size_desc")
                 ) {
                     HStack {
-                        Slider(value: Binding(get: {
+                        SettingsSlider(value: Binding(get: {
                             Double(AppSettings.clampVinylSizePercent(settings.vinylRecordSizePercent))
                         }, set: { value in
                             settings.vinylRecordSizePercent = AppSettings.clampVinylSizePercent(Int(value.rounded()))
@@ -8857,7 +9174,7 @@ struct SettingsView: View {
                         })
                         Text("\(AppSettings.clampVinylSizePercent(settings.vinylRecordSizePercent))%")
                             .font(.pretendard(13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.68))
+                            .foregroundStyle(SettingsDesign.secondary)
                     }
                 }
 
@@ -8895,17 +9212,20 @@ struct SettingsView: View {
                     settings.t("vinyl.settings.tonearm_finish"),
                     description: settings.t("vinyl.settings.tonearm_finish_desc")
                 ) {
-                    Picker("", selection: Binding(get: {
+                    SettingsSegmentedPicker(
+                        title: settings.t("vinyl.settings.tonearm_finish"),
+                        selection: Binding(get: {
                         AppSettings.normalizeVinylTonearmFinish(settings.vinylTonearmFinish)
                     }, set: { value in
                         settings.vinylTonearmFinish = AppSettings.normalizeVinylTonearmFinish(value)
                         model.showSavedToast(settings.t("toast.settings_saved"))
-                    })) {
-                        Text(settings.t("vinyl.settings.tonearm_finish_white")).tag(AppSettings.vinylTonearmFinishWhite)
-                        Text(settings.t("vinyl.settings.tonearm_finish_silver")).tag(AppSettings.vinylTonearmFinishSilver)
-                        Text(settings.t("vinyl.settings.tonearm_finish_black")).tag(AppSettings.vinylTonearmFinishBlack)
-                    }
-                    .pickerStyle(.segmented)
+                    }),
+                        options: [
+                            (AppSettings.vinylTonearmFinishWhite, settings.t("vinyl.settings.tonearm_finish_white")),
+                            (AppSettings.vinylTonearmFinishSilver, settings.t("vinyl.settings.tonearm_finish_silver")),
+                            (AppSettings.vinylTonearmFinishBlack, settings.t("vinyl.settings.tonearm_finish_black"))
+                        ]
+                    )
                 }
 
                 settingsCard(
@@ -8913,7 +9233,7 @@ struct SettingsView: View {
                     description: settings.t("vinyl.settings.tonearm_size_desc")
                 ) {
                     HStack {
-                        Slider(value: Binding(get: {
+                        SettingsSlider(value: Binding(get: {
                             Double(AppSettings.clampVinylTonearmSizePercent(settings.vinylTonearmSizePercent))
                         }, set: { value in
                             settings.vinylTonearmSizePercent = AppSettings.clampVinylTonearmSizePercent(Int(value.rounded()))
@@ -8922,7 +9242,7 @@ struct SettingsView: View {
                         })
                         Text("\(AppSettings.clampVinylTonearmSizePercent(settings.vinylTonearmSizePercent))%")
                             .font(.pretendard(13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.68))
+                            .foregroundStyle(SettingsDesign.secondary)
                     }
                 }
 
@@ -8947,26 +9267,7 @@ struct SettingsView: View {
 
             settingsSection(settings.t("section.typography"), description: settings.t("vinyl.settings.typography_desc")) {
                 ForEach(AppSettings.vinylTypographySlots) { slot in
-                    settingsCard(
-                        settings.t("typography.slot.\(slot.id)"),
-                        description: settings.t("typography.slot.\(slot.id)_desc")
-                    ) {
-                        VStack(spacing: 10) {
-                            HStack {
-                                Slider(value: typographySizeBinding(slot), in: 70...160, step: 1, onEditingChanged: { editing in
-                                    if !editing { model.showSavedToast(settings.t("toast.typography_saved")) }
-                                })
-                                Text("\(typographyStyle(slot).sizePercent)%")
-                                    .foregroundStyle(.white.opacity(0.68))
-                            }
-                            Picker(settings.t("field.weight"), selection: typographyWeightBinding(slot)) {
-                                Text(settings.t("typography.weight.regular")).tag(AppSettings.typoWeightRegular)
-                                Text(settings.t("typography.weight.semibold")).tag(AppSettings.typoWeightSemibold)
-                                Text(settings.t("typography.weight.bold")).tag(AppSettings.typoWeightBold)
-                            }
-                            .pickerStyle(.segmented)
-                        }
-                    }
+                    typographySettingsRow(slot)
                 }
             }
         }
@@ -8977,18 +9278,18 @@ struct SettingsView: View {
             settingsSection(settings.t("section.ai_lyrics"), description: settings.t("section.ai_lyrics_desc")) {
                 settingsToggleCard(settings.t("lyrics.translation"), binding: $settings.translationEnabled)
                 settingsToggleCard(settings.t("lyrics.pronunciation"), binding: $settings.pronunciationEnabled)
-                settingsCard(
-                    settings.t("section.provider"),
-                    description: settings.t("setting.ai_provider_order_desc")
-                ) {
-                    VStack(spacing: 8) {
-                        ForEach(Array(settings.aiProviderOrder.enumerated()), id: \.element) { index, providerId in
-                            if let provider = AppSettings.aiProviderById(providerId) {
-                                aiProviderSettingsCard(provider, index: index)
-                            }
-                        }
+
+            }
+
+            settingsSection(settings.t("section.provider"), description: settings.t("setting.ai_provider_order_desc")) {
+                ForEach(Array(settings.aiProviderOrder.enumerated()), id: \.element) { index, providerId in
+                    if let provider = AppSettings.aiProviderById(providerId) {
+                        aiProviderSettingsCard(provider, index: index)
                     }
                 }
+            }
+
+            settingsSection(settings.t("setting.cultural_annotations")) {
                 settingsToggleCard(
                     settings.t("setting.cultural_annotations"),
                     description: settings.t("setting.cultural_annotations_desc"),
@@ -8997,14 +9298,16 @@ struct SettingsView: View {
                 if settings.culturalAnnotationsEnabled {
                     settingsCard(settings.t("setting.cultural_font_family")) {
                         VStack(alignment: .leading, spacing: 14) {
-                            Picker("", selection: $settings.culturalAnnotationsFontFamily) {
-                                Text(settings.t("font.pretendard")).tag("pretendard")
-                                Text(settings.t("font.system")).tag("system")
-                                Text(settings.t("font.serif")).tag("serif")
-                                Text(settings.t("font.monospace")).tag("monospace")
-                            }
-                            .labelsHidden()
-                            .settingsMenuSurface()
+                            SettingsSegmentedPicker(
+                                title: settings.t("setting.cultural_font_family"),
+                                selection: $settings.culturalAnnotationsFontFamily,
+                                options: [
+                                    ("pretendard", settings.t("font.pretendard")),
+                                    ("system", settings.t("font.system")),
+                                    ("serif", settings.t("font.serif")),
+                                    ("monospace", settings.t("font.monospace"))
+                                ]
+                            )
 
                             culturalAnnotationSlider(
                                 title: settings.t("setting.cultural_font_size"),
@@ -9030,14 +9333,16 @@ struct SettingsView: View {
                     }
                     settingsCard("\(settings.t("vinyl.mode")) · \(settings.t("setting.cultural_font_family"))") {
                         VStack(alignment: .leading, spacing: 14) {
-                            Picker("", selection: $settings.culturalAnnotationsVinylFontFamily) {
-                                Text(settings.t("font.pretendard")).tag("pretendard")
-                                Text(settings.t("font.system")).tag("system")
-                                Text(settings.t("font.serif")).tag("serif")
-                                Text(settings.t("font.monospace")).tag("monospace")
-                            }
-                            .labelsHidden()
-                            .settingsMenuSurface()
+                            SettingsSegmentedPicker(
+                                title: settings.t("setting.cultural_font_family"),
+                                selection: $settings.culturalAnnotationsVinylFontFamily,
+                                options: [
+                                    ("pretendard", settings.t("font.pretendard")),
+                                    ("system", settings.t("font.system")),
+                                    ("serif", settings.t("font.serif")),
+                                    ("monospace", settings.t("font.monospace"))
+                                ]
+                            )
 
                             culturalAnnotationSlider(
                                 title: "\(settings.t("vinyl.mode")) · \(settings.t("setting.cultural_font_size"))",
@@ -9062,102 +9367,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                if let url = URL(string: selectedProvider.apiKeyURL), !selectedProvider.apiKeyURL.trimmed.isEmpty {
-                    Link(settings.t("button.get_key"), destination: url)
-                        .font(.pretendard(15, weight: .semibold))
-                }
-                settingsCard(settings.t("field.base_url")) {
-                    settingsTextField(settings.t("field.base_url"), text: $settings.baseUrl)
-                }
-                settingsCard(
-                    settings.t("field.model"),
-                    description: settings.providerId == "paxsenix" && settings.model.trimmed.isEmpty
-                        ? settings.t("field.model_required")
-                        : ""
-                ) {
-                    if settings.providerId == "paxsenix" {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 10) {
-                                Picker("", selection: $settings.model) {
-                                    Text(settings.t("field.model_required")).tag("")
-                                    if !settings.model.trimmed.isEmpty,
-                                       !paxsenixModels.contains(where: { $0.id == settings.model }) {
-                                        Text(settings.model).tag(settings.model)
-                                    }
-                                    ForEach(paxsenixModels) { model in
-                                        Text(model.displayName).tag(model.id)
-                                    }
-                                }
-                                .labelsHidden()
-                                .settingsMenuSurface()
-                                .disabled(paxsenixModelsLoading || paxsenixModels.isEmpty)
 
-                                Button {
-                                    Task { await refreshPaxsenixModels() }
-                                } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                        .frame(width: 34, height: 34)
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(paxsenixModelsLoading)
-                                .accessibilityLabel(settings.t("button.refresh_models"))
-                            }
-                            if paxsenixModelsLoading {
-                                Text(settings.t("status.models_loading"))
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.62))
-                            } else if !paxsenixModelsError.isEmpty {
-                                Text(settings.t("status.models_unavailable"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.orange.opacity(0.88))
-                            }
-                            settingsTextField(settings.t("field.model_id"), text: $settings.model)
-                        }
-                    } else {
-                        settingsTextField(settings.t("field.model"), text: $settings.model)
-                    }
-                }
-                settingsCard(settings.t("field.max_tokens")) {
-                    Stepper(value: maxTokensBinding, in: 256...65_536, step: 256) {
-                        Text("\(settings.maxTokens)")
-                    }
-                }
-                settingsCard(settings.t("field.temperature")) {
-                    HStack {
-                        Slider(value: temperatureBinding, in: 0...2, step: 0.05)
-                        Text(String(format: "%.2f", settings.temperature))
-                            .foregroundStyle(.white.opacity(0.68))
-                    }
-                }
-                settingsCard(settings.t("field.api_key"), description: settings.t("field.api_key_desc")) {
-                    TextEditor(text: $settings.apiKeys)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 86)
-                        .padding(10)
-                        .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10))
-                }
-                if settings.providerId == "pollinations" {
-                    settingsCard(settings.t("pollinations.access_token")) {
-                        SecureField(settings.t("pollinations.access_token"), text: $settings.pollinationsAccessToken)
-                            .textFieldStyle(PlayerTextFieldStyle())
-                        Text(model.pollinationsAuthStatusText)
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.62))
-                        settingsActionButton(model.pollinationsConnected ? settings.t("pollinations.reconnect") : settings.t("pollinations.connect")) {
-                            model.startPollinationsLogin()
-                        }
-                        .disabled(model.pollinationsAuthInFlight)
-                        settingsActionButton(settings.t("pollinations.open_login")) { model.openPollinationsLoginPage() }
-                            .disabled(!model.pollinationsCanOpenLoginPage)
-                        settingsActionButton(settings.t("pollinations.test")) { model.testPollinationsToken() }
-                            .disabled(!model.pollinationsCanTestToken)
-                        settingsActionButton(settings.t("pollinations.disconnect"), role: .destructive) { model.disconnectPollinationsLogin() }
-                            .disabled(!model.pollinationsConnected || model.pollinationsAuthInFlight)
-                    }
-                }
-                settingsActionButton(settings.t("button.save_regenerate")) {
-                    model.saveAiSettingsAndRegenerate()
-                }
             }
 
             settingsSection(settings.t("section.language_rules")) {
@@ -9188,44 +9398,113 @@ struct SettingsView: View {
         }
     }
 
+    private var aiProviderConfiguration: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let url = URL(string: selectedProvider.apiKeyURL), !selectedProvider.apiKeyURL.trimmed.isEmpty {
+                Link(settings.t("button.get_key"), destination: url)
+                    .font(.pretendard(15, weight: .semibold))
+            }
+            settingsCard(settings.t("field.base_url")) {
+                settingsTextField(settings.t("field.base_url"), text: $settings.baseUrl)
+            }
+            settingsCard(
+                settings.t("field.model"),
+                description: settings.providerId == "paxsenix" && settings.model.trimmed.isEmpty
+                    ? settings.t("field.model_required")
+                    : ""
+            ) {
+                if settings.providerId == "paxsenix" {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            Picker("", selection: $settings.model) {
+                                Text(settings.t("field.model_required")).tag("")
+                                if !settings.model.trimmed.isEmpty,
+                                   !paxsenixModels.contains(where: { $0.id == settings.model }) {
+                                    Text(settings.model).tag(settings.model)
+                                }
+                                ForEach(paxsenixModels) { model in
+                                    Text(model.displayName).tag(model.id)
+                                }
+                            }
+                            .labelsHidden()
+                            .settingsMenuSurface()
+                            .disabled(paxsenixModelsLoading || paxsenixModels.isEmpty)
+
+                            Button {
+                                Task { await refreshPaxsenixModels() }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .frame(width: 34, height: 34)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(paxsenixModelsLoading)
+                            .accessibilityLabel(settings.t("button.refresh_models"))
+                        }
+                        if paxsenixModelsLoading {
+                            Text(settings.t("status.models_loading"))
+                                .font(.caption)
+                                .foregroundStyle(SettingsDesign.secondary)
+                        } else if !paxsenixModelsError.isEmpty {
+                            Text(settings.t("status.models_unavailable"))
+                                .font(.caption)
+                                .foregroundStyle(Color.orange.opacity(0.88))
+                        }
+                        settingsTextField(settings.t("field.model_id"), text: $settings.model)
+                    }
+                } else {
+                    settingsTextField(settings.t("field.model"), text: $settings.model)
+                }
+            }
+            settingsCard(settings.t("field.max_tokens")) {
+                Stepper(value: maxTokensBinding, in: 256...65_536, step: 256) {
+                    Text("\(settings.maxTokens)")
+                }
+            }
+            settingsCard(settings.t("field.temperature")) {
+                HStack {
+                    SettingsSlider(value: temperatureBinding, in: 0...2, step: 0.05)
+                    Text(String(format: "%.2f", settings.temperature))
+                        .foregroundStyle(SettingsDesign.secondary)
+                }
+            }
+            settingsCard(settings.t("field.api_key"), description: settings.t("field.api_key_desc")) {
+                TextEditor(text: $settings.apiKeys)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 86)
+                    .padding(10)
+                    .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11))
+                    .overlay(RoundedRectangle(cornerRadius: 11).stroke(SettingsDesign.strongBorder))
+            }
+            if settings.providerId == "pollinations" {
+                settingsCard(settings.t("pollinations.access_token")) {
+                    SecureField(settings.t("pollinations.access_token"), text: $settings.pollinationsAccessToken)
+                        .textFieldStyle(SettingsTextFieldStyle())
+                    Text(model.pollinationsAuthStatusText)
+                        .font(.caption)
+                        .foregroundStyle(SettingsDesign.secondary)
+                    settingsActionButton(model.pollinationsConnected ? settings.t("pollinations.reconnect") : settings.t("pollinations.connect")) {
+                        model.startPollinationsLogin()
+                    }
+                    .disabled(model.pollinationsAuthInFlight)
+                    settingsActionButton(settings.t("pollinations.open_login")) { model.openPollinationsLoginPage() }
+                        .disabled(!model.pollinationsCanOpenLoginPage)
+                    settingsActionButton(settings.t("pollinations.test")) { model.testPollinationsToken() }
+                        .disabled(!model.pollinationsCanTestToken)
+                    settingsActionButton(settings.t("pollinations.disconnect"), role: .destructive) { model.disconnectPollinationsLogin() }
+                        .disabled(!model.pollinationsConnected || model.pollinationsAuthInFlight)
+                }
+            }
+            settingsActionButton(settings.t("button.save_regenerate")) {
+                model.saveAiSettingsAndRegenerate()
+            }
+        }
+    }
+
+
     private var systemSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
-            settingsSection(
-                settings.t("creator_privacy.section"),
-                description: settings.t("creator_privacy.section_desc")
-            ) {
-                settingsCard(
-                    settings.t("creator_privacy.private_title"),
-                    description: settings.t("creator_privacy.private_desc")
-                ) {
-                    HStack(alignment: .center, spacing: 12) {
-                        Group {
-                            if model.creatorPrivacyRequestInFlight {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Circle()
-                                    .fill(creatorPrivacyStatusColor)
-                                    .frame(width: 8, height: 8)
-                            }
-                        }
-                        .frame(width: 18, height: 18)
-
-                        Text(model.creatorPrivacyStatusText)
-                            .font(.pretendard(13))
-                            .foregroundStyle(.white.opacity(0.68))
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Spacer(minLength: 10)
-
-                        Toggle("", isOn: creatorPrivacyBinding)
-                            .labelsHidden()
-                            .fixedSize()
-                            .disabled(!model.creatorPrivacyCanEdit)
-                            .accessibilityLabel(settings.t("creator_privacy.private_title"))
-                            .accessibilityValue(model.creatorPrivacyStatusText)
-                    }
-
+            settingsSection(settings.t("section.account")) {
+                settingsCard("Discord", description: settings.t("creator_privacy.section_desc")) {
                     HStack(spacing: 10) {
                         if model.creatorAccountConnected {
                             settingsActionButton(settings.t("creator_privacy.refresh")) {
@@ -9245,14 +9524,41 @@ struct SettingsView: View {
                         }
                     }
                 }
-            }
+                settingsCard(
+                    settings.t("creator_privacy.private_title"),
+                    description: settings.t("creator_privacy.private_desc")
+                ) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Group {
+                            if model.creatorPrivacyRequestInFlight {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Circle()
+                                    .fill(creatorPrivacyStatusColor)
+                                    .frame(width: 8, height: 8)
+                            }
+                        }
+                        .frame(width: 18, height: 18)
 
-            settingsSection(
-                settings.t("cloud_sync.section"),
-                description: settings.t("cloud_sync.monthly_required")
-                    + "\n" + settings.t("cloud_sync.section_desc")
-            ) {
-                settingsCard(settings.t("cloud_sync.section")) {
+                        Text(model.creatorPrivacyStatusText)
+                            .font(.pretendard(13))
+                            .foregroundStyle(SettingsDesign.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Spacer(minLength: 10)
+
+                        Toggle("", isOn: creatorPrivacyBinding)
+                            .labelsHidden()
+                            .fixedSize()
+                            .disabled(!model.creatorPrivacyCanEdit)
+                            .accessibilityLabel(settings.t("creator_privacy.private_title"))
+                            .accessibilityValue(model.creatorPrivacyStatusText)
+                    }
+
+
+                }
+                settingsCard(settings.t("cloud_sync.section"), description: settings.t("cloud_sync.monthly_required") + "\n" + settings.t("cloud_sync.section_desc")) {
                     HStack(alignment: .center, spacing: 10) {
                         if model.cloudSettingsRequestInFlight {
                             ProgressView()
@@ -9267,7 +9573,7 @@ struct SettingsView: View {
                         }
                         Text(model.cloudSettingsStatusText)
                             .font(.pretendard(13))
-                            .foregroundStyle(.white.opacity(0.68))
+                            .foregroundStyle(SettingsDesign.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel(model.cloudSettingsStatusText)
                     }
@@ -9293,32 +9599,25 @@ struct SettingsView: View {
                         .disabled(!model.cloudSettingsActionsEnabled)
                     }
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.66, green: 0.55, blue: 0.98).opacity(0.72),
-                                    Color(red: 0.93, green: 0.28, blue: 0.60).opacity(0.42)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1
-                        )
-                }
+
             }
 
-            settingsSection(settings.t("section.spotify_api"), description: settings.t("section.spotify_api_option_desc")) {
+            settingsSection(
+                settings.t("section.spotify_api"),
+                description: settings.t("section.spotify_api_option_desc")
+            ) {
                 settingsCard(settings.t("section.spotify_api")) {
                     SpotifySetupInstructionsPanel()
                 }
                 settingsCard(settings.t("field.spotify_client_id")) {
                     settingsTextField(settings.t("field.spotify_client_id"), text: $settings.spotifyClientId)
                 }
-                settingsCard(settings.t("field.spotify_client_secret"), description: settings.t("field.spotify_client_secret_role")) {
+                settingsCard(
+                    settings.t("field.spotify_client_secret"),
+                    description: settings.t("field.spotify_client_secret_role")
+                ) {
                     SecureField(settings.t("field.spotify_client_secret"), text: $settings.spotifyClientSecret)
-                        .textFieldStyle(PlayerTextFieldStyle())
+                        .textFieldStyle(SettingsTextFieldStyle())
                 }
                 settingsCard(settings.t("field.redirect_uri")) {
                     Text(SpotifyRedirectConfiguration.uri)
@@ -9326,15 +9625,7 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                         .foregroundStyle(.white.opacity(0.72))
                 }
-                settingsToggleCard(
-                    settings.t("setting.spotify_web_api"),
-                    description: settings.t("setting.spotify_web_api_desc"),
-                    binding: spotifyWebAPIEnabledBinding
-                )
-                Text(spotifyWebAPIStatusText)
-                    .font(.pretendard(13))
-                    .foregroundStyle(.white.opacity(0.62))
-                    .fixedSize(horizontal: false, vertical: true)
+                spotifyWebAPIOptInCard
                 settingsCard(settings.t("field.live_source")) {
                     Text(model.spotifyAppRemoteConnected ? settings.t("spotify.source.app_remote") : (model.spotifyLivePolling ? settings.t("spotify.source.web_api") : settings.t("spotify.source.off")))
                         .foregroundStyle(.white.opacity(0.72))
@@ -9345,20 +9636,21 @@ struct SettingsView: View {
                 if !model.spotifyValidationStatus.trimmed.isEmpty {
                     Text(model.spotifyValidationStatus)
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.62))
+                        .foregroundStyle(SettingsDesign.secondary)
                 }
                 settingsActionButton(model.spotifyCredentialsValidationInFlight ? settings.t("spotify.validate_checking") : settings.t("button.spotify_save")) {
                     model.validateSpotifyApiCredentials(reloadOnChange: true)
                 }
                 .disabled(model.spotifyCredentialsValidationInFlight)
-                if model.spotifyWebAPIConnected {
-                    settingsActionButton(settings.t("spotify.disconnect_oauth"), role: .destructive) {
-                        model.disconnectSpotifyUser()
+                if model.spotifyWebAPIAuthorizationStored {
+                    settingsCard(
+                        settings.t("spotify.disconnect_oauth"),
+                        description: settings.t("spotify.disconnect_oauth_desc")
+                    ) {
+                        settingsActionButton(settings.t("spotify.disconnect_oauth"), role: .destructive) {
+                            model.disconnectSpotifyUser()
+                        }
                     }
-                    Text(settings.t("spotify.disconnect_oauth_desc"))
-                        .font(.pretendard(12))
-                        .foregroundStyle(.white.opacity(0.52))
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -9396,7 +9688,7 @@ struct SettingsView: View {
                 settingsCard(settings.t("section.update")) {
                     Text(model.updateStatus)
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.62))
+                        .foregroundStyle(SettingsDesign.secondary)
                     settingsActionButton(model.updateCheckInFlight ? settings.t("update.checking") : settings.t("update.check")) {
                         model.checkForUpdates(manual: true)
                     }
@@ -9406,11 +9698,14 @@ struct SettingsView: View {
             }
 
             settingsSection(settings.t("section.tools"), description: settings.t("section.tools_desc")) {
-                settingsActionButton(settings.t("button.reload_current")) { model.reloadLyrics(bypassCache: true) }
-                settingsActionButton(settings.t("button.clear_current")) { model.clearCachesForCurrentTrack() }
-                settingsActionButton(settings.t("button.clear_all"), role: .destructive) { model.clearAllCaches() }
-                settingsActionButton(settings.t("button.ai_cache_clear")) { model.clearAiCaches() }
-                settingsActionButton(settings.t("button.debug_log")) { settingsLogsPresented = true }
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    settingsActionButton(settings.t("button.clear_current")) { model.clearCachesForCurrentTrack() }
+                    settingsActionButton(settings.t("button.clear_all"), role: .destructive) { model.clearAllCaches() }
+                    settingsActionButton(settings.t("button.ai_cache_clear")) { model.clearAiCaches() }
+                    settingsActionButton(settings.t("button.debug_log")) { settingsLogsPresented = true }
+                    settingsActionButton(settings.t("button.reload_current")) { model.reloadLyrics(bypassCache: true) }
+                }
+                .padding(16)
             }
         }
         .alert(settings.t("cloud_sync.apply"), isPresented: $cloudApplyConfirmationPresented) {
@@ -9443,27 +9738,29 @@ struct SettingsView: View {
     private var backgroundSettingsSection: some View {
         settingsSection(settings.t("section.background"), description: settings.t("section.background_desc")) {
             settingsCard(settings.t("setting.background_mode"), description: settings.t("setting.background_mode_desc")) {
-                Picker("", selection: Binding(get: { settings.backgroundMode }, set: { value in
+                SettingsSegmentedPicker(
+                    title: settings.t("setting.background_mode"),
+                    selection: Binding(get: { settings.backgroundMode }, set: { value in
                     settings.backgroundMode = value
                     model.refreshBackgroundForCurrentTrack()
                     model.showSavedToast(settings.t("toast.background_saved"))
-                })) {
-                    Text(settings.t("background.mode.gradient")).tag(AppSettings.backgroundGradient)
-                    Text(settings.t("background.mode.blur_gradient")).tag(AppSettings.backgroundBlurGradient)
-                    Text(settings.t("background.mode.video")).tag(AppSettings.backgroundVideo)
-                    Text(settings.t("background.mode.solid")).tag(AppSettings.backgroundSolid)
-                }
-                .labelsHidden()
-                .settingsMenuSurface()
+                }),
+                    options: [
+                        (AppSettings.backgroundGradient, settings.t("background.mode.gradient")),
+                        (AppSettings.backgroundBlurGradient, settings.t("background.mode.blur_gradient")),
+                        (AppSettings.backgroundVideo, settings.t("background.mode.video")),
+                        (AppSettings.backgroundSolid, settings.t("background.mode.solid"))
+                    ]
+                )
             }
-            settingsCard(settings.t("setting.brightness")) {
-                Slider(value: Binding(get: { Double(settings.backgroundBrightness) }, set: { settings.backgroundBrightness = Int($0.rounded()) }), in: 0...100, step: 1, onEditingChanged: backgroundSliderEditingChanged)
+            settingsCard(settings.t("setting.brightness"), valueText: "\(settings.backgroundBrightness)%") {
+                SettingsSlider(value: Binding(get: { Double(settings.backgroundBrightness) }, set: { settings.backgroundBrightness = Int($0.rounded()) }), in: 0...100, step: 1, onEditingChanged: backgroundSliderEditingChanged)
             }
-            settingsCard(settings.t("setting.blur")) {
-                Slider(value: Binding(get: { Double(settings.backgroundBlur) }, set: { settings.backgroundBlur = Int($0.rounded()) }), in: 0...100, step: 1, onEditingChanged: backgroundSliderEditingChanged)
+            settingsCard(settings.t("setting.blur"), valueText: "\(settings.backgroundBlur)%") {
+                SettingsSlider(value: Binding(get: { Double(settings.backgroundBlur) }, set: { settings.backgroundBlur = Int($0.rounded()) }), in: 0...100, step: 1, onEditingChanged: backgroundSliderEditingChanged)
             }
-            settingsCard(settings.t("setting.video_scale")) {
-                Slider(value: Binding(get: { Double(settings.backgroundVideoScale) }, set: { settings.backgroundVideoScale = AppSettings.clampBackgroundVideoScale(Int($0.rounded())) }), in: 100...180, step: 1, onEditingChanged: backgroundSliderEditingChanged)
+            settingsCard(settings.t("setting.video_scale"), valueText: "\(settings.backgroundVideoScale)%") {
+                SettingsSlider(value: Binding(get: { Double(settings.backgroundVideoScale) }, set: { settings.backgroundVideoScale = AppSettings.clampBackgroundVideoScale(Int($0.rounded())) }), in: 100...180, step: 1, onEditingChanged: backgroundSliderEditingChanged)
             }
             settingsToggleCard(settings.t("setting.noise"), binding: backgroundNoiseBinding)
             settingsToggleCard(settings.t("setting.reduce_motion"), binding: backgroundReduceMotionBinding)
@@ -9488,23 +9785,25 @@ struct SettingsView: View {
                     .foregroundStyle(.white.opacity(0.58))
             } else if currentTrackHasBackgroundOverride {
                 settingsCard(settings.t("setting.background_mode")) {
-                    Picker("", selection: trackBackgroundModeBinding) {
-                        Text(settings.t("background.mode.gradient")).tag(AppSettings.backgroundGradient)
-                        Text(settings.t("background.mode.blur_gradient")).tag(AppSettings.backgroundBlurGradient)
-                        Text(settings.t("background.mode.video")).tag(AppSettings.backgroundVideo)
-                        Text(settings.t("background.mode.solid")).tag(AppSettings.backgroundSolid)
-                    }
-                    .labelsHidden()
-                    .settingsMenuSurface()
+                    SettingsSegmentedPicker(
+                        title: settings.t("setting.background_mode"),
+                        selection: trackBackgroundModeBinding,
+                        options: [
+                            (AppSettings.backgroundGradient, settings.t("background.mode.gradient")),
+                            (AppSettings.backgroundBlurGradient, settings.t("background.mode.blur_gradient")),
+                            (AppSettings.backgroundVideo, settings.t("background.mode.video")),
+                            (AppSettings.backgroundSolid, settings.t("background.mode.solid"))
+                        ]
+                    )
                 }
-                settingsCard(settings.t("setting.brightness")) {
-                    Slider(value: trackBackgroundBrightnessBinding, in: 0...100, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
+                settingsCard(settings.t("setting.brightness"), valueText: "\(Int(trackBackgroundBrightnessBinding.wrappedValue))%") {
+                    SettingsSlider(value: trackBackgroundBrightnessBinding, in: 0...100, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
                 }
-                settingsCard(settings.t("setting.blur")) {
-                    Slider(value: trackBackgroundBlurBinding, in: 0...100, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
+                settingsCard(settings.t("setting.blur"), valueText: "\(Int(trackBackgroundBlurBinding.wrappedValue))%") {
+                    SettingsSlider(value: trackBackgroundBlurBinding, in: 0...100, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
                 }
-                settingsCard(settings.t("setting.video_scale")) {
-                    Slider(value: trackBackgroundVideoScaleBinding, in: 100...180, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
+                settingsCard(settings.t("setting.video_scale"), valueText: "\(Int(trackBackgroundVideoScaleBinding.wrappedValue))%") {
+                    SettingsSlider(value: trackBackgroundVideoScaleBinding, in: 100...180, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
                 }
                 settingsToggleCard(settings.t("setting.noise"), binding: trackBackgroundNoiseBinding)
                 settingsToggleCard(settings.t("setting.reduce_motion"), binding: trackBackgroundReduceMotionBinding)
@@ -9520,31 +9819,32 @@ struct SettingsView: View {
         }
     }
 
-    private var aiStatusKey: String {
-        if settings.translationEnabled || settings.pronunciationEnabled {
-            return "status.ai_lyrics_active"
-        }
-        return "status.ai_disabled"
-    }
-
     private func settingsSection<Content: View>(
         _ title: String,
         description: String = "",
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(title)
-                .font(.pretendard(18, weight: .bold))
-                .foregroundStyle(.white)
-            if !description.trimmed.isEmpty {
-                Text(description)
-                    .font(.pretendard(14))
-                    .foregroundStyle(.white.opacity(0.62))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: 12) {
+                .font(.pretendard(13.5, weight: .bold))
+                .foregroundStyle(SettingsDesign.secondary)
+                .accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 0) {
+                if !description.trimmed.isEmpty {
+                    Text(description)
+                        .font(.pretendard(12.5))
+                        .foregroundStyle(SettingsDesign.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 14)
+                        .padding(.bottom, 4)
+                }
                 content()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(SettingsDesign.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(SettingsDesign.border, lineWidth: 1))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -9552,66 +9852,236 @@ struct SettingsView: View {
     private func settingsCard<Content: View>(
         _ title: String,
         description: String = "",
+        valueText: String = "",
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 9) {
             if !title.trimmed.isEmpty {
-                Text(title)
-                    .font(.pretendard(15, weight: .semibold))
-                    .foregroundStyle(.white)
+                HStack(alignment: .firstTextBaseline) {
+                    Text(title)
+                        .font(.pretendard(15, weight: .semibold))
+                        .foregroundStyle(SettingsDesign.text)
+                    if !valueText.isEmpty {
+                        Spacer(minLength: 8)
+                        Text(valueText)
+                            .font(.pretendard(13))
+                            .monospacedDigit()
+                            .foregroundStyle(SettingsDesign.secondary)
+                    }
+                }
             }
             if !description.trimmed.isEmpty {
                 Text(description)
-                    .font(.pretendard(13))
-                    .foregroundStyle(.white.opacity(0.60))
+                    .font(.pretendard(12.5))
+                    .foregroundStyle(SettingsDesign.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .settingsRowSeparator()
     }
 
     private func settingsToggleCard(_ title: String, description: String = "", binding: Binding<Bool>) -> some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 7) {
+        Toggle(isOn: binding) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.pretendard(15, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(SettingsDesign.text)
                 if !description.trimmed.isEmpty {
                     Text(description)
-                        .font(.pretendard(13))
-                        .foregroundStyle(.white.opacity(0.60))
+                        .font(.pretendard(12.5))
+                        .foregroundStyle(SettingsDesign.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Toggle("", isOn: binding)
-                .labelsHidden()
-                .fixedSize()
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .settingsRowSeparator()
+    }
+
+    private func typographySettingsRow(_ slot: AppSettings.TypographySlot) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                typographyLabel(slot).frame(width: 74, alignment: .leading)
+                typographySlider(slot).frame(minWidth: 60)
+                typographyWeights(slot)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                typographyLabel(slot)
+                HStack(spacing: 12) {
+                    typographySlider(slot)
+                    typographyWeights(slot)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .settingsRowSeparator()
+    }
+
+    private func typographyLabel(_ slot: AppSettings.TypographySlot) -> some View {
+        Text(settings.t("typography.slot.\(slot.id)"))
+            .font(.pretendard(14, weight: .semibold))
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityHint(settings.t("typography.slot.\(slot.id)_desc"))
+    }
+
+    private func typographySlider(_ slot: AppSettings.TypographySlot) -> some View {
+        VStack(spacing: 1) {
+            SettingsSlider(value: typographySizeBinding(slot), in: 70...160, step: 1, onEditingChanged: { editing in
+                if !editing { model.showSavedToast(settings.t("toast.typography_saved")) }
+            })
+            .accessibilityLabel(settings.t("typography.slot.\(slot.id)"))
+            .accessibilityValue("\(typographyStyle(slot).sizePercent)%")
+            Text("\(typographyStyle(slot).sizePercent)%")
+                .font(.pretendard(10))
+                .monospacedDigit()
+                .foregroundStyle(SettingsDesign.secondary)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func typographyWeights(_ slot: AppSettings.TypographySlot) -> some View {
+        HStack(spacing: 3) {
+            ForEach([AppSettings.typoWeightRegular, AppSettings.typoWeightSemibold, AppSettings.typoWeightBold], id: \.self) { weight in
+                Button {
+                    typographyWeightBinding(slot).wrappedValue = weight
+                } label: {
+                    Text(weight == AppSettings.typoWeightRegular ? "R" : weight == AppSettings.typoWeightSemibold ? "S" : "B")
+                        .font(.pretendard(12, weight: .bold))
+                        .foregroundStyle(typographyStyle(slot).weight == weight ? SettingsDesign.background : SettingsDesign.secondary)
+                        .frame(minWidth: 26, minHeight: 26)
+                        .background(typographyStyle(slot).weight == weight ? SettingsDesign.text : .clear, in: RoundedRectangle(cornerRadius: 6))
+                        .frame(minWidth: 36, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(settings.t("typography.weight.\(weight)"))
+                .accessibilityAddTraits(typographyStyle(slot).weight == weight ? [.isSelected] : [])
+            }
+        }
+        .padding(.horizontal, 3)
+        .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func speakerSwatchGroup(_ group: String) -> some View {
+        let slots = AppSettings.speakerColorSlots.filter { $0.id.hasPrefix(group) }
+        return settingsCard("") {
+            Text(settings.t("speaker_color.\(group)"))
+                .font(.pretendard(13, weight: .bold))
+                .foregroundStyle(SettingsDesign.secondary)
+            HStack(spacing: 6) {
+                ForEach(slots) { slot in
+                    Button { selectedSpeakerColor = slot.id } label: {
+                        Circle()
+                            .fill(Color(hex: settings.speakerColorSettings().hex(slot.id)))
+                            .frame(width: 34, height: 34)
+                            .overlay(Circle().stroke(selectedSpeakerColor == slot.id ? SettingsDesign.text : .clear, lineWidth: 2).padding(-3))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(slot.id == AppSettings.speakerColorNormal ? settings.t("speaker_color.normal") : "\(settings.t("speaker_color.\(group)")) \(slot.id.last.map(String.init) ?? "")")
+                    .accessibilityValue(settings.speakerColorSettings().hex(slot.id))
+                    .accessibilityAddTraits(selectedSpeakerColor == slot.id ? [.isSelected] : [])
+                }
+            }
+            if let slot = slots.first(where: { $0.id == selectedSpeakerColor }) {
+                SpeakerColorRow(slot: slot)
+                    .id(slot.id)
+                    .font(.pretendard(13.5, weight: .semibold))
+                    .padding(12)
+                    .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11))
+            }
+        }
+    }
+
+    private var spotifyWebAPIOptInCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(settings.t("setting.spotify_web_api"))
+                        .font(.pretendard(15, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text(settings.t("setting.spotify_web_api_desc"))
+                        .font(.pretendard(13))
+                        .foregroundStyle(SettingsDesign.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Toggle("", isOn: spotifyWebAPIEnabledBinding)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel(settings.t("setting.spotify_web_api"))
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Circle()
+                    .fill(spotifyWebAPIStatusColor)
+                    .frame(width: 7, height: 7)
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                    .accessibilityHidden(true)
+                Text(spotifyWebAPIStatusText)
+                    .font(.pretendard(13))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .background(Color(red: 0.16, green: 0.16, blue: 0.18), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .settingsRowSeparator()
+    }
+
+    private var spotifyWebAPIEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.spotifyWebAPIEnabled },
+            set: { value in
+                model.setSpotifyWebAPIEnabled(value)
+                model.showSavedToast(settings.t("toast.settings_saved"))
+            }
+        )
+    }
+
+    private var spotifyWebAPIStatusText: String {
+        guard settings.spotifyWebAPIEnabled else {
+            return settings.t("setting.spotify_web_api_status_off")
+        }
+        return model.spotifyWebAPIConnected
+            ? settings.t("setting.spotify_web_api_status_connected")
+            : settings.t("setting.spotify_web_api_status_pending")
+    }
+
+    private var spotifyWebAPIStatusColor: Color {
+        guard settings.spotifyWebAPIEnabled else { return .white.opacity(0.34) }
+        return model.spotifyWebAPIConnected
+            ? Color(red: 0.18, green: 0.83, blue: 0.44)
+            : Color(red: 0.98, green: 0.76, blue: 0.30)
     }
 
     private func settingsActionButton(_ title: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
         Button(role: role, action: action) {
             Text(title)
-                .font(.pretendard(15, weight: .semibold))
-                .foregroundStyle(role == .destructive ? Color(red: 1.0, green: 0.45, blue: 0.48) : .white)
+                .font(.pretendard(13.5, weight: .semibold))
+                .foregroundStyle(role == .destructive ? SettingsDesign.accent : SettingsDesign.text)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 44)
-                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .padding(.horizontal, 10)
+                .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(SettingsDesign.strongBorder))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SettingsActionButtonStyle())
     }
 
     private func settingsTextField(_ title: String, text: Binding<String>) -> some View {
         TextField(title, text: text)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
-            .textFieldStyle(PlayerTextFieldStyle())
+            .textFieldStyle(SettingsTextFieldStyle())
     }
 
     private func culturalAnnotationSlider(
@@ -9628,9 +10098,9 @@ struct SettingsView: View {
                 Spacer()
                 Text(valueText)
                     .font(.pretendard(12))
-                    .foregroundStyle(.white.opacity(0.62))
+                    .foregroundStyle(SettingsDesign.secondary)
             }
-            Slider(value: value, in: range, step: step)
+            SettingsSlider(value: value, in: range, step: step)
         }
     }
 
@@ -9662,59 +10132,65 @@ struct SettingsView: View {
         AppSettings.providerById(settings.providerId)
     }
 
-    @ViewBuilder
     private func aiProviderSettingsCard(_ provider: AppSettings.Provider, index: Int) -> some View {
         let selected = !provider.isKeyless && settings.providerId == provider.id
-        HStack(spacing: 12) {
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.52))
-                .frame(width: 32, height: 44)
-                .contentShape(Rectangle())
-                .draggable(provider.id)
-                .accessibilityLabel(settings.tf("setting.ai_provider_drag_format", provider.label))
-
-            Button {
-                guard !provider.isKeyless else { return }
-                settings.setProvider(provider.id)
-                model.showSavedToast(settings.t("toast.provider_saved"))
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(provider.label)
-                        .font(.pretendard(14, weight: .semibold))
-                        .foregroundStyle(.white)
-                    Text(aiProviderDescription(provider))
-                        .font(.pretendard(11))
-                        .foregroundStyle(.white.opacity(0.58))
-                        .multilineTextAlignment(.leading)
-                        .lineLimit(2)
-                    if selected {
-                        Text(settings.t("setting.ai_provider_selected"))
-                            .font(.pretendard(10, weight: .semibold))
-                            .foregroundStyle(Color(red: 0.58, green: 0.75, blue: 1.0))
-                    }
+        let expanded = expandedAIProvider == provider.id && selected
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                providerOrderControls(index: index, count: settings.aiProviderOrder.count) { offset in
+                    settings.moveAIProvider(provider.id, offset: offset)
+                    model.translationProviderSettingsChanged()
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(provider.isKeyless)
+                .draggable(provider.id)
+                .accessibilityHint(settings.tf("setting.ai_provider_drag_format", provider.label))
 
-            Toggle("", isOn: aiProviderEnabledBinding(provider.id))
-                .labelsHidden()
-                .fixedSize()
-                .accessibilityLabel(settings.tf("setting.ai_provider_toggle_format", provider.label))
+                Button {
+                    guard !provider.isKeyless else { return }
+                    if expanded {
+                        expandedAIProvider = nil
+                    } else {
+                        settings.setProvider(provider.id)
+                        expandedAIProvider = provider.id
+                        model.showSavedToast(settings.t("toast.provider_saved"))
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(provider.label).font(.pretendard(14.5, weight: .semibold))
+                            Text(aiProviderDescription(provider))
+                                .font(.pretendard(12))
+                                .foregroundStyle(SettingsDesign.muted)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        if !provider.isKeyless {
+                            Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(SettingsDesign.muted)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(provider.isKeyless)
+                .accessibilityValue(selected ? settings.t("setting.ai_provider_selected") : "")
+
+                Toggle("", isOn: aiProviderEnabledBinding(provider.id))
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel(settings.tf("setting.ai_provider_toggle_format", provider.label))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            if expanded {
+                aiProviderConfiguration
+                    .padding(.leading, 56)
+                    .overlay(alignment: .top) { SettingsDesign.border.frame(height: 1).padding(.leading, 72) }
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            selected ? Color(red: 0.22, green: 0.39, blue: 0.68).opacity(0.42) : Color.white.opacity(0.055),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(selected ? Color(red: 0.48, green: 0.67, blue: 1.0).opacity(0.55) : .white.opacity(0.06))
-        )
+        .settingsRowSeparator()
         .dropDestination(for: String.self) { providerIds, location in
             guard let sourceId = providerIds.first else { return false }
             settings.moveAIProvider(sourceId, relativeTo: provider.id, after: location.y > 36)
@@ -9999,22 +10475,6 @@ struct SettingsView: View {
         boolSettingBinding(keyPath, toastKey: "toast.settings_saved")
     }
 
-    private var spotifyWebAPIEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { settings.spotifyWebAPIEnabled },
-            set: { model.setSpotifyWebAPIEnabled($0) }
-        )
-    }
-
-    private var spotifyWebAPIStatusText: String {
-        guard settings.spotifyWebAPIEnabled else {
-            return settings.t("setting.spotify_web_api_status_off")
-        }
-        return model.spotifyWebAPIConnected
-            ? settings.t("setting.spotify_web_api_status_connected")
-            : settings.t("setting.spotify_web_api_status_pending")
-    }
-
     private func boolSettingBinding(_ keyPath: ReferenceWritableKeyPath<AppSettings, Bool>, toastKey: String) -> Binding<Bool> {
         Binding(
             get: { settings[keyPath: keyPath] },
@@ -10279,11 +10739,12 @@ private extension View {
     func settingsMenuSurface() -> some View {
         self
             .pickerStyle(.menu)
-            .tint(.white)
+            .font(.pretendard(14.5, weight: .semibold))
+            .tint(SettingsDesign.text)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .frame(minHeight: 48)
-            .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 }
 
