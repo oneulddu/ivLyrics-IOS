@@ -127,7 +127,16 @@ jobs:
         env:
           IVLYRICS_SOURCE_ROOT: ${{ steps.release.outputs.source_path }}
         run: |
-          for regression in test-playback-regressions.py test-timeline-cache.py test-provider-overlap.py; do
+          for regression in \
+            test-playback-regressions.py \
+            test-karaoke-display-metadata.py \
+            test-timeline-cache.py \
+            test-provider-overlap.py \
+            test-pip-selection-cache.py \
+            test-pip-static-frame-cache.py \
+            test-sync-load-reuse.py \
+            test-ai-models.py \
+            test-openai-connections.py; do
             script="$IVLYRICS_SOURCE_ROOT/scripts/$regression"
             if [[ -f "$script" ]]; then
               python3 "$script"

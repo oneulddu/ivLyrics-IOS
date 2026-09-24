@@ -141,7 +141,8 @@ final class AppSettings: ObservableObject {
         Provider(id: "groq", label: "Groq", description: "빠른 OpenAI 호환 추론", defaultBaseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama-3.3-70b-versatile", apiKeyURL: "https://console.groq.com/keys"),
         Provider(id: "perplexity", label: "Perplexity", description: "Sonar API 사용", defaultBaseUrl: "https://api.perplexity.ai", defaultModel: "sonar-pro", apiKeyURL: "https://www.perplexity.ai/settings/api"),
         Provider(id: "pollinations", label: "Pollinations.ai", description: "Pollinations OpenAI 호환 API", defaultBaseUrl: "https://gen.pollinations.ai", defaultModel: "openai", apiKeyURL: "https://enter.pollinations.ai"),
-        Provider(id: "paxsenix", label: "paxsenix", description: "OpenAI 호환 API 서버", defaultBaseUrl: PaxsenixAIProvider.baseURL, defaultModel: "", apiKeyURL: PaxsenixAIProvider.dashboardURL)
+        Provider(id: "paxsenix", label: "paxsenix", description: "OpenAI 호환 API 서버", defaultBaseUrl: PaxsenixAIProvider.baseURL, defaultModel: "", apiKeyURL: PaxsenixAIProvider.dashboardURL),
+        Provider(id: "deepl", label: "DeepL", description: "DeepL API Free / Pro", defaultBaseUrl: "", defaultModel: "", apiKeyURL: "https://www.deepl.com/your-account/keys")
     ]
     static let allAIProviders: [Provider] = [
         Provider(
@@ -604,6 +605,37 @@ final class AppSettings: ObservableObject {
         backgroundSettingsRevision += 1
         typographyRevision += 1
         speakerColorRevision += 1
+    }
+
+    struct TrackLyricsProviderOption: Identifiable, Equatable, Sendable {
+        let id: String
+        let name: String
+    }
+
+    var trackLyricsProviderOptions: [TrackLyricsProviderOption] {
+        snapshot.trackLyricsProviderOptions
+    }
+
+    func selectedLyricsProvider(trackKey: String) -> String {
+        guard !trackKey.isEmpty else { return "" }
+        let id = defaults.string(forKey: "track_lyrics_provider." + trackKey) ?? ""
+        return trackLyricsProviderOptions.contains(where: { $0.id == id }) ? id : ""
+    }
+
+    func selectLyricsProvider(_ id: String, trackKey: String) {
+        guard !trackKey.isEmpty else { return }
+        let key = "track_lyrics_provider." + trackKey
+        let known = Self.standardLyricsProviderById(id) != nil || LyricsProviderID(rawValue: id) != nil
+        let selection = known ? id : ""
+        guard (defaults.string(forKey: key) ?? "") != selection else { return }
+        objectWillChange.send()
+        if selection.isEmpty { defaults.removeObject(forKey: key) }
+        else { defaults.set(selection, forKey: key) }
+        recordLyricsProviderPolicyChange()
+    }
+
+    func snapshotForTrack(_ trackKey: String) -> Snapshot {
+        snapshot.selectingLyricsProvider(selectedLyricsProvider(trackKey: trackKey))
     }
 
     var snapshot: Snapshot {
@@ -1313,10 +1345,20 @@ final class AppSettings: ObservableObject {
         recordLyricsProviderPolicyChange()
     }
 
+    var openAIConnections: [OpenAIConnection] {
+        get { aiProviderProfiles["chatgpt"]?.openAIConnections ?? [] }
+        set {
+            var profile = aiProviderProfiles["chatgpt"] ?? AIProviderProfile.defaults(for: Self.providerById("chatgpt"))
+            profile.openAIConnections = newValue
+            aiProviderProfiles["chatgpt"] = profile
+        }
+    }
+
     private func saveAIProviderProfileFromPublished() {
         guard !isBootstrapping, !isSwitchingAIProviderProfile else { return }
         let provider = Self.providerById(providerId)
         aiProviderProfiles[provider.id] = AIProviderProfile(
+            openAIConnections: aiProviderProfiles[provider.id]?.openAIConnections,
             apiKeys: apiKeys,
             baseUrl: baseUrl.trimmed.isEmpty ? provider.defaultBaseUrl : baseUrl,
             model: model,
@@ -1474,6 +1516,7 @@ final class AppSettings: ObservableObject {
         for provider in providers {
             if let stored = profiles[provider.id] {
                 profiles[provider.id] = AIProviderProfile(
+                    openAIConnections: stored.openAIConnections,
                     apiKeys: stored.apiKeys,
                     baseUrl: stored.baseUrl.trimmed.isEmpty ? provider.defaultBaseUrl : stored.baseUrl,
                     model: stored.model,
@@ -2115,11 +2158,11 @@ final class AppSettings: ObservableObject {
             if provider.id == "pollinations", !pollinationsAccessToken.trimmed.isEmpty {
                 return true
             }
-            return !apiKeys.trimmed.isEmpty
+            return !apiKeys.trimmed.isEmpty || hasReadyOpenAIConnection
         }
 
         var hasModel: Bool {
-            !model.trimmed.isEmpty
+            !model.trimmed.isEmpty || hasReadyOpenAIConnection
         }
 
         var hasKeylessTranslationProvider: Bool {
@@ -2137,7 +2180,7 @@ final class AppSettings: ObservableObject {
 
         var readyAIProviderSnapshots: [Snapshot] {
             enabledAIProviderOrder.compactMap { providerId in
-                guard let provider = AppSettings.aiProviderById(providerId), !provider.isKeyless,
+                guard let provider = AppSettings.aiProviderById(providerId), !provider.translationOnly,
                       let snapshot = selectingAIProvider(providerId), snapshot.hasApiKey, snapshot.hasModel else {
                     return nil
                 }
@@ -2152,12 +2195,13 @@ final class AppSettings: ObservableObject {
         var hasEnabledAIProvider: Bool {
             enabledAIProviderOrder.contains { providerId in
                 guard let provider = AppSettings.aiProviderById(providerId) else { return false }
-                return !provider.isKeyless
+                return !provider.translationOnly
             }
         }
 
         var hasAnyTranslationProvider: Bool {
             hasKeylessTranslationProvider || hasReadyAIProvider
+                || (isAIProviderEnabled("deepl") && selectingAIProvider("deepl")?.hasApiKey == true)
         }
 
         func selectingAIProvider(_ providerId: String) -> Snapshot? {
@@ -2171,6 +2215,21 @@ final class AppSettings: ObservableObject {
             copy.maxTokens = profile.maxTokens
             copy.temperature = profile.temperature
             return copy
+        }
+
+        var openAIConnectionSnapshots: [Snapshot] {
+            guard provider.id == "chatgpt" else { return [self] }
+            return [self] + (aiProviderProfiles["chatgpt"]?.openAIConnections ?? []).filter(\.enabled).map { connection in
+                var copy = self
+                copy.apiKeys = connection.apiKeys
+                copy.baseUrl = connection.baseUrl.trimmed.isEmpty ? provider.defaultBaseUrl : connection.baseUrl
+                copy.model = connection.model
+                return copy
+            }
+        }
+
+        private var hasReadyOpenAIConnection: Bool {
+            provider.id == "chatgpt" && (aiProviderProfiles["chatgpt"]?.openAIConnections ?? []).contains(where: \.isReady)
         }
 
         var hasSpotifyCredentials: Bool {
@@ -2187,6 +2246,73 @@ final class AppSettings: ObservableObject {
                 enabled: standardLyricsProviderEnabled,
                 remoteGlobalDisable: standardLyricsProviderRemoteGlobalDisable
             )
+        }
+
+        var trackLyricsProviderOptions: [TrackLyricsProviderOption] {
+            let policy = LyricsProviderPolicyEvaluator.evaluate(
+                lyricsProviderSettings,
+                multiProviderAuthorized: lyricsProviderMultiProviderAuthorized
+            )
+            let ids = policy.effectiveMode == .multiProvider
+                ? LyricsProviderAppContracts.canonicalProviderOrder(lyricsProviderSettings.providerOrder.map(\.rawValue))
+                : AppSettings.normalizedStandardLyricsProviderOrder(standardLyricsProviderOrder)
+            return ids.compactMap { id in
+                if let provider = LyricsProviderID(rawValue: id) {
+                    guard !lyricsProviderSettings.remoteDisabledProviders.contains(provider),
+                          provider != .deezer || lyricsProviderSettings.deezerConfigured else { return nil }
+                }
+                if (lyricsProviderSettings.globalRemoteDisable || standardLyricsProviderRemoteGlobalDisable), id != "lrclib" {
+                    return nil
+                }
+                return TrackLyricsProviderOption(
+                    id: id,
+                    name: AppSettings.standardLyricsProviderById(id)?.name
+                        ?? LyricsProviderAppContracts.providerDisplayName(id)
+                )
+            }
+        }
+
+        func selectingLyricsProvider(_ id: String) -> Snapshot {
+            guard trackLyricsProviderOptions.contains(where: { $0.id == id }) else { return self }
+            let policy = LyricsProviderPolicyEvaluator.evaluate(
+                lyricsProviderSettings,
+                multiProviderAuthorized: lyricsProviderMultiProviderAuthorized
+            )
+            var copy = self
+            if policy.effectiveMode == .multiProvider {
+                guard let selected = LyricsProviderID(rawValue: id) else { return self }
+                let original = lyricsProviderSettings
+                var types = original.allowedTypesByProvider
+                types[selected] = .allowAll
+                copy.lyricsProviderSettings = LyricsProviderSettingsSnapshot(
+                    mode: original.mode,
+                    enabledProviders: [selected],
+                    providerOrder: [selected] + original.providerOrder.filter { $0 != selected },
+                    deezerConfigured: original.deezerConfigured,
+                    remoteDisabledProviders: original.remoteDisabledProviders,
+                    globalRemoteDisable: original.globalRemoteDisable,
+                    policyVersion: original.policyVersion,
+                    credentialGeneration: original.credentialGeneration,
+                    allowedTypesByProvider: types,
+                    preferLyricsTypeOverProviderOrder: true,
+                    preferSyncDataProvider: false
+                )
+                let selectedPolicy = LyricsProviderPolicyEvaluator.evaluate(
+                    copy.lyricsProviderSettings,
+                    multiProviderAuthorized: copy.lyricsProviderMultiProviderAuthorized
+                )
+                guard selectedPolicy.effectiveMode == policy.effectiveMode,
+                      selectedPolicy.allows(selected) else { return self }
+            } else {
+                copy.standardLyricsProviderOrder = [id] + AppSettings.standardDefaultLyricsProviderOrder.filter { $0 != id }
+                for providerId in AppSettings.standardDefaultLyricsProviderOrder {
+                    copy.standardLyricsProviderEnabled[providerId] = providerId == id
+                }
+                copy.standardLyricsProviderTypes[id] = [AppSettings.standardLyricsTypeKaraoke: true, AppSettings.standardLyricsTypeSynced: true, AppSettings.standardLyricsTypePlain: true]
+                copy.standardPreferSyncDataProvider = false
+                copy.standardPreferLyricsTypeOverProviderOrder = true
+            }
+            return copy
         }
 
         var enabledStandardLyricsProviderOrder: [String] {
@@ -2255,6 +2381,11 @@ final class AppSettings: ObservableObject {
                 key += "|provider=\(providerId):enabled=\(isAIProviderEnabled(providerId))"
                 if let profile = aiProviderProfiles[providerId] {
                     key += ":model=\(profile.model):url=\(profile.baseUrl):tok=\(profile.maxTokens):temp=\(profile.temperature)"
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    if let data = try? encoder.encode(profile.openAIConnections ?? []) {
+                        key += ":connections=" + IvLyricsUtilities.sha256(String(decoding: data, as: UTF8.self))
+                    }
                 }
             }
             for rule in languageRules.values.sorted(by: { $0.sourceLang < $1.sourceLang }) {
@@ -2452,11 +2583,13 @@ final class AppSettings: ObservableObject {
         var defaultBaseUrl: String
         var defaultModel: String
         var apiKeyURL: String
+        var translationOnly: Bool { isKeyless || id == "deepl" }
         var isKeyless: Bool = false
         var defaultEnabled: Bool = false
     }
 
     struct AIProviderProfile: Codable, Hashable, Sendable {
+        var openAIConnections: [OpenAIConnection]? = nil
         var apiKeys: String
         var baseUrl: String
         var model: String

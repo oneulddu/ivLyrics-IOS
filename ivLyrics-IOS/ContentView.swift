@@ -1111,7 +1111,7 @@ struct PlayerBackgroundView: View {
                     url: url,
                     blur: background.blur,
                     opacity: 1,
-                    scale: background.blur >= 55 ? 2.55 : 2.2,
+                    scale: background.reduceMotion ? 1 : 1.08,
                     date: date,
                     reduceMotion: background.reduceMotion
                 )
@@ -1225,7 +1225,7 @@ private struct AnimatedGradientBackgroundLayer: View {
     }
 
     private func blob(index: Int, size: CGSize) -> some View {
-        let radius = max(size.width, size.height) * Self.radii[index]
+        let radius = max(size.width, size.height) * Self.radii[index] * (0.6 + CGFloat(min(100, max(0, background.blur))) * 0.02)
         let center = blobCenter(index: index, size: size)
         let alpha = max(0.16, 0.35 - Double(index) * 0.025)
         return Circle()
@@ -1275,14 +1275,14 @@ private struct MovingArtworkBlurLayer: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
             .scaleEffect(transform.scale)
             .offset(transform.offset)
-            .blur(radius: max(8, CGFloat(blur) * 0.72))
+            .blur(radius: CGFloat(min(100, max(0, blur))) * 0.72)
             .opacity(opacity)
             .clipped()
         }
     }
 
     private func artworkTransform(size: CGSize) -> (scale: CGFloat, offset: CGSize) {
-        let effectiveScale: CGFloat = reduceMotion ? max(1.16, scale * 0.92) : scale
+        let effectiveScale: CGFloat = reduceMotion ? max(1, scale * 0.92) : scale
         guard !reduceMotion else {
             return (effectiveScale, .zero)
         }
@@ -2647,7 +2647,7 @@ private struct FirstLanguagePromptSheetView: View {
 
     private var shouldShowAIProviderHint: Bool {
         let snapshot = settings.snapshot
-        return snapshot.hasKeylessTranslationProvider && !snapshot.hasEnabledAIProvider
+        return snapshot.hasAnyTranslationProvider && !snapshot.hasEnabledAIProvider
     }
 
     private var aiProviderHintKey: String {
@@ -3725,9 +3725,8 @@ struct MainLyricPreviewPanel: View {
         var rows: [MainLyricPreviewRow] = []
         let original = originalPreviewText(line)
         let culturalAnnotations = showsCulturalAnnotations && settings.culturalAnnotationsEnabled
-            ? CulturalAnnotation.forLine(
-                model.culturalAnnotations,
-                lineIndex: lineIndex,
+            ? model.culturalAnnotations(
+                forLine: lineIndex,
                 text: original.text
             )
             : []
@@ -4626,27 +4625,25 @@ struct LyricsTimelineView: View {
     var body: some View {
         let position = model.adjustedPositionMs
         let timelineContext = model.timelineContext
-        let items = LyricsTimelineDisplayBuilder.items(
+        let displaySnapshot = LyricsTimelineDisplayBuilder.displaySnapshot(
             context: timelineContext,
             positionMs: position,
             trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )
+        let items = displaySnapshot.items
         let activeItemID = LyricsTimelineDisplayBuilder.previewItem(
             context: timelineContext,
             positionMs: position,
             trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )?.id
-        let fallbackActiveLineIndex = activeItemID == nil ? model.activeLineIndex : nil
-        let activeDisplayIndex = activeItemID.flatMap { id in
-            items.firstIndex { $0.id == id }
-        } ?? max(0, items.firstIndex { item in
-            if case .line(let index, _, _) = item {
-                return index == fallbackActiveLineIndex
-            }
-            return false
-        } ?? 0)
+        // Only fall back to the source-row lookup when no display item is active.
+        let fallbackDisplayIndex = activeItemID == nil
+            ? displaySnapshot.firstIndex(lineIndex: model.activeLineIndex)
+            : nil
+        let activeDisplayIndex = displaySnapshot.firstIndex(id: activeItemID)
+            ?? max(0, fallbackDisplayIndex ?? 0)
         let anticipatedItemID = settings.syncedLyricsKaraokeAnimationEnabled && !accessibilityReduceMotion
             ? LyricsTimelineDisplayBuilder.previewItem(
                 context: timelineContext,
@@ -4655,9 +4652,7 @@ struct LyricsTimelineView: View {
                 autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
             )?.id
             : nil
-        let anticipatedDisplayIndex = anticipatedItemID.flatMap { id in
-            items.firstIndex { $0.id == id }
-        }
+        let anticipatedDisplayIndex = displaySnapshot.firstIndex(id: anticipatedItemID)
         // PC starts moving up to one row 300 ms before the next line. Never
         // skip an intermediate row when several short lines share that window.
         let targetDisplayIndex = anticipatedDisplayIndex.flatMap { index in
@@ -4964,14 +4959,14 @@ private struct LyricsTimelineScrollView: View {
               currentItem.id != advancedItem.id else {
             return currentTargetID
         }
-        let items = LyricsTimelineDisplayBuilder.items(
+        let displaySnapshot = LyricsTimelineDisplayBuilder.displaySnapshot(
             context: model.timelineContext,
             positionMs: model.adjustedPositionMs,
             trackDurationMs: model.lyricsDurationMs,
             autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
         )
-        guard let currentIndex = items.firstIndex(where: { $0.id == currentItem.id }),
-              let advancedIndex = items.firstIndex(where: { $0.id == advancedItem.id }),
+        guard let currentIndex = displaySnapshot.firstIndex(id: currentItem.id),
+              let advancedIndex = displaySnapshot.firstIndex(id: advancedItem.id),
               advancedIndex == currentIndex + 1 else {
             return currentTargetID
         }
@@ -5012,14 +5007,14 @@ private struct LyricsTimelineScrollView: View {
             )
         }
         if animated && !accessibilityReduceMotion {
-            let items = LyricsTimelineDisplayBuilder.items(
+            let displaySnapshot = LyricsTimelineDisplayBuilder.displaySnapshot(
                 context: model.timelineContext,
                 positionMs: model.adjustedPositionMs,
                 trackDurationMs: model.lyricsDurationMs,
                 autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
             )
-            let duration = items.firstIndex(where: { $0.id == targetID }).map {
-                LyricsMotion.centeringDuration(items: items, targetIndex: $0)
+            let duration = displaySnapshot.firstIndex(id: targetID).map {
+                LyricsMotion.centeringDuration(items: displaySnapshot.items, targetIndex: $0)
             } ?? LyricsMotion.defaultCenteringDuration
             withAnimation(LyricsMotion.centering(duration: duration), action)
         } else {
@@ -5049,6 +5044,7 @@ private enum LyricsMotion {
         }
         let targetStart = items[targetIndex].startTimeMs
         guard let nextStart = items.dropFirst(targetIndex + 1)
+            .lazy
             .map(\.startTimeMs)
             .first(where: { $0 > targetStart }) else {
             return defaultCenteringDuration
@@ -5128,6 +5124,34 @@ fileprivate struct AutomaticInterludeSeed {
     let kind: String
 }
 
+/// Item membership and first-occurrence indices share the same interval cache.
+/// Duplicate IDs retain firstIndex semantics instead of replacing earlier rows.
+final class LyricsTimelineDisplaySnapshot {
+    let items: [LyricsTimelineDisplayItem]
+    private let indicesByID: [String: Int]
+    private let indicesByLine: [Int: Int]
+
+    init(items: [LyricsTimelineDisplayItem]) {
+        self.items = items
+        var ids: [String: Int] = [:]
+        var lines: [Int: Int] = [:]
+        ids.reserveCapacity(items.count)
+        lines.reserveCapacity(items.count)
+        for (index, item) in items.enumerated() {
+            let id = item.id
+            if ids[id] == nil { ids[id] = index }
+            if case .line(let sourceIndex, _, _) = item, lines[sourceIndex] == nil {
+                lines[sourceIndex] = index
+            }
+        }
+        indicesByID = ids
+        indicesByLine = lines
+    }
+
+    func firstIndex(id: String?) -> Int? { id.flatMap { indicesByID[$0] } }
+    func firstIndex(lineIndex: Int) -> Int? { indicesByLine[lineIndex] }
+}
+
 struct LyricsTimelineContext {
     let lines: [LyricsLine]
     let lineIDs: [String]
@@ -5141,7 +5165,8 @@ struct LyricsTimelineContext {
     fileprivate let automaticInterludeSeeds: [AutomaticInterludeSeed?]
     fileprivate let automaticInterludeIndices: [Int]
     let baseItems: [LyricsTimelineDisplayItem]
-    let itemQueries: TimelineIntervalCache<[LyricsTimelineDisplayItem]>
+    let baseSnapshot: LyricsTimelineDisplaySnapshot
+    let itemQueries: TimelineIntervalCache<LyricsTimelineDisplaySnapshot>
     let previewQueries: TimelineIntervalCache<LyricsTimelineDisplayItem?>
     let activeLineQueries: TimelineIntervalCache<[Int]>
     let precedingLyricEndTimes: [Int64]
@@ -5219,6 +5244,7 @@ struct LyricsTimelineContext {
             baseItems.append(.line(index: 0, line: first, id: lineIDs[0]))
         }
         self.baseItems = baseItems
+        baseSnapshot = LyricsTimelineDisplaySnapshot(items: baseItems)
         let boundaries = LyricsTimelineDisplayBuilder.queryBoundaries(
             lines: lines, markers: markerInterludeInfos, lyricEndTimes: lastLyricEndTimes
         )
@@ -5368,10 +5394,26 @@ enum LyricsTimelineDisplayBuilder {
         trackDurationMs: Int64,
         autoInstrumentalBreakEnabled: Bool
     ) -> [LyricsTimelineDisplayItem] {
+        displaySnapshot(context: context, positionMs: positionMs, trackDurationMs: trackDurationMs,
+                        autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled).items
+    }
+
+    static func displaySnapshot(
+        context: LyricsTimelineContext,
+        positionMs: Int64,
+        trackDurationMs: Int64,
+        autoInstrumentalBreakEnabled: Bool
+    ) -> LyricsTimelineDisplaySnapshot {
         context.itemQueries.value(position: positionMs, duration: trackDurationMs,
                                   automaticInterludes: autoInstrumentalBreakEnabled) {
-            uncachedItems(context: context, positionMs: positionMs, trackDurationMs: trackDurationMs,
-                          autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled)
+            guard !context.lines.isEmpty else { return context.baseSnapshot }
+            guard hasActiveInterlude(context: context, positionMs: positionMs, trackDurationMs: trackDurationMs,
+                                    autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled) else {
+                return context.baseSnapshot
+            }
+            return LyricsTimelineDisplaySnapshot(items: uncachedItems(
+                context: context, positionMs: positionMs, trackDurationMs: trackDurationMs,
+                autoInstrumentalBreakEnabled: autoInstrumentalBreakEnabled))
         }
     }
 
@@ -6463,30 +6505,25 @@ struct SyllableKaraokeText: View {
     private var karaokeSegments: [KaraokeSyllableSegment] {
         let prepared = preparedKaraoke
         let annotations = prepared.annotations
-        let sourceSyllables = prepared.source
         let fillTimings = prepared.fillTimings
         let displaySyllables = prepared.display
         var timedSegments: [KaraokeSyllableSegment] = []
         timedSegments.reserveCapacity(displaySyllables.count)
-        var sourceOffset = 0
         for (index, syllable) in displaySyllables.enumerated() {
-            let sourceLength = sourceSyllables.indices.contains(index)
-                ? sourceSyllables[index].text.count
-                : syllable.text.count
             let fillTiming = fillTimings.indices.contains(index)
                 ? fillTimings[index]
                 : KaraokeSyllableTimingNormalizer.FillTiming(
                     startTimeMs: syllable.startTimeMs,
                     endTimeMs: syllable.endTimeMs
             )
-            defer { sourceOffset += sourceLength }
             guard !syllable.text.isEmpty else { continue }
+            let metadata = prepared.displayMetadata[index]
             let bounce = karaokeBounce(profile: prepared.motionProfiles.indices.contains(index)
                 ? prepared.motionProfiles[index] : nil)
             timedSegments.append(KaraokeSyllableSegment(
                 id: index,
                 text: syllable.text,
-                rubyText: rubyReading(start: sourceOffset, length: sourceLength, annotations: annotations),
+                rubyText: metadata.rubyText,
                 fill: fillFraction(
                     startTimeMs: fillTiming.startTimeMs,
                     endTimeMs: fillTiming.endTimeMs
@@ -6497,7 +6534,7 @@ struct SyllableKaraokeText: View {
                 bounceOffsetY: bounce.offsetY,
                 bounceScale: bounce.scale,
                 completedColorOpacity: completedColorOpacity,
-                isWhitespace: syllable.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+                isWhitespace: metadata.isWhitespace
             ))
         }
         if !timedSegments.isEmpty {
@@ -6589,20 +6626,6 @@ struct SyllableKaraokeText: View {
 
     private var rubyAnnotations: [FuriganaRepository.RubyAnnotation] {
         FuriganaRepository.rubyAnnotations(text: text, markup: rubyText)
-    }
-
-    private func rubyReading(
-        start: Int,
-        length: Int,
-        annotations: [FuriganaRepository.RubyAnnotation]
-    ) -> String {
-        guard length > 0 else { return "" }
-        let end = start + length
-        return annotations.compactMap { annotation in
-            guard annotation.start < end, annotation.end > start else { return nil }
-            let value = annotation.reading(overlapStart: start, overlapEnd: end)
-            return value.isEmpty ? nil : value
-        }.joined(separator: " ")
     }
 
     private var effectiveSyllables: [LyricsLine.Syllable] {
@@ -6796,6 +6819,56 @@ final class KaraokeRenderPreparationCache {
         var fillTimings: [KaraokeSyllableTimingNormalizer.FillTiming]
         var annotations: [FuriganaRepository.RubyAnnotation]
         var motionProfiles: [KaraokeMotionProfile?]
+        var displayMetadata: [DisplayMetadata]
+
+        init(
+            source: [LyricsLine.Syllable],
+            display: [LyricsLine.Syllable],
+            fillTimings: [KaraokeSyllableTimingNormalizer.FillTiming],
+            annotations: [FuriganaRepository.RubyAnnotation],
+            motionProfiles: [KaraokeMotionProfile?]
+        ) {
+            self.source = source
+            self.display = display
+            self.fillTimings = fillTimings
+            self.annotations = annotations
+            self.motionProfiles = motionProfiles
+            // Ruby overlap and whitespace depend on prepared text, not playback.
+            // Preserve source offsets before cultural markers enlarge display text.
+            var sourceOffset = 0
+            self.displayMetadata = display.enumerated().map { index, syllable in
+                let sourceLength = source.indices.contains(index)
+                    ? source[index].text.count
+                    : syllable.text.count
+                defer { sourceOffset += sourceLength }
+                return DisplayMetadata(
+                    rubyText: syllable.text.isEmpty ? "" : Self.rubyReading(
+                        start: sourceOffset, length: sourceLength, annotations: annotations
+                    ),
+                    isWhitespace: syllable.text.unicodeScalars.allSatisfy {
+                        CharacterSet.whitespacesAndNewlines.contains($0)
+                    }
+                )
+            }
+        }
+
+        private static func rubyReading(
+            start: Int,
+            length: Int,
+            annotations: [FuriganaRepository.RubyAnnotation]
+        ) -> String {
+            guard length > 0 else { return "" }
+            let end = start + length
+            return annotations.compactMap { annotation in
+                guard annotation.start < end, annotation.end > start else { return nil }
+                let value = annotation.reading(overlapStart: start, overlapEnd: end)
+                return value.isEmpty ? nil : value
+            }.joined(separator: " ")
+        }
+    }
+    struct DisplayMetadata {
+        var rubyText: String
+        var isWhitespace: Bool
     }
     private var key: Key?
     private var prepared: Value?
@@ -8404,9 +8477,11 @@ private struct SpotifySetupInstructionsPanel: View {
 struct SettingsView: View {
     private enum SettingsTab: String, CaseIterable, Identifiable {
         case general
-        case lyrics
-        case appearance
+        case providers
         case ai
+        case appearance
+        case lyrics
+        case player
         case system
 
         var id: String { rawValue }
@@ -8424,9 +8499,15 @@ struct SettingsView: View {
     @State private var selectedTab: SettingsTab = .general
     @State private var deezerARLInput = ""
     @State private var deezerCredentialStatus = ""
-    @State private var paxsenixModels: [PaxsenixAIProvider.Model] = []
-    @State private var paxsenixModelsLoading = false
-    @State private var paxsenixModelsError = ""
+    @State private var settingsSearch = ""
+    @FocusState private var settingsSearchFocused: Bool
+    @State private var settingsSearchTarget = ""
+    @State private var aiModels: [AIProviderModels.Model] = []
+    @State private var aiModelsConfiguration: AIProviderModels.Configuration?
+    @State private var aiModelsLoading = false
+    @State private var aiModelsError = ""
+    @State private var aiModelsBuiltIn = false
+    @State private var aiModelsRequestId = UUID()
     @State private var cloudApplyConfirmationPresented = false
     @State private var cloudDeleteConfirmationPresented = false
 
@@ -8434,6 +8515,17 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             VStack(spacing: 9) {
                 settingsHeader
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(SettingsDesign.secondary)
+                    TextField(settings.t("settings.search"), text: $settingsSearch)
+                        .focused($settingsSearchFocused)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    if !settingsSearch.isEmpty {
+                        Button { settingsSearch = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .accessibilityLabel(settings.t("button.close"))
+                    }
+                }
+                .padding(10).background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 10))
                 settingsTabs
             }
             .padding(.horizontal, 20)
@@ -8446,7 +8538,8 @@ struct SettingsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         Color.clear.frame(height: 0).id("settings-top")
-                        selectedSettingsPage
+                        if settingsSearch.trimmed.isEmpty { selectedSettingsPage }
+                        else { settingsSearchResults }
                     }
                     .frame(maxWidth: 640)
                     .frame(maxWidth: .infinity)
@@ -8455,7 +8548,12 @@ struct SettingsView: View {
                     .padding(.bottom, 40)
                 }
                 .onChange(of: selectedTab) { _, _ in
-                    proxy.scrollTo("settings-top", anchor: .top)
+                    if settingsSearchTarget.isEmpty { proxy.scrollTo("settings-top", anchor: .top) }
+                }
+                .task(id: settingsSearchTarget) {
+                    guard !settingsSearchTarget.isEmpty else { return }
+                    await Task.yield()
+                    proxy.scrollTo(settingsSearchTarget, anchor: .top)
                 }
             }
         }
@@ -8465,27 +8563,167 @@ struct SettingsView: View {
         .font(.pretendard(15))
         .tint(SettingsDesign.accent)
         .toggleStyle(SettingsSwitchStyle())
+        .onChange(of: settingsSearch) { _, query in
+            if !query.trimmed.isEmpty { settingsSearchTarget = "" }
+        }
         .onAppear {
 #if DEBUG
             if let rawTab = ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_SETTINGS_TAB"],
-               let tab = SettingsTab(rawValue: rawTab == "player" ? "appearance" : rawTab) {
+               let tab = SettingsTab(rawValue: rawTab) {
                 selectedTab = tab
             }
 #endif
             Task { await settings.refreshDeezerConfiguration() }
-            if settings.providerId == "paxsenix" {
-                Task { await refreshPaxsenixModels() }
-            }
             model.prepareCreatorPrivacySettings()
-        }
-        .onChange(of: settings.providerId) { _, providerId in
-            guard providerId == "paxsenix" else { return }
-            Task { await refreshPaxsenixModels() }
         }
         .fullScreenCover(isPresented: $settingsLogsPresented) {
             LogsView(visible: $settingsLogsPresented)
                 .environmentObject(model)
                 .environmentObject(model.playbackClock)
+        }
+    }
+
+    private var settingsSearchEntries: [(tab: SettingsTab, key: String)] {
+        [
+            (.general, "section.language"),
+            (.general, "setting.ui_language"),
+            (.general, "setting.pronunciation_language"),
+            (.general, "setting.pronunciation_notation"),
+            (.general, "setting.metadata_translation"),
+            (.general, "setting.japanese_furigana"),
+            (.general, "setting.main_preview"),
+            (.lyrics, "section.player"),
+            (.lyrics, "setting.auto_interlude"),
+            (.lyrics, "setting.interlude_labels"),
+            (.lyrics, "setting.synced_karaoke_animation"),
+            (.lyrics, "setting.karaoke_bounce_effect"),
+            (.lyrics, "setting.karaoke_display_granularity"),
+            (.providers, "section.lyrics_providers"),
+            (.providers, "setting.lyrics_provider_mode"),
+            (.providers, "setting.lyrics_type_priority"),
+            (.providers, "setting.sync_data_provider_priority"),
+            (.appearance, "section.layout"),
+            (.appearance, "setting.lyrics_alignment"),
+            (.appearance, "section.typography"),
+            (.appearance, "section.speaker_colors"),
+            (.appearance, "setting.creator_speaker_colors"),
+            (.player, "section.player"),
+            (.player, "setting.keep_screen_on"),
+            (.player, "setting.landscape_auto_hide"),
+            (.player, "setting.landscape_center_no_lyrics"),
+            (.player, "section.pip"),
+            (.player, "setting.pip_show_artwork"),
+            (.player, "setting.pip_background"),
+            (.player, "setting.pip_orientation"),
+            (.player, "setting.pip_lyrics_alignment"),
+            (.player, "setting.pip_lyrics_size"),
+            (.player, "setting.pip_translation_size"),
+            (.player, "vinyl.mode"),
+            (.player, "vinyl.settings.album_size"),
+            (.player, "vinyl.settings.record_size"),
+            (.player, "vinyl.settings.tonearm_style"),
+            (.player, "vinyl.settings.tonearm_finish"),
+            (.player, "vinyl.settings.tonearm_size"),
+            (.player, "vinyl.settings.animations"),
+            (.player, "vinyl.settings.center_rotation"),
+            (.player, "vinyl.settings.lyrics"),
+            (.player, "section.typography"),
+            (.ai, "section.ai_lyrics"),
+            (.ai, "lyrics.translation"),
+            (.ai, "lyrics.pronunciation"),
+            (.ai, "section.provider"),
+            (.ai, "setting.cultural_annotations"),
+            (.ai, "setting.cultural_font_family"),
+            (.ai, "section.language_rules"),
+            (.ai, "field.source"),
+            (.ai, "field.track_language"),
+            (.ai, "field.save_target"),
+            (.ai, "field.base_url"),
+            (.ai, "field.model"),
+            (.ai, "openai.connections"),
+            (.ai, "field.max_tokens"),
+            (.ai, "field.temperature"),
+            (.ai, "field.api_key"),
+            (.ai, "pollinations.access_token"),
+            (.system, "section.account"),
+            (.system, "creator_privacy.private_title"),
+            (.system, "cloud_sync.section"),
+            (.system, "section.spotify_api"),
+            (.system, "field.spotify_client_id"),
+            (.system, "field.spotify_client_secret"),
+            (.system, "field.redirect_uri"),
+            (.system, "field.live_source"),
+            (.system, "spotify.disconnect_oauth"),
+            (.system, "lyrics.tab.sync"),
+            (.system, "section.update"),
+            (.system, "section.tools"),
+            (.appearance, "section.background"),
+            (.appearance, "setting.background_mode"),
+            (.appearance, "setting.brightness"),
+            (.appearance, "setting.blur"),
+            (.appearance, "setting.video_scale"),
+            (.appearance, "setting.noise"),
+            (.appearance, "setting.reduce_motion"),
+            (.appearance, "field.solid_color"),
+            (.appearance, "section.track_background"),
+            (.appearance, "lyrics.background.override")
+        ] + AppSettings.allAIProviders.map { (tab: SettingsTab.ai, key: $0.label) }
+          + lyricsProviderSearchEntries
+    }
+
+    /// Search only reaches provider cards that the current provider mode shows.
+    private var lyricsProviderSearchEntries: [(tab: SettingsTab, key: String)] {
+        guard usesMultiProviderSettings else {
+            return settings.standardLyricsProviderOrder.compactMap { providerId in
+                AppSettings.standardLyricsProviderById(providerId).map {
+                    (tab: SettingsTab.providers, key: $0.name)
+                }
+            }
+        }
+        return normalizedMultiProviderOrder.map { provider in
+            (
+                tab: SettingsTab.providers,
+                key: AppSettings.standardLyricsProviderById(provider)?.name ?? multiProviderName(provider)
+            )
+        } + [
+            (tab: SettingsTab.providers, key: "lyrics_provider.deezer_arl"),
+            (tab: SettingsTab.providers, key: "lyrics_provider.legal_title")
+        ]
+    }
+
+    private var settingsSearchResults: some View {
+        let query = settingsSearch.trimmed
+        let matches = settingsSearchEntries.filter { entry in
+            let descriptionKey = entry.key + "_desc"
+            let description = settings.t(descriptionKey)
+            return settings.t(entry.key).localizedStandardContains(query)
+                || settings.t(entry.tab.titleKey).localizedStandardContains(query)
+                || (description != descriptionKey && description.localizedStandardContains(query))
+        }
+        return VStack(alignment: .leading, spacing: 12) {
+            if matches.isEmpty { Text(settings.t("settings.no_results")).foregroundStyle(SettingsDesign.secondary) }
+            ForEach(matches.indices, id: \.self) { index in
+                let entry = matches[index]
+                Button {
+                    settingsSearchFocused = false
+                    selectedTab = entry.tab
+                    if entry.tab == .ai {
+                        if let provider = AppSettings.providers.first(where: { $0.label == entry.key }) {
+                            settings.setProvider(provider.id)
+                        }
+                        expandedAIProvider = settings.providerId
+                    }
+                    settingsSearchTarget = settings.t(entry.key)
+                    settingsSearch = ""
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(settings.t(entry.key)).font(.pretendard(15, weight: .semibold))
+                        Text(settings.t(entry.tab.titleKey)).font(.caption).foregroundStyle(SettingsDesign.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(14)
+                    .background(SettingsDesign.surface, in: RoundedRectangle(cornerRadius: 12))
+                }.buttonStyle(.plain)
+            }
         }
     }
 
@@ -8516,6 +8754,8 @@ struct SettingsView: View {
                 ForEach(SettingsTab.allCases) { tab in
                     Button {
                         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
+                            settingsSearch = ""
+                            settingsSearchTarget = ""
                             selectedTab = tab
                         }
                     } label: {
@@ -8543,11 +8783,12 @@ struct SettingsView: View {
             generalSettingsPage
         case .lyrics:
             lyricsSettingsPage
+        case .providers:
+            lyricsProvidersSettingsPage
         case .appearance:
-            VStack(alignment: .leading, spacing: 28) {
-                appearanceSettingsPage
-                playerSettingsPage
-            }
+            appearanceSettingsPage
+        case .player:
+            playerSettingsPage
         case .ai:
             aiSettingsPage
         case .system:
@@ -8618,21 +8859,6 @@ struct SettingsView: View {
     private var lyricsSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
             settingsSection(settings.t("section.player")) {
-                settingsToggleCard(
-                    settings.t("setting.keep_screen_on"),
-                    description: settings.t("setting.keep_screen_on_desc"),
-                    binding: keepScreenOnBinding
-                )
-                settingsToggleCard(
-                    settings.t("setting.landscape_auto_hide"),
-                    description: settings.t("setting.landscape_auto_hide_desc"),
-                    binding: landscapeAutoHideBinding
-                )
-                settingsToggleCard(
-                    settings.t("setting.landscape_center_no_lyrics"),
-                    description: settings.t("setting.landscape_center_no_lyrics_desc"),
-                    binding: landscapeCenterNoLyricsBinding
-                )
                 settingsToggleCard(settings.t("setting.auto_interlude"), description: settings.t("setting.auto_interlude_desc"), binding: autoInterludeBinding)
                 settingsToggleCard(settings.t("setting.interlude_labels"), description: settings.t("setting.interlude_labels_desc"), binding: settingsSavedBinding(\.interludeLabelsEnabled))
                 settingsToggleCard(settings.t("setting.synced_karaoke_animation"), description: settings.t("setting.synced_karaoke_animation_desc"), binding: settingsSavedBinding(\.syncedLyricsKaraokeAnimationEnabled))
@@ -8663,6 +8889,11 @@ struct SettingsView: View {
                 }
             }
 
+        }
+    }
+
+    private var lyricsProvidersSettingsPage: some View {
+        VStack(alignment: .leading, spacing: 26) {
             lyricsProviderSettingsSection
         }
     }
@@ -9056,6 +9287,24 @@ struct SettingsView: View {
 
     private var playerSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
+            settingsSection(settings.t("section.player")) {
+                settingsToggleCard(
+                    settings.t("setting.keep_screen_on"),
+                    description: settings.t("setting.keep_screen_on_desc"),
+                    binding: keepScreenOnBinding
+                )
+                settingsToggleCard(
+                    settings.t("setting.landscape_auto_hide"),
+                    description: settings.t("setting.landscape_auto_hide_desc"),
+                    binding: landscapeAutoHideBinding
+                )
+                settingsToggleCard(
+                    settings.t("setting.landscape_center_no_lyrics"),
+                    description: settings.t("setting.landscape_center_no_lyrics_desc"),
+                    binding: landscapeCenterNoLyricsBinding
+                )
+            }
+
             settingsSection(settings.t("section.pip"), description: settings.t("section.pip_desc")) {
                 settingsToggleCard(
                     settings.t("setting.pip_show_artwork"),
@@ -9404,67 +9653,65 @@ struct SettingsView: View {
                 Link(settings.t("button.get_key"), destination: url)
                     .font(.pretendard(15, weight: .semibold))
             }
-            settingsCard(settings.t("field.base_url")) {
-                settingsTextField(settings.t("field.base_url"), text: $settings.baseUrl)
+            if !selectedProvider.translationOnly {
+                settingsCard(settings.t("field.base_url")) {
+                    settingsTextField(settings.t("field.base_url"), text: $settings.baseUrl)
+                }
+                settingsCard(
+                    settings.t("field.model"),
+                    description: settings.providerId == "paxsenix" && settings.model.trimmed.isEmpty
+                        ? settings.t("field.model_required")
+                        : ""
+                ) {
+                    aiModelSelector
+                }
+                .task(id: aiModelConfiguration) {
+                    aiModels = []
+                    aiModelsError = ""
+                    aiModelsBuiltIn = false
+                    do {
+                        try await Task.sleep(for: .milliseconds(350))
+                        await refreshAIModels()
+                    } catch { }
+                }
             }
-            settingsCard(
-                settings.t("field.model"),
-                description: settings.providerId == "paxsenix" && settings.model.trimmed.isEmpty
-                    ? settings.t("field.model_required")
-                    : ""
-            ) {
-                if settings.providerId == "paxsenix" {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 10) {
-                            Picker("", selection: $settings.model) {
-                                Text(settings.t("field.model_required")).tag("")
-                                if !settings.model.trimmed.isEmpty,
-                                   !paxsenixModels.contains(where: { $0.id == settings.model }) {
-                                    Text(settings.model).tag(settings.model)
-                                }
-                                ForEach(paxsenixModels) { model in
-                                    Text(model.displayName).tag(model.id)
-                                }
-                            }
-                            .labelsHidden()
-                            .settingsMenuSurface()
-                            .disabled(paxsenixModelsLoading || paxsenixModels.isEmpty)
-
-                            Button {
-                                Task { await refreshPaxsenixModels() }
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                                    .frame(width: 34, height: 34)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(paxsenixModelsLoading)
-                            .accessibilityLabel(settings.t("button.refresh_models"))
+            if settings.providerId == "chatgpt" {
+                settingsCard(settings.t("openai.connections"), description: settings.t("openai.connections_desc")) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(Array(settings.openAIConnections.enumerated()), id: \.element.id) { index, connection in
+                            OpenAIConnectionEditor(connection: Binding(
+                                get: { settings.openAIConnections.first(where: { $0.id == connection.id }) ?? connection },
+                                set: { value in settings.openAIConnections = settings.openAIConnections.map { $0.id == value.id ? value : $0 } }
+                            ), position: index, count: settings.openAIConnections.count,
+                            onMove: { delta in
+                                var connections = settings.openAIConnections
+                                guard let current = connections.firstIndex(where: { $0.id == connection.id }),
+                                      connections.indices.contains(current + delta) else { return }
+                                connections.swapAt(current, current + delta)
+                                settings.openAIConnections = connections
+                            }, onRemove: {
+                                settings.openAIConnections.removeAll { $0.id == connection.id }
+                            })
                         }
-                        if paxsenixModelsLoading {
-                            Text(settings.t("status.models_loading"))
-                                .font(.caption)
-                                .foregroundStyle(SettingsDesign.secondary)
-                        } else if !paxsenixModelsError.isEmpty {
-                            Text(settings.t("status.models_unavailable"))
-                                .font(.caption)
-                                .foregroundStyle(Color.orange.opacity(0.88))
+                        Button(settings.t("openai.add_connection")) {
+                            settings.openAIConnections.append(OpenAIConnection())
                         }
-                        settingsTextField(settings.t("field.model_id"), text: $settings.model)
+                        .buttonStyle(.bordered)
                     }
-                } else {
-                    settingsTextField(settings.t("field.model"), text: $settings.model)
                 }
             }
-            settingsCard(settings.t("field.max_tokens")) {
-                Stepper(value: maxTokensBinding, in: 256...65_536, step: 256) {
-                    Text("\(settings.maxTokens)")
+            if !selectedProvider.translationOnly {
+                settingsCard(settings.t("field.max_tokens")) {
+                    Stepper(value: maxTokensBinding, in: 256...65_536, step: 256) {
+                        Text("\(settings.maxTokens)")
+                    }
                 }
-            }
-            settingsCard(settings.t("field.temperature")) {
-                HStack {
-                    SettingsSlider(value: temperatureBinding, in: 0...2, step: 0.05)
-                    Text(String(format: "%.2f", settings.temperature))
-                        .foregroundStyle(SettingsDesign.secondary)
+                settingsCard(settings.t("field.temperature")) {
+                    HStack {
+                        SettingsSlider(value: temperatureBinding, in: 0...2, step: 0.05)
+                        Text(String(format: "%.2f", settings.temperature))
+                            .foregroundStyle(SettingsDesign.secondary)
+                    }
                 }
             }
             settingsCard(settings.t("field.api_key"), description: settings.t("field.api_key_desc")) {
@@ -9494,7 +9741,13 @@ struct SettingsView: View {
                         .disabled(!model.pollinationsConnected || model.pollinationsAuthInFlight)
                 }
             }
-            settingsActionButton(settings.t("button.save_regenerate")) {
+            Text(settings.t("settings.ai_autosave"))
+                .font(.caption).foregroundStyle(SettingsDesign.secondary)
+            settingsActionButton(settings.t(model.aiConnectionTesting ? "pollinations.status_testing" : "pollinations.test")) {
+                model.testAIConnection()
+            }
+            .disabled(model.aiConnectionTesting)
+            settingsActionButton(settings.t("tmi.regenerate")) {
                 model.saveAiSettingsAndRegenerate()
             }
         }
@@ -9847,6 +10100,7 @@ struct SettingsView: View {
             .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(SettingsDesign.border, lineWidth: 1))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .id(title)
     }
 
     private func settingsCard<Content: View>(
@@ -9882,6 +10136,7 @@ struct SettingsView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .settingsRowSeparator()
+        .id(title)
     }
 
     private func settingsToggleCard(_ title: String, description: String = "", binding: Binding<Bool>) -> some View {
@@ -9901,6 +10156,7 @@ struct SettingsView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .settingsRowSeparator()
+        .id(title)
     }
 
     private func typographySettingsRow(_ slot: AppSettings.TypographySlot) -> some View {
@@ -10191,6 +10447,7 @@ struct SettingsView: View {
             }
         }
         .settingsRowSeparator()
+        .id(provider.label)
         .dropDestination(for: String.self) { providerIds, location in
             guard let sourceId = providerIds.first else { return false }
             settings.moveAIProvider(sourceId, relativeTo: provider.id, after: location.y > 36)
@@ -10211,6 +10468,8 @@ struct SettingsView: View {
 
     private func aiProviderDescription(_ provider: AppSettings.Provider) -> String {
         switch provider.id {
+        case "deepl":
+            return provider.description
         case KeylessTranslationProviders.bingId:
             return settings.t("setting.bing_translate_provider_desc")
         case KeylessTranslationProviders.googleId:
@@ -10230,21 +10489,75 @@ struct SettingsView: View {
         )
     }
 
-    @MainActor
-    private func refreshPaxsenixModels() async {
-        guard settings.providerId == "paxsenix", !paxsenixModelsLoading else { return }
-        paxsenixModelsLoading = true
-        paxsenixModelsError = ""
-        defer { paxsenixModelsLoading = false }
-        do {
-            paxsenixModels = try await PaxsenixAIProvider.fetchModels(apiKeys: settings.apiKeys)
-            if paxsenixModels.isEmpty {
-                paxsenixModelsError = "empty"
+    private var aiModelConfiguration: AIProviderModels.Configuration {
+        AIProviderModels.Configuration(provider: settings.providerId,
+                                       baseURL: settings.baseUrl.trimmed.isEmpty ? selectedProvider.defaultBaseUrl : settings.baseUrl,
+                                       apiKeys: settings.apiKeys, pollinationsAccessToken: settings.pollinationsAccessToken)
+    }
+
+    private var availableAIModels: [AIProviderModels.Model] {
+        aiModelsConfiguration == aiModelConfiguration ? aiModels : []
+    }
+
+    private var aiModelSelector: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Picker(settings.t("field.model"), selection: $settings.model) {
+                    Text(settings.t("field.model_required")).tag("")
+                    if !settings.model.trimmed.isEmpty,
+                       !availableAIModels.contains(where: { $0.id == settings.model }) {
+                        Text(settings.model).tag(settings.model)
+                    }
+                    ForEach(availableAIModels) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+                .labelsHidden()
+                .settingsMenuSurface()
+                .disabled(aiModelsLoading || availableAIModels.isEmpty)
+                Button {
+                    Task { await refreshAIModels() }
+                } label: {
+                    Image(systemName: "arrow.clockwise").frame(width: 34, height: 34)
+                }
+                .buttonStyle(.bordered)
+                .disabled(aiModelsLoading)
+                .accessibilityLabel(settings.t("button.refresh_models"))
             }
-        } catch is CancellationError {
-            return
+            if aiModelsLoading {
+                Text(settings.t("status.models_loading"))
+                    .font(.caption).foregroundStyle(SettingsDesign.secondary)
+            } else if !aiModelsError.isEmpty {
+                Text(settings.t("status.models_unavailable"))
+                    .font(.caption).foregroundStyle(Color.orange.opacity(0.88))
+            } else if aiModelsBuiltIn {
+                Text(settings.t("status.models_builtin_sonar"))
+                    .font(.caption).foregroundStyle(SettingsDesign.secondary)
+            }
+            settingsTextField(settings.t("field.model_id"), text: $settings.model)
+        }
+    }
+
+    @MainActor
+    private func refreshAIModels() async {
+        let configuration = aiModelConfiguration
+        let requestId = UUID()
+        aiModelsRequestId = requestId
+        aiModelsLoading = true
+        aiModelsError = ""
+        defer { if aiModelsRequestId == requestId { aiModelsLoading = false } }
+        do {
+            let catalog = try await AIProviderModels.fetch(configuration)
+            try Task.checkCancellation()
+            guard requestId == aiModelsRequestId, configuration == aiModelConfiguration else { return }
+            aiModels = catalog.models
+            aiModelsConfiguration = configuration
+            aiModelsBuiltIn = catalog.builtIn
+            if aiModels.isEmpty { aiModelsError = "empty" }
         } catch {
-            paxsenixModelsError = error.localizedDescription
+            guard !Task.isCancelled, requestId == aiModelsRequestId, configuration == aiModelConfiguration else { return }
+            aiModels = []
+            aiModelsError = error.localizedDescription
         }
     }
 
@@ -11061,5 +11374,90 @@ extension Color {
         #else
         return nil
         #endif
+    }
+}
+
+private struct OpenAIConnectionEditor: View {
+    @EnvironmentObject private var settings: AppSettings
+    @Binding var connection: OpenAIConnection
+    var position: Int
+    var count: Int
+    var onMove: (Int) -> Void
+    var onRemove: () -> Void
+    @State private var models: [AIProviderModels.Model] = []
+    @State private var loadedConfiguration: AIProviderModels.Configuration?
+    @State private var loading = false
+    @State private var error = false
+    @State private var requestID = UUID()
+    @State private var revision = 0
+
+    private var configuration: AIProviderModels.Configuration {
+        .init(provider: "chatgpt", baseURL: connection.baseUrl.trimmed.isEmpty ? "https://api.openai.com/v1" : connection.baseUrl,
+              apiKeys: connection.apiKeys, pollinationsAccessToken: "")
+    }
+
+    private var availableModels: [AIProviderModels.Model] { loadedConfiguration == configuration ? models : [] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Toggle("\(position + 2). \(connection.name)", isOn: $connection.enabled)
+                Button { onMove(-1) } label: { Image(systemName: "arrow.up") }
+                    .disabled(position == 0).accessibilityLabel(settings.t("openai.move_up"))
+                Button { onMove(1) } label: { Image(systemName: "arrow.down") }
+                    .disabled(position == count - 1).accessibilityLabel(settings.t("openai.move_down"))
+                Button(role: .destructive, action: onRemove) { Image(systemName: "trash") }
+                    .accessibilityLabel(settings.t("openai.remove_connection"))
+            }
+            TextField(settings.t("openai.connection_name"), text: $connection.name)
+            TextField(settings.t("field.base_url"), text: $connection.baseUrl)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            SecureField(settings.t("field.api_key"), text: $connection.apiKeys)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            HStack {
+                Picker(settings.t("field.model"), selection: $connection.model) {
+                    if !availableModels.contains(where: { $0.id == connection.model }) {
+                        Text(connection.model.isEmpty ? settings.t("field.model_required") : connection.model).tag(connection.model)
+                    }
+                    ForEach(availableModels) { model in Text(model.displayName).tag(model.id) }
+                }
+                .labelsHidden().settingsMenuSurface().disabled(loading || availableModels.isEmpty)
+                Button { revision += 1 } label: { Image(systemName: "arrow.clockwise") }
+                    .disabled(loading).accessibilityLabel(settings.t("button.refresh_models"))
+            }
+            TextField(settings.t("field.model_id"), text: $connection.model)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            if loading {
+                Text(settings.t("status.models_loading")).font(.caption)
+            } else if error {
+                Text(settings.t("status.models_unavailable")).font(.caption).foregroundStyle(.orange)
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .padding(12)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+        .task(id: configuration) { await loadModels() }
+        .task(id: revision) { if revision > 0 { await loadModels() } }
+    }
+
+    @MainActor private func loadModels() async {
+        let context = configuration
+        let id = UUID()
+        requestID = id
+        models = []
+        loading = true
+        error = false
+        defer { if requestID == id { loading = false } }
+        do {
+            try await Task.sleep(for: .milliseconds(350))
+            let catalog = try await AIProviderModels.fetch(context)
+            try Task.checkCancellation()
+            guard id == requestID, context == configuration else { return }
+            models = catalog.models
+            loadedConfiguration = context
+            error = models.isEmpty
+        } catch {
+            if !Task.isCancelled, id == requestID, context == configuration { self.error = true }
+        }
     }
 }

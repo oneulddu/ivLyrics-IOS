@@ -190,6 +190,7 @@ final class AppViewModel: ObservableObject {
             cachedTimelineContext = nil
             cachedTimelineLineRenderInputs = nil
             cachedCurrentLyricsLanguageDetection = nil
+            culturalAnnotationLineCache.removeAll()
             refreshCreatorSupportPresentations(for: lyricsResult)
         }
     }
@@ -248,6 +249,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var culturalAnnotations: [CulturalAnnotation] = [] {
         didSet {
             cachedTimelineLineRenderInputs = nil
+            culturalAnnotationLineCache.removeAll()
         }
     }
     @Published private(set) var culturalAnnotationsLoading = false
@@ -432,6 +434,7 @@ final class AppViewModel: ObservableObject {
     private var cachedTimelineContext: LyricsTimelineContext?
     private var cachedTimelineLineRenderInputs: [TimelineLineRenderInput]?
     private var cachedCurrentLyricsLanguageDetection: (payload: String, sourceLang: String)?
+    private let culturalAnnotationLineCache = CulturalAnnotationLineCache()
     private var audioRouteObserver: NSObjectProtocol?
     private var spotifyMetadataHydrationTrackId = ""
     private var spotifyQueuePrefetchSourceKey = ""
@@ -440,6 +443,7 @@ final class AppViewModel: ObservableObject {
     private var spotifyArtworkURLsByTrackId = BoundedLRUCache<String, URL>(capacity: 200)
     private var spotifyMetadataHydrationRetryAfter = BoundedLRUCache<String, Date>(capacity: 200)
     private var currentYouTubeBackgroundRequestKey = ""
+    private var youTubeSelectionRevision = UUID()
     private var currentYouTubeBackgroundLoading = false
     private var currentTmiRequestKey = ""
     private var pendingResearchBypassCache: Bool?
@@ -498,11 +502,7 @@ final class AppViewModel: ObservableObject {
         let text = displayText(for: line)
         return TimelineLineRenderInput(
             displayText: text,
-            culturalAnnotations: CulturalAnnotation.forLine(
-                culturalAnnotations,
-                lineIndex: index,
-                text: text
-            )
+            culturalAnnotations: culturalAnnotations(forLine: index, text: text)
         )
     }
 
@@ -1691,6 +1691,18 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func selectTrackLyricsProvider(_ id: String) {
+        let key = currentTrackKey
+        guard !key.isEmpty else { return }
+        settings.selectLyricsProvider(id, trackKey: key)
+        cancelLyricsLoadTask()
+        Task {
+            await lyricsRepository.clearCacheForTrack(key)
+            guard currentTrackKey == key else { return }
+            reloadLyrics(bypassCache: true)
+        }
+    }
+
     func reloadLyrics(bypassCache: Bool) {
         if currentTrack == nil {
             applyManualTrack(loadImmediately: false)
@@ -2298,6 +2310,30 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    @Published private(set) var aiConnectionTesting = false
+
+    func testAIConnection() {
+        guard !aiConnectionTesting else { return }
+        let tested = settings.snapshot
+        guard tested.hasApiKey, tested.provider.translationOnly || !tested.model.trimmed.isEmpty else {
+            showSavedToast(settings.t(!tested.hasApiKey ? "status.ai_key_needed" : "status.ai_model_needed"))
+            return
+        }
+        aiConnectionTesting = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var valid = false
+            do { try await aiRepository.testConnection(settings: tested); valid = true }
+            catch { /* Do not expose provider error bodies containing credentials. */ }
+            aiConnectionTesting = false
+            let current = settings.snapshot
+            guard current.provider.id == tested.provider.id, current.apiKeys == tested.apiKeys,
+                  current.baseUrl == tested.baseUrl, current.model == tested.model,
+                  current.pollinationsAccessToken == tested.pollinationsAccessToken else { return }
+            showSavedToast(settings.t(valid ? "pollinations.status_valid" : "pollinations.status_invalid"))
+        }
+    }
+
     func saveAiSettingsAndRegenerate() {
         showSavedToast(settings.t("toast.settings_saved"))
         regenerateCurrentAiSupplements(statusKey: "toast.settings_saved")
@@ -2847,6 +2883,21 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func selectTrackVideo(_ info: YouTubeVideoInfo?, trackKey: String) async {
+        await youtubeRepository.selectVideo(info, trackKey: trackKey)
+        guard currentTrackKey == trackKey else { return }
+        youTubeSelectionRevision = UUID()
+        if info == nil, let track = currentTrack {
+            await youtubeRepository.clearCacheForIsrc(IvLyricsUtilities.firstNonEmpty(lyricsResult.isrc, track.isrc))
+        }
+        refreshBackgroundForCurrentTrack()
+    }
+
+    func communityVideosForCurrentTrack() async throws -> [YouTubeVideoInfo] {
+        guard let track = currentTrack else { return [] }
+        return try await youtubeRepository.communityVideos(track: track, lyricsResult: lyricsResult)
+    }
+
     func refreshBackgroundForCurrentTrack() {
         guard let track = currentTrack else {
             resetYouTubeBackgroundForTrack()
@@ -2870,6 +2921,12 @@ final class AppViewModel: ObservableObject {
             return position >= line.startTimeMs ? 1 : 0
         }
         return max(0, min(1, Double(position - line.startTimeMs) / Double(line.endTimeMs - line.startTimeMs)))
+    }
+
+    func culturalAnnotations(forLine lineIndex: Int, text: String) -> [CulturalAnnotation] {
+        culturalAnnotationLineCache.value(lineIndex: lineIndex, text: text) {
+            CulturalAnnotation.forLine(culturalAnnotations, lineIndex: lineIndex, text: text)
+        }
     }
 
     func displayText(for line: LyricsLine) -> String {
@@ -2941,7 +2998,7 @@ final class AppViewModel: ObservableObject {
             let spotifyUserAccessToken = await spotifyMetadataUserAccessToken()
             let loaded = try await lyricsRepository.loadLyrics(
                 track: track,
-                settings: settings.snapshot,
+                settings: settings.snapshotForTrack(track.stableKey),
                 spotifyUserAccessToken: spotifyUserAccessToken,
                 onCachedLyricsLoaded: { [weak self] preview in
                     self?.applyCachedLyricsPreview(preview, track: track, requestID: requestID)
@@ -3028,7 +3085,7 @@ final class AppViewModel: ObservableObject {
         requestID: UUID
     ) {
         let loaded = preview.loaded
-        let latestSettings = settings.snapshot
+        let latestSettings = settings.snapshotForTrack(track.stableKey)
         let latestPolicy = LyricsProviderPolicyEvaluator.evaluate(
             latestSettings.lyricsProviderSettings,
             multiProviderAuthorized: latestSettings.lyricsProviderMultiProviderAuthorized
@@ -3282,7 +3339,7 @@ final class AppViewModel: ObservableObject {
         _ nextTrack: TrackSnapshot,
         sourceKey: String
     ) async throws {
-        let settingsSnapshot = settings.snapshot
+        let settingsSnapshot = settings.snapshotForTrack(nextTrack.stableKey)
         let spotifyUserAccessToken = await spotifyMetadataUserAccessToken()
         guard SpotifyWebAPIFeaturePolicy.shouldContinueQueuePrefetch(
             enabled: settings.spotifyWebAPIEnabled,
@@ -3971,10 +4028,10 @@ final class AppViewModel: ObservableObject {
         }
         let rule = snapshot.ruleForSource(sourceLang)
         let targetLang = snapshot.resolveTargetLanguage(sourceLang: sourceLang)
-        let selectedAiReady = snapshot.hasApiKey && snapshot.hasModel
+        let selectedAiReady = snapshot.hasReadyAIProvider
         let translationRequested = rule.translationEnabled
             && !snapshot.shouldSkipTranslation(sourceLang: sourceLang, resolvedTargetLang: targetLang)
-        let translation = translationRequested && (snapshot.hasKeylessTranslationProvider || selectedAiReady)
+        let translation = translationRequested && snapshot.hasAnyTranslationProvider
         return (rule.pronunciationEnabled && selectedAiReady, translation)
     }
 
@@ -4097,11 +4154,7 @@ final class AppViewModel: ObservableObject {
             return
         }
         let isrc = IvLyricsUtilities.firstNonEmpty(result.isrc, track.isrc)
-        guard !isrc.isEmpty else {
-            appendLog("youtube background: waiting for ISRC")
-            return
-        }
-        let requestKey = "isrc:\(isrc)"
+        let requestKey = "\(track.stableKey)|\(isrc)|\(youTubeSelectionRevision)"
         if requestKey == currentYouTubeBackgroundRequestKey && (currentYouTubeBackgroundLoading || youtubeInfo != nil) {
             return
         }
