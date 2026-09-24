@@ -215,7 +215,7 @@ actor AiLyricsRepository {
         let requestedPronunciation = rule.pronunciationEnabled
         let requestedTranslation = rule.translationEnabled && !translationSkipped
         let needsPronunciation = requestedPronunciation && selectedAiReady
-        let needsTranslation = requestedTranslation && (settings.hasKeylessTranslationProvider || selectedAiReady)
+        let needsTranslation = requestedTranslation && settings.hasAnyTranslationProvider
 
         guard rule.enabled else {
             log("ai lyrics skipped for source=\(sourceLang): translation=false / pronunciation=false")
@@ -483,7 +483,11 @@ actor AiLyricsRepository {
                     guard let provider = AppSettings.aiProviderById(providerId) else { continue }
                     await liveState.reset(task: task)
                     do {
-                        if provider.isKeyless {
+                        if provider.id == "deepl" {
+                            guard let profile = settings.selectingAIProvider(provider.id), profile.hasApiKey else { continue }
+                            await providerUpdate?(task, provider.label)
+                            resolvedValues = try await translateDeepL(texts: requests.map(\.text), language: targetLang, settings: profile)
+                        } else if provider.isKeyless {
                             await providerUpdate?(task, provider.label)
                             log("translation attempt: provider=\(provider.label)")
                             let result = try await keylessTranslationProviders.translate(
@@ -671,7 +675,11 @@ actor AiLyricsRepository {
             guard let provider = AppSettings.aiProviderById(providerId) else { continue }
             do {
                 let translation: MetadataTranslation
-                if provider.isKeyless {
+                if provider.id == "deepl" {
+                    guard let profile = settings.selectingAIProvider(provider.id), profile.hasApiKey else { continue }
+                    let values = try await translateDeepL(texts: [title, artist], language: targetLang, settings: profile, preserveLyricsStructure: false)
+                    translation = MetadataTranslation(title: values[0], artist: values[1], sourceLang: sourceLang, targetLang: targetLang)
+                } else if provider.isKeyless {
                     log("metadata translation attempt: provider=\(provider.label)")
                     let result = try await keylessTranslationProviders.translate(
                         providerId: provider.id,
@@ -701,17 +709,19 @@ actor AiLyricsRepository {
                         continue
                     }
                     log("ai metadata attempt: provider=\(provider.label) / model=\(providerSettings.model)")
-                    let raw = try await callProviderRaw(
-                        prompt: buildMetadataTranslationPrompt(title: title, artist: artist, lang: targetLang),
-                        settings: providerSettings
-                    )
-                    let lines = parseTextLines(raw, expectedLineCount: 2)
-                    translation = MetadataTranslation(
-                        title: cleanMetadataOutputLine(lines.first ?? "", kind: "title", fallback: title),
-                        artist: cleanMetadataOutputLine(lines.dropFirst().first ?? "", kind: "artist", fallback: artist),
-                        sourceLang: sourceLang,
-                        targetLang: targetLang
-                    )
+                    translation = try await withOpenAIConnections(settings: providerSettings) { connection in
+                        let raw = try await callProviderRaw(
+                            prompt: buildMetadataTranslationPrompt(title: title, artist: artist, lang: targetLang),
+                            settings: connection
+                        )
+                        let lines = parseTextLines(raw, expectedLineCount: 2)
+                        return MetadataTranslation(
+                            title: cleanMetadataOutputLine(lines.first ?? "", kind: "title", fallback: title),
+                            artist: cleanMetadataOutputLine(lines.dropFirst().first ?? "", kind: "artist", fallback: artist),
+                            sourceLang: sourceLang,
+                            targetLang: targetLang
+                        )
+                    }
                 }
                 metadataMemoryCache.insert(translation, forKey: cacheKey)
                 putMetadataTranslationToDisk(cacheKey: cacheKey, translation: translation)
@@ -773,53 +783,68 @@ actor AiLyricsRepository {
 
         log("ai tmi: provider=\(settings.provider.label) / model=\(settings.model) / target=\(targetLang)")
         do {
-            let prompt = ResearchDocument.buildPrompt(track: track, lyrics: lyrics, language: AppSettings.languageInfo(targetLang))
-            let webParser = ResearchStreamParser()
-            var lastPartialEmit = 0.0
-            var webSearchFallback = false
-            let raw: String
-            do {
-                raw = try await callResearchStreamRaw(
-                    prompt: prompt, title: title, artist: artist, settings: settings, webSearch: true
-                ) { delta in
-                    let now = ProcessInfo.processInfo.systemUptime
-                    guard let document = webParser.append(delta, targetLang: targetLang),
-                          now - lastPartialEmit >= self.partialEmitMinInterval else { return }
-                    lastPartialEmit = now
-                    await partialUpdate?(.fromResearch(document, targetLang: targetLang, webSearchFallback: false), false, false)
-                }
-                log("ai research web search completed")
-            } catch {
-                guard isResearchWebSearchFailure(error) else { throw error }
-                webSearchFallback = true
-                log("ai research web search failed; retrying without search: \(error.localizedDescription)")
-                await partialUpdate?(nil, true, true)
-                let fallbackParser = ResearchStreamParser()
-                lastPartialEmit = 0
-                raw = try await callResearchStreamRaw(
-                    prompt: prompt, title: title, artist: artist, settings: settings, webSearch: false
-                ) { delta in
-                    let now = ProcessInfo.processInfo.systemUptime
-                    guard let document = fallbackParser.append(delta, targetLang: targetLang),
-                          now - lastPartialEmit >= self.partialEmitMinInterval else { return }
-                    lastPartialEmit = now
-                    await partialUpdate?(.fromResearch(document, targetLang: targetLang, webSearchFallback: true), true, false)
-                }
+            let info = try await withOpenAIConnections(settings: settings, reset: {
+                await partialUpdate?(nil, false, true)
+            }) { connection in
+                try await generateTmiForConnection(track: track, lyrics: lyrics, title: title, artist: artist,
+                    targetLang: targetLang, settings: connection, cacheKey: cacheKey,
+                    partialUpdate: partialUpdate, log: log)
             }
-            let root = try parseJsonObjectResponse(raw)
-            guard let research = ResearchDocument.fromProvider(root, targetLang: targetLang) else {
-                throw NSError(domain: "ivLyrics.Research", code: -1, userInfo: [NSLocalizedDescriptionKey: "Research response did not contain readable sections"])
-            }
-            let info = TmiInfo.fromResearch(research, targetLang: targetLang, webSearchFallback: webSearchFallback).withCacheKey(cacheKey)
             tmiMemoryCache.insert(info, forKey: cacheKey)
             putTmiToDisk(cacheKey: cacheKey, info: info)
-            log("ai research response: sections=\(research.sections.count) / facts=\(research.funFacts.count) / sources=\(research.sources.count) / webFallback=\(webSearchFallback)")
             return TmiResponse(trackKey: trackKey, info: info, errorMessage: "", logs: logs)
         } catch {
             let message = error.localizedDescription
             log("ai tmi error: \(message)")
             return TmiResponse(trackKey: trackKey, info: nil, errorMessage: message, logs: logs)
         }
+    }
+
+    private func generateTmiForConnection(
+        track: TrackSnapshot, lyrics: LyricsResult?, title: String, artist: String, targetLang: String,
+        settings: AppSettings.Snapshot, cacheKey: String,
+        partialUpdate: ((TmiInfo?, Bool, Bool) async -> Void)?, log: (String) -> Void
+    ) async throws -> TmiInfo {
+        let prompt = ResearchDocument.buildPrompt(track: track, lyrics: lyrics, language: AppSettings.languageInfo(targetLang))
+        let webParser = ResearchStreamParser()
+        var lastPartialEmit = 0.0
+        var webSearchFallback = false
+        let raw: String
+        do {
+            raw = try await callResearchStreamRaw(
+                prompt: prompt, title: title, artist: artist, settings: settings, webSearch: true
+            ) { delta in
+                let now = ProcessInfo.processInfo.systemUptime
+                guard let document = webParser.append(delta, targetLang: targetLang),
+                      now - lastPartialEmit >= self.partialEmitMinInterval else { return }
+                lastPartialEmit = now
+                await partialUpdate?(.fromResearch(document, targetLang: targetLang, webSearchFallback: false), false, false)
+            }
+            log("ai research web search completed")
+        } catch {
+            guard isResearchWebSearchFailure(error) else { throw error }
+            webSearchFallback = true
+            log("ai research web search failed; retrying without search: \(error.localizedDescription)")
+            await partialUpdate?(nil, true, true)
+            let fallbackParser = ResearchStreamParser()
+            lastPartialEmit = 0
+            raw = try await callResearchStreamRaw(
+                prompt: prompt, title: title, artist: artist, settings: settings, webSearch: false
+            ) { delta in
+                let now = ProcessInfo.processInfo.systemUptime
+                guard let document = fallbackParser.append(delta, targetLang: targetLang),
+                      now - lastPartialEmit >= self.partialEmitMinInterval else { return }
+                lastPartialEmit = now
+                await partialUpdate?(.fromResearch(document, targetLang: targetLang, webSearchFallback: true), true, false)
+            }
+        }
+        let root = try parseJsonObjectResponse(raw)
+        guard let research = ResearchDocument.fromProvider(root, targetLang: targetLang) else {
+            throw NSError(domain: "ivLyrics.Research", code: -1, userInfo: [NSLocalizedDescriptionKey: "Research response did not contain readable sections"])
+        }
+        let info = TmiInfo.fromResearch(research, targetLang: targetLang, webSearchFallback: webSearchFallback).withCacheKey(cacheKey)
+        log("ai research response: sections=\(research.sections.count) / facts=\(research.funFacts.count) / sources=\(research.sources.count) / webFallback=\(webSearchFallback)")
+        return info
     }
 
     func loadCulturalAnnotations(
@@ -867,6 +892,7 @@ actor AiLyricsRepository {
             + "|provider=\(settings.provider.id)"
             + "|model=\(settings.model)"
             + "|url=\(settings.baseUrl)"
+            + "|connections=\(IvLyricsUtilities.sha256(settings.cacheKey))"
             + "|temp=\(settings.temperature)"
             + "|text=\(IvLyricsUtilities.sha256(textPayload))"
 
@@ -885,22 +911,24 @@ actor AiLyricsRepository {
             logs.append("ai cultural annotations skipped: API key missing for \(settings.provider.label)")
             return response(requestKey: requestKey, hadError: true, errorMessage: "API key missing")
         }
-        guard !settings.model.trimmed.isEmpty else {
+        guard settings.hasModel else {
             logs.append("ai cultural annotations skipped: model missing for \(settings.provider.label)")
             return response(requestKey: requestKey, hadError: true, errorMessage: "AI model missing")
         }
 
         logs.append("ai cultural annotations: provider=\(settings.provider.label) / source=\(sourceLang) / target=\(targetLang)")
         do {
-            let raw = try await callProviderRaw(
-                prompt: buildCulturalAnnotationPrompt(
-                    lineTexts: lineTexts,
-                    sourceLang: sourceLang,
-                    targetLang: targetLang
-                ),
-                settings: settings
-            )
-            let annotations = try parseCulturalAnnotations(raw: raw, lineTexts: lineTexts)
+            let annotations = try await withOpenAIConnections(settings: settings) { connection in
+                let raw = try await callProviderRaw(
+                    prompt: buildCulturalAnnotationPrompt(
+                        lineTexts: lineTexts,
+                        sourceLang: sourceLang,
+                        targetLang: targetLang
+                    ),
+                    settings: connection
+                )
+                return try parseCulturalAnnotations(raw: raw, lineTexts: lineTexts)
+            }
             culturalAnnotationMemoryCache.insert(annotations, forKey: requestKey)
             putCulturalAnnotationsToDisk(cacheKey: requestKey, annotations: annotations)
             logs.append("ai cultural annotations response: \(annotations.count)")
@@ -936,6 +964,35 @@ actor AiLyricsRepository {
         culturalAnnotationDiskCache.removeByKeyPrefix("cultural|" + key + "|")
     }
 
+    private func translateDeepL(texts: [String], language: String, settings: AppSettings.Snapshot,
+                               preserveLyricsStructure: Bool = true) async throws -> [String] {
+        let keys = providerApiKeys(settings)
+        guard !keys.isEmpty else { throw DeepLTranslationProvider.invalid("API key is required") }
+        var lastError: Error = DeepLTranslationProvider.invalid("Translation failed")
+        for key in keys {
+            do {
+                return try await DeepLTranslationProvider.translate(texts: texts, targetLanguage: language,
+                    apiKey: key, preserveLyricsStructure: preserveLyricsStructure)
+            } catch let error as HTTPStatusError where [401, 403, 429, 456].contains(error.statusCode) {
+                lastError = error
+            }
+        }
+        throw lastError
+    }
+
+    func testConnection(settings: AppSettings.Snapshot) async throws {
+        if settings.provider.id == "deepl" {
+            _ = try await translateDeepL(texts: ["Hello"], language: "KO", settings: settings, preserveLyricsStructure: false)
+            return
+        }
+        let keys = providerApiKeys(settings)
+        guard let key = keys.first, !settings.model.trimmed.isEmpty else {
+            throw NSError(domain: "ivLyrics.AI", code: -1)
+        }
+        let response = try await callProviderRawOnce(prompt: "Reply with only OK.", settings: settings, apiKey: key)
+        guard !response.trimmed.isEmpty else { throw NSError(domain: "ivLyrics.AI", code: -2) }
+    }
+
     private func callProviderRaw(prompt: String, settings: AppSettings.Snapshot) async throws -> String {
         let keys = providerApiKeys(settings)
         guard !keys.isEmpty else { throw NSError(domain: "ivLyrics.AI", code: -1, userInfo: [NSLocalizedDescriptionKey: "API 키가 필요합니다"]) }
@@ -969,6 +1026,8 @@ actor AiLyricsRepository {
 
     private func callProviderRawOnce(prompt: String, settings: AppSettings.Snapshot, apiKey: String) async throws -> String {
         switch settings.provider.id {
+        case "deepl":
+            throw DeepLTranslationProvider.invalid("Only translation is supported")
         case "gemini":
             return try await callGemini(prompt: prompt, settings: settings, apiKey: apiKey)
         case "claude":
@@ -978,7 +1037,43 @@ actor AiLyricsRepository {
         }
     }
 
+    private func withOpenAIConnections<T>(
+        settings: AppSettings.Snapshot,
+        reset: (() async -> Void)? = nil,
+        request: (AppSettings.Snapshot) async throws -> T
+    ) async throws -> T {
+        var lastError: Error?
+        for (index, connection) in settings.openAIConnectionSnapshots.enumerated() {
+            try Task.checkCancellation()
+            if index > 0 { await reset?() }
+            do { return try await request(connection) }
+            catch {
+                try Task.checkCancellation()
+                if error is CancellationError || (error as? URLError)?.code == .cancelled { throw error }
+                lastError = error
+            }
+        }
+        throw lastError ?? NSError(domain: "ivLyrics.AI", code: -1,
+                                  userInfo: [NSLocalizedDescriptionKey: "No OpenAI-compatible provider is configured"])
+    }
+
     private func loadSupplementValuesStreamFirst(
+        prompt: String,
+        settings: AppSettings.Snapshot,
+        requests: [SupplementRequest],
+        taskName: String,
+        log: (String) -> Void,
+        onRow: ((Int, String) async -> Void)? = nil
+    ) async throws -> [String] {
+        try await withOpenAIConnections(settings: settings, reset: {
+            for index in requests.indices { await onRow?(index, "") }
+        }) { connection in
+            try await loadSupplementValuesStreamFirstSingle(prompt: prompt, settings: connection,
+                requests: requests, taskName: taskName, log: log, onRow: onRow)
+        }
+    }
+
+    private func loadSupplementValuesStreamFirstSingle(
         prompt: String,
         settings: AppSettings.Snapshot,
         requests: [SupplementRequest],
@@ -1094,6 +1189,8 @@ actor AiLyricsRepository {
     ) async throws -> String {
         let researchMaxTokens = await resolveResearchMaxTokens(settings: settings, apiKey: apiKey)
         switch settings.provider.id {
+        case "deepl":
+            throw DeepLTranslationProvider.invalid("Only translation is supported")
         case "gemini":
             return try await callGeminiStream(
                 prompt: prompt, settings: settings, apiKey: apiKey,
@@ -1149,6 +1246,8 @@ actor AiLyricsRepository {
         onDelta: ((String) async -> Void)? = nil
     ) async throws -> String {
         switch settings.provider.id {
+        case "deepl":
+            throw DeepLTranslationProvider.invalid("Only translation is supported")
         case "gemini":
             return try await callGeminiStream(prompt: prompt, settings: settings, apiKey: apiKey, onDelta: onDelta)
         case "claude":
@@ -1217,18 +1316,23 @@ actor AiLyricsRepository {
     }
 
     private func geminiBody(prompt: String, settings: AppSettings.Snapshot, maxTokens: Int) -> [String: Any] {
-        [
+        var config: [String: Any] = ["maxOutputTokens": maxTokens, "temperature": settings.temperature]
+        let model = settings.model.replacingOccurrences(of: #"^models/"#, with: "", options: .regularExpression).lowercased()
+        if model.range(of: #"^gemini-3[.-]"#, options: .regularExpression) != nil {
+            let supportsMinimal = model.range(of: #"^gemini-3\.(1|5)-flash-lite($|-)"#, options: .regularExpression) != nil
+            config["thinkingConfig"] = ["thinkingLevel": supportsMinimal ? "minimal" : "low"]
+        } else if model.range(of: #"^gemini-2\.5-flash($|-)"#, options: .regularExpression) != nil {
+            config["thinkingConfig"] = ["thinkingBudget": 0]
+        }
+        // Pro and non-thinking models keep their API defaults, matching Android.
+        return [
             "contents": [
                 [
                     "role": "user",
                     "parts": [["text": prompt]]
                 ]
             ],
-            "generationConfig": [
-                "maxOutputTokens": maxTokens,
-                "temperature": settings.temperature,
-                "thinkingConfig": ["thinkingBudget": 0]
-            ]
+            "generationConfig": config
         ]
     }
 
@@ -1939,6 +2043,7 @@ actor AiLyricsRepository {
             + "|provider=\(settings.provider.id)"
             + "|model=\(settings.model)"
             + "|url=\(settings.baseUrl)"
+            + "|connections=\(IvLyricsUtilities.sha256(settings.cacheKey))"
             + "|tok=\(settings.maxTokens)"
             + "|temp=\(settings.temperature)"
             + "|output=\(outputLang)"

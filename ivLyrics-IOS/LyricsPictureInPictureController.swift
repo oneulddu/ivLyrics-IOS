@@ -166,6 +166,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
     private(set) var debugOverlappingDrawRects: [CGRect] = []
 #endif
     private let karaokePreparationStore = KaraokeRenderPreparationStore()
+    private let lyricsTimeline = PictureInPictureLyricsTimeline()
+    private let staticFrameCache = PictureInPictureStaticFrameCache()
 
     override init() {
         super.init()
@@ -229,7 +231,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         lyricsLocale: String,
         settings: AppSettings.Snapshot
     ) {
-        let nextState = RenderState(
+        var nextState = RenderState(
             track: track,
             lines: lyrics.lines,
             positionMs: positionMs,
@@ -251,6 +253,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             typography: settings.typography,
             speakerColors: settings.speakerColors
         )
+        lyricsTimeline.update(lines: lyrics.lines)
+        nextState.selection = lyricsTimeline.selection(at: positionMs)
         let nextActiveLine = nextState.activeLine
         let nextRenderIdentityInput = RenderIdentityInput(state: nextState, activeLine: nextActiveLine)
         let nextRenderIdentity: String
@@ -265,6 +269,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         let forceRender = nextRenderIdentity != lastRenderIdentityValue
         if state.track?.stableKey != nextState.track?.stableKey {
             karaokePreparationStore.removeAll()
+            staticFrameCache.removeAll()
         }
         state = nextState
         resolvedActiveLine = nextActiveLine
@@ -662,6 +667,9 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             }
         }
         state.positionMs = 4_800
+        let debugTimeline = PictureInPictureLyricsTimeline()
+        debugTimeline.update(lines: state.lines)
+        state.selection = debugTimeline.selection(at: state.positionMs)
         state.title = "Midnight Signal"
         state.artist = "ivLyrics"
         state.statusText = ""
@@ -703,6 +711,11 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
 #endif
 
     private func drawFrame(in rect: CGRect, context: CGContext) {
+        drawStaticFrame(in: rect, context: context)
+        drawLyrics(in: frameLayout(in: rect).lyricsRect)
+    }
+
+    private func drawStaticFrame(in rect: CGRect, context: CGContext) {
         drawBackground(in: rect, context: context)
         let layout = frameLayout(in: rect)
         if state.showArtwork {
@@ -713,7 +726,6 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             }
             drawMetadata(layout: layout)
         }
-        drawLyrics(in: layout.lyricsRect)
     }
 
     private func drawBackground(in rect: CGRect, context: CGContext) {
@@ -1323,7 +1335,44 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         context.scaleBy(x: 1, y: -1)
         UIGraphicsPushContext(context)
         defer { UIGraphicsPopContext() }
-        drawFrame(in: CGRect(x: 0, y: 0, width: width, height: height), context: context)
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        let key = PictureInPictureStaticFrameKey(
+            trackKey: state.track?.stableKey,
+            width: Int(width), height: Int(height),
+            bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+            title: state.title, artist: state.artist, showArtwork: state.showArtwork,
+            orientation: state.orientation, backgroundMode: state.backgroundMode,
+            solidColor: state.solidColor, artwork: artwork, blurredArtwork: blurredArtwork
+        )
+        // Transparent covers blend with the destination's existing pixels. Keep
+        // their original draw path; only self-contained backgrounds are reusable.
+        let backgroundImage: UIImage?
+        switch AppSettings.normalizePipBackgroundMode(state.backgroundMode) {
+        case AppSettings.pipBackgroundCover: backgroundImage = artwork
+        case AppSettings.pipBackgroundBlur: backgroundImage = blurredArtwork ?? artwork
+        default: backgroundImage = nil
+        }
+        let canCache: Bool
+        if let backgroundImage {
+            switch backgroundImage.cgImage?.alphaInfo {
+            case .none?, .noneSkipFirst?, .noneSkipLast?: canCache = true
+            default: canCache = false
+            }
+        } else {
+            canCache = true
+        }
+        if !canCache || !staticFrameCache.restore(key: key, into: baseAddress) {
+            drawStaticFrame(in: rect, context: context)
+            if canCache {
+                context.flush()
+                staticFrameCache.store(key: key, from: baseAddress)
+            } else {
+                staticFrameCache.removeAll()
+            }
+        }
+        // Foreground lyrics, supplements and timed effects remain live on every
+        // frame. Artwork and blur replacements are part of the key above.
+        drawLyrics(in: frameLayout(in: rect).lyricsRect)
         return true
     }
 
@@ -1373,6 +1422,7 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         var useSyncCreatorSpeakerColors: Bool
         var typography: AppSettings.TypographySettings
         var speakerColors: AppSettings.SpeakerColorSettings
+        var selection = PictureInPictureLyricsTimeline.Selection.empty
 
         static let empty = RenderState(
             track: nil,
@@ -1441,41 +1491,23 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
         }
 
         var activeLine: ActiveLine? {
-            guard !lines.isEmpty else { return nil }
-            var activeLineIndex = 0
-            for candidate in lines.indices {
-                let line = lines[candidate]
-                if positionMs >= line.startTimeMs { activeLineIndex = candidate }
-                if line.endTimeMs > line.startTimeMs,
-                   positionMs >= line.startTimeMs,
-                   positionMs < line.endTimeMs {
-                    activeLineIndex = candidate
-                    break
-                }
-            }
-            let line = lines[activeLineIndex]
+            selection.activeIndex.map(activeLine(at:))
+        }
+
+        private func activeLine(at index: Int) -> ActiveLine {
+            let line = lines[index]
             let duration = max(1, line.endTimeMs - line.startTimeMs)
             let progress = max(0, min(1, CGFloat(positionMs - line.startTimeMs) / CGFloat(duration)))
-            return ActiveLine(line: line, index: activeLineIndex, progress: progress)
+            return ActiveLine(line: line, index: index, progress: progress)
         }
 
         var activeLines: [ActiveLine] {
-            let singing = lines.indices.compactMap { index -> ActiveLine? in
-                let line = lines[index]
-                guard line.isTimed,
-                      !InstrumentalBreakMarker.isMarkerText(line.text),
-                      positionMs >= line.startTimeMs,
-                      positionMs < line.endTimeMs else { return nil }
-                let duration = max(1, line.endTimeMs - line.startTimeMs)
-                let progress = max(0, min(1, CGFloat(positionMs - line.startTimeMs) / CGFloat(duration)))
-                return ActiveLine(line: line, index: index, progress: progress)
-            }
-            return singing.isEmpty ? activeLine.map { [$0] } ?? [] : singing
+            selection.activeIndices.map(activeLine(at:))
         }
 
         var nextLineText: String? {
-            guard let next = lines.first(where: { $0.startTimeMs > positionMs }) else { return nil }
-            let value = next.text.trimmed
+            guard let index = selection.nextLineIndex else { return nil }
+            let value = lines[index].text.trimmed
             return value.isEmpty ? nil : value
         }
 
@@ -1483,13 +1515,8 @@ final class LyricsPictureInPictureController: NSObject, ObservableObject {
             guard syncedLyricsKaraokeAnimationEnabled,
                   AppSettings.normalizeKaraokeDisplayGranularity(karaokeDisplayGranularity)
                     != AppSettings.karaokeDisplayLine,
-                  !activeLines.isEmpty else { return false }
-            return activeLines.contains { active in
-                active.line.syllables.contains(where: { $0.endTimeMs > $0.startTimeMs })
-                    || active.line.vocalParts.contains { part in
-                        part.syllables.contains(where: { $0.endTimeMs > $0.startTimeMs })
-                    }
-            }
+                  selection.hasTimedKaraoke else { return false }
+            return true
         }
 
         func framesPerSecond(activeLine: ActiveLine?) -> Int32 {
