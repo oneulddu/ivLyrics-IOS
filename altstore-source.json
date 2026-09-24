@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "1.3.18",
+          "buildVersion": "57",
+          "date": "2026-09-24",
+          "localizedDescription": "v1.3.18는 이전 릴리스 이후의 25개 변경을 기능별로 정리하고 AltStore 설치용 무서명 IPA를 함께 제공하는 업데이트입니다.\n\nv1.3.18 contains 25 changes since the previous release, organized by product area and accompanied by an unsigned IPA for AltStore.",
+          "downloadURL": "https://github.com/oneulddu/ivLyrics-IOS/releases/download/v1.3.18/ivLyrics-IOS-v1.3.18-unsigned.ipa",
+          "size": 8129666,
+          "sha256": "43656b8f8e0c266b9381be4f215a64c1cb14ed7576666782b878f2d0917aa827",
+          "minOSVersion": "17.0"
+        },
+        {
           "version": "1.3.12",
           "buildVersion": "51",
           "date": "2026-09-08",
