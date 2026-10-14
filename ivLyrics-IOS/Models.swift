@@ -120,6 +120,8 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
     var title: String
     var artist: String
     var album: String
+    var albumURI: String
+    var playbackContextURI: String
     var packageName: String
     var mediaId: String
     var isrc: String
@@ -148,11 +150,15 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
         lastPositionUpdateUptime: TimeInterval? = nil,
         playbackSpeed: Double = 1,
         playing: Bool = false,
-        artworkURL: URL? = nil
+        artworkURL: URL? = nil,
+        albumURI: String = "",
+        playbackContextURI: String = ""
     ) {
         self.title = title.trimmed
         self.artist = artist.trimmed
         self.album = album.trimmed
+        self.albumURI = albumURI.trimmed
+        self.playbackContextURI = playbackContextURI.trimmed
         self.packageName = packageName.trimmed
         self.mediaId = Self.normalizedSpotifyMediaId(mediaId)
         self.isrc = Self.normalizeIsrc(isrc)
@@ -194,6 +200,16 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
         return clampPosition(positionMs + Int64((elapsed * playbackSpeed).rounded()))
     }
 
+    /// The same position without whole-millisecond rounding, for values painted continuously
+    /// on every display frame (karaoke fill edge and bounce). Rounds to positionNow(uptime:).
+    func continuousPositionMs(uptime: TimeInterval) -> Double {
+        guard playing else {
+            return Double(clampPosition(positionMs))
+        }
+        let value = Double(positionMs) + max(0, uptime - lastPositionUpdateUptime) * 1000 * playbackSpeed
+        return durationMs > 0 ? max(0, min(Double(durationMs), value)) : max(0, value)
+    }
+
     func withPlayback(
         positionMs: Int64,
         playing: Bool,
@@ -214,6 +230,8 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
             && lhs.title == rhs.title
             && lhs.artist == rhs.artist
             && lhs.album == rhs.album
+            && lhs.albumURI == rhs.albumURI
+            && lhs.playbackContextURI == rhs.playbackContextURI
             && lhs.packageName == rhs.packageName
             && lhs.mediaId == rhs.mediaId
             && lhs.artworkURL == rhs.artworkURL
@@ -223,6 +241,8 @@ struct TrackSnapshot: Equatable, Hashable, Sendable {
         hasher.combine(title)
         hasher.combine(artist)
         hasher.combine(album)
+        hasher.combine(albumURI)
+        hasher.combine(playbackContextURI)
         hasher.combine(packageName)
         hasher.combine(mediaId)
         hasher.combine(durationMs)

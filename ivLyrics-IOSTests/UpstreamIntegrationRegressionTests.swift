@@ -163,4 +163,63 @@ final class UpstreamIntegrationRegressionTests: XCTestCase {
         }
     }
 
+    func testLocalAIConfigurationCoexistsWithForkProviderPreferences() {
+        let suiteName = "LocalAIIntegration.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: "lyrics_prefer_sync_data_provider")
+        defaults.set(true, forKey: "lyrics_multi_prefer_sync_data_provider")
+        let settings = AppSettings(defaults: defaults)
+        let disabledCacheKey = settings.snapshot.cacheKey
+        XCTAssertFalse(settings.snapshot.isAIProviderEnabled(LocalAI.providerId))
+
+        settings.localAITier = "high"
+        settings.localAIProcessor = "cpu"
+        settings.localAIIdleMinutes = 30
+        XCTAssertEqual(settings.snapshot.cacheKey, disabledCacheKey)
+        settings.setAIProviderEnabled(LocalAI.providerId, enabled: true)
+        XCTAssertNotEqual(settings.snapshot.cacheKey, disabledCacheKey)
+        XCTAssertEqual(settings.snapshot.localAIConfiguration,
+                       LocalAI.Configuration(tier: .high, processor: .cpu, idleMinutes: 30))
+        XCTAssertFalse(settings.snapshot.standardPreferSyncDataProvider)
+        XCTAssertTrue(settings.snapshot.lyricsProviderSettings.preferSyncDataProvider)
+
+        let reloaded = AppSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.snapshot.localAIConfiguration, settings.snapshot.localAIConfiguration)
+        XCTAssertFalse(reloaded.standardPreferSyncDataProvider)
+        XCTAssertTrue(reloaded.multiPreferSyncDataProvider)
+        let exported = settings.exportCloudSettings()
+        for key in ["local_ai_tier_v1", "local_ai_processor_v1", "local_ai_idle_minutes_v1"] {
+            XCTAssertNil(exported[key], "Local model configuration must stay on this device")
+        }
+    }
+
+    func testAppearanceCloudImportPreservesForkPreferencesAndDeviceLocalAI() {
+        let suiteName = "AppearanceIntegration.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(defaults: defaults)
+        settings.localAITier = "high"
+        settings.localAIProcessor = "cpu"
+        settings.importCloudSettings([
+            "background_video_fallback": AppSettings.backgroundSolid,
+            "background_video_aspect": "fit",
+            "background_video_edge_to_edge": false,
+            "lyrics_prefer_sync_data_provider": false,
+            "lyrics_multi_prefer_sync_data_provider": true,
+            "local_ai_tier_v1": "light"
+        ])
+        XCTAssertEqual(settings.backgroundVideoFallback, AppSettings.backgroundSolid)
+        XCTAssertEqual(settings.backgroundVideoAspect, "fit")
+        XCTAssertFalse(settings.backgroundVideoEdgeToEdge)
+        XCTAssertFalse(settings.standardPreferSyncDataProvider)
+        XCTAssertTrue(settings.multiPreferSyncDataProvider)
+        XCTAssertEqual(settings.snapshot.localAIConfiguration.tier, .high)
+        XCTAssertEqual(settings.snapshot.localAIConfiguration.processor, .cpu)
+
+        settings.setTrackBackgroundSettings("song", settings.globalBackgroundSettings)
+        let reloaded = AppSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.trackBackgroundSettings("song"), settings.globalBackgroundSettings)
+    }
+
 }

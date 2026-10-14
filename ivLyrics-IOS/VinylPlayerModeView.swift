@@ -8,13 +8,14 @@ import UIKit
 struct VinylPlayerModeView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Keeps the tonearm and active lyric renderer synchronized with the shared playback clock.
-    @EnvironmentObject private var playbackClock: PlaybackClock
+    // The scene does not observe the playback clock: the tonearm layer and the lyric panel do,
+    // so a clock tick re-renders only them, and a spin tick re-renders only the records.
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Binding var isPresented: Bool
 
     @State private var displayedTrack: TrackSnapshot?
     @State private var incomingTrack: TrackSnapshot?
+    @State private var labelSnapshots = VinylLabelSnapshots()
     @State private var trackTransitionProgress: CGFloat = 0
     @State private var outgoingRecordBehindSleeve = false
     @State private var trackTransitionToken = UUID()
@@ -25,10 +26,10 @@ struct VinylPlayerModeView: View {
     @State private var spinBaseDegrees: Double = 0
     @State private var spinOrigin = Date()
     @State private var spinning = false
+    @State private var spinSpeedPercent = 100
     @State private var spinToken = UUID()
     @State private var accentColors: [String: Color] = [:]
     @State private var artworkImages: [String: UIImage] = [:]
-    @GestureState private var tonearmDragState: VinylTonearmDragState?
 
     var body: some View {
         GeometryReader { proxy in
@@ -41,28 +42,35 @@ struct VinylPlayerModeView: View {
                 lyricsVisible: settings.vinylLyricsEnabled,
                 culturalAnnotationsVisible: settings.culturalAnnotationsEnabled
             )
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !spinning || !effectiveAnimationsEnabled)) { timeline in
-                scene(
-                    geometry: geometry,
-                    spinDegrees: accessibilityReduceMotion ? spinBaseDegrees : spinDegrees(at: timeline.date)
-                )
+            // The scene is built here, once per scene change, and handed to the spin timeline as a
+            // value. A spin tick only updates vinylSpinDate, which only the records read: every record
+            // draws the timeline's one date per frame, as before, and nothing else re-evaluates.
+            let records = scene(geometry: geometry)
+            TimelineView(.animation(paused: !spinning || !effectiveAnimationsEnabled)) { timeline in
+#if DEBUG && os(iOS)
+                let _ = debugProbeTimeline(.vinylSceneTick, timeline.date)
+#endif
+                records.environment(\.vinylSpinDate, timeline.date)
             }
 
             if settings.vinylLyricsEnabled {
                 MainLyricPreviewPanel(
                     chromeless: true,
                     typographyOverride: settings.typographySettings().forVinylPreview,
-                    showsCulturalAnnotations: true
+                    showsCulturalAnnotations: true,
+                    animationsEnabled: settings.vinylAnimationsEnabled
                 )
                     .frame(
                         width: max(0, proxy.size.width - (geometry.isLandscape ? 64 : 32)),
                         height: geometry.lyricHeight
                     )
+                    // Hit-test the panel's own frame only. Applied after .position, the shape would
+                    // fill the whole scene and take the tonearm, record and cover touches beneath it.
+                    .contentShape(Rectangle())
                     .position(
                         x: proxy.size.width * 0.5,
                         y: proxy.size.height - geometry.lyricBottom - geometry.lyricHeight * 0.5
                     )
-                    .contentShape(Rectangle())
                     .zIndex(20)
             }
 
@@ -86,11 +94,40 @@ struct VinylPlayerModeView: View {
         .onChange(of: model.currentTrack) { _, _ in
             refreshCurrentTrackAsset()
         }
+        .onChange(of: currentResolvedLabels) { _, _ in
+            rememberCurrentLabels()
+        }
+        .onChange(of: displayedTrack?.stableKey) { _, _ in
+            rememberCurrentLabels()
+        }
+        .onChange(of: incomingTrack?.stableKey) { _, _ in
+            rememberCurrentLabels()
+        }
         .onChange(of: model.currentTrack?.playing == true) { _, playing in
             updatePlaying(playing, animated: true)
         }
         .onChange(of: settings.vinylAnimationsEnabled) { _, enabled in
             updateAnimationPreference(enabled && !accessibilityReduceMotion)
+        }
+        .onChange(of: settings.vinylTrackChangeAnimationsEnabled) { _, enabled in
+            if !enabled {
+                trackTransitionToken = UUID()
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    displayedTrack = model.currentTrack
+                    incomingTrack = nil
+                    trackTransitionProgress = 0
+                    outgoingRecordBehindSleeve = false
+                    tonearmEngagement = model.currentTrack?.playing == true ? 1 : 0
+                }
+                if let track = model.currentTrack { loadAccent(for: track) }
+            }
+        }
+        .onChange(of: settings.vinylRotationSpeedPercent) { _, speed in
+            // Capture the angle at the previous speed before changing the rate.
+            freezeSpin(at: Date())
+            spinSpeedPercent = VinylMotionPolicy.speedPercent(speed)
         }
         .onChange(of: accessibilityReduceMotion) { _, reduceMotion in
             updateAnimationPreference(settings.vinylAnimationsEnabled && !reduceMotion)
@@ -104,22 +141,23 @@ struct VinylPlayerModeView: View {
     }
 
     @ViewBuilder
-    private func scene(geometry: VinylSceneGeometry, spinDegrees: Double) -> some View {
+    private func scene(geometry: VinylSceneGeometry) -> some View {
+#if DEBUG && os(iOS)
+        let _ = debugProbeCount(.vinylSceneBody)
+#endif
         if let displayedTrack {
             ZStack(alignment: .topLeading) {
                 if incomingTrack != nil {
                     outgoingLayers(
                         track: displayedTrack,
-                        geometry: geometry,
-                        spinDegrees: spinDegrees
+                        geometry: geometry
                     )
-                    incomingLayers(geometry: geometry, spinDegrees: spinDegrees)
+                    incomingLayers(geometry: geometry)
                 } else {
                     let frontRecordProgress = vinylSmoothStep(0.54, 0.76, playProgress)
-                    disc(
+                    spinningDisc(
                         track: displayedTrack,
                         frame: geometry.record,
-                        rotation: spinDegrees,
                         interactive: true
                     )
                     .zIndex(0)
@@ -133,10 +171,9 @@ struct VinylPlayerModeView: View {
                     .zIndex(1)
 
                     if frontRecordProgress > 0 {
-                        disc(
+                        spinningDisc(
                             track: displayedTrack,
                             frame: geometry.record,
-                            rotation: spinDegrees,
                             interactive: frontRecordProgress > 0.04
                         )
                         .opacity(frontRecordProgress)
@@ -144,7 +181,12 @@ struct VinylPlayerModeView: View {
                     }
                 }
 
-                tonearm(geometry: geometry)
+                VinylTonearmLayer(
+                    geometry: geometry,
+                    incomingTrackPresent: incomingTrack != nil,
+                    trackTransitionProgress: trackTransitionProgress,
+                    tonearmEngagement: tonearmEngagement
+                )
                     .allowsHitTesting(incomingTrack == nil)
                     .zIndex(8)
             }
@@ -155,8 +197,7 @@ struct VinylPlayerModeView: View {
     @ViewBuilder
     private func outgoingLayers(
         track: TrackSnapshot,
-        geometry: VinylSceneGeometry,
-        spinDegrees: Double
+        geometry: VinylSceneGeometry
     ) -> some View {
         let sleevePhase = vinylSmoothStep(
             VinylSequence.trackRecordCleared,
@@ -181,10 +222,9 @@ struct VinylPlayerModeView: View {
             departProgress: departPhase
         )
 
-        disc(
+        spinningDisc(
             track: track,
             frame: outgoingRecord,
-            rotation: spinDegrees,
             interactive: false
         )
         .opacity(opacity)
@@ -201,7 +241,7 @@ struct VinylPlayerModeView: View {
     }
 
     @ViewBuilder
-    private func incomingLayers(geometry: VinylSceneGeometry, spinDegrees: Double) -> some View {
+    private func incomingLayers(geometry: VinylSceneGeometry) -> some View {
         if let incomingTrack {
             let coverPhase = vinylSmoothStep(
                 VinylSequence.trackAlbumDeparted,
@@ -223,10 +263,9 @@ struct VinylPlayerModeView: View {
                 progress: recordPhase
             )
 
-            disc(
+            spinningDisc(
                 track: incomingTrack,
                 frame: incomingRecord,
-                rotation: spinDegrees,
                 interactive: false
             )
             .opacity(recordPhase * (1 - raisePhase))
@@ -241,10 +280,9 @@ struct VinylPlayerModeView: View {
             .opacity(coverPhase)
             .zIndex(4)
 
-            disc(
+            spinningDisc(
                 track: incomingTrack,
                 frame: incomingRecord,
-                rotation: spinDegrees,
                 interactive: false
             )
             .opacity(recordPhase * raisePhase)
@@ -263,14 +301,38 @@ struct VinylPlayerModeView: View {
             artwork: artworkImages[track.stableKey]
         )
             .frame(width: frame.width, height: frame.height)
+            // Hit-test the cover as drawn (its rounded square, turned with it). Applied after
+            // .position, the shape would fill the whole scene, so a tap anywhere, even on the
+            // record peeking out of a paused cover, closed vinyl mode.
+            .contentShape(RoundedRectangle(cornerRadius: max(4, frame.width * 0.024), style: .continuous))
             .rotationEffect(.degrees(rotation))
             .position(x: frame.midX, y: frame.midY)
-            .contentShape(RoundedRectangle(cornerRadius: max(4, frame.width * 0.024), style: .continuous))
+            // Accessibility only: VoiceOver keeps the frame and focus ring it had (the whole scene).
+            .contentShape(.accessibility, RoundedRectangle(cornerRadius: max(4, frame.width * 0.024), style: .continuous))
             .gesture(coverGesture(enabled: closeEnabled))
             .allowsHitTesting(closeEnabled)
             .accessibilityLabel(settings.t("vinyl.close_hint"))
             .accessibilityHint(settings.t("vinyl.tmi_hint"))
             .accessibilityAddTraits(closeEnabled ? .isButton : [])
+    }
+
+    /// A record at the spin timeline's date (spinDegrees(at:) as before); a spin tick re-renders it.
+    private func spinningDisc(track: TrackSnapshot, frame: CGRect, interactive: Bool) -> some View {
+        VinylSpinDateReader { date in
+#if DEBUG && os(iOS)
+            let _ = debugProbeSpin(
+                disc: 1, date: date,
+                angle: accessibilityReduceMotion ? spinBaseDegrees : spinDegrees(at: date),
+                origin: spinOrigin, base: spinBaseDegrees, spinning: spinning
+            )
+#endif
+            disc(
+                track: track,
+                frame: frame,
+                rotation: accessibilityReduceMotion ? spinBaseDegrees : spinDegrees(at: date),
+                interactive: interactive
+            )
+        }
     }
 
     private func disc(
@@ -279,15 +341,21 @@ struct VinylPlayerModeView: View {
         rotation: Double,
         interactive: Bool
     ) -> some View {
-        VinylDisc(
+        let labels = labelSnapshots.labels(for: track.stableKey, title: track.title,
+                                           artist: track.artist, simplified: settings.simplifyTitleEnabled)
+        return VinylDisc(
             track: track,
+            title: track.stableKey == model.currentTrackKey ? model.titleText : labels.title,
+            artist: track.stableKey == model.currentTrackKey ? model.artistText : labels.artist,
             accent: accentColor(for: track),
             centerCounterRotation: settings.vinylCenterRotationEnabled ? 0 : -rotation
         )
             .frame(width: frame.width, height: frame.height)
+            // Hit-test the record as drawn. Applied after .position, the circle would be the
+            // largest one fitting the whole scene and would take cover and background taps.
+            .contentShape(Circle())
             .rotationEffect(.degrees(rotation))
             .position(x: frame.midX, y: frame.midY)
-            .contentShape(Circle())
             .onTapGesture {
                 guard interactive else { return }
                 model.togglePlayback()
@@ -312,12 +380,390 @@ struct VinylPlayerModeView: View {
             }
     }
 
-    private func tonearm(geometry: VinylSceneGeometry) -> some View {
+    private var loadingIndicatorText: String? {
+        if model.status == .loading || model.lyricsResult.lines.isEmpty && model.lyricsResult.detail.lowercased().contains("loading") {
+            return model.lyricsLoadingText
+        }
+        if model.lyricsSupplementTranslationLoading {
+            return model.aiTranslationLoadingText
+        }
+        if model.lyricsSupplementPronunciationLoading {
+            return model.aiPronunciationLoadingText
+        }
+        if model.lyricsSupplementFuriganaLoading {
+            return settings.t("loading.pronunciation")
+        }
+        if model.culturalAnnotationsLoading {
+            return model.culturalAnnotationsLoadingText
+        }
+        return nil
+    }
+
+    private func enter() {
+        displayedTrack = model.currentTrack
+        incomingTrack = nil
+        labelSnapshots = VinylLabelSnapshots()
+        rememberCurrentLabels()
+        trackTransitionProgress = 0
+        outgoingRecordBehindSleeve = false
+        entranceProgress = 0
+        playProgress = 0
+        tonearmEngagement = 0
+        spinning = false
+        spinOrigin = Date()
+        spinSpeedPercent = VinylMotionPolicy.speedPercent(settings.vinylRotationSpeedPercent)
+        if let displayedTrack {
+            loadAccent(for: displayedTrack)
+        }
+        if effectiveAnimationsEnabled {
+            DispatchQueue.main.async {
+                withAnimation(.timingCurve(0.18, 0.82, 0.22, 1, duration: 0.78)) {
+                    entranceProgress = 1
+                }
+            }
+        } else {
+            entranceProgress = 1
+        }
+        updatePlaying(
+            model.currentTrack?.playing == true,
+            animated: effectiveAnimationsEnabled
+        )
+    }
+
+    private func synchronizeTrack(animateChange: Bool) {
+        guard let next = model.currentTrack, next.hasUsableMetadata else {
+            close()
+            return
+        }
+        rememberCurrentLabels()
+        guard let displayedTrack else {
+            self.displayedTrack = next
+            return
+        }
+        if displayedTrack.stableKey == next.stableKey {
+            self.displayedTrack = next
+            return
+        }
+        trackTransitionToken = UUID()
+        guard animateChange && effectiveAnimationsEnabled && settings.vinylTrackChangeAnimationsEnabled else {
+            self.displayedTrack = next
+            incomingTrack = nil
+            trackTransitionProgress = 0
+            outgoingRecordBehindSleeve = false
+            loadAccent(for: next)
+            return
+        }
+
+        let token = UUID()
+        trackTransitionToken = token
+        Task { @MainActor in
+            var preparedTrack = next
+            for _ in 0..<8 {
+                guard preparedTrack.artworkURL == displayedTrack.artworkURL else { break }
+                try? await Task.sleep(nanoseconds: 40_000_000)
+                guard trackTransitionToken == token,
+                      let current = model.currentTrack,
+                      current.stableKey == next.stableKey else { return }
+                preparedTrack = current
+            }
+            let asset = await VinylArtworkAccent.asset(for: preparedTrack)
+            guard trackTransitionToken == token,
+                  model.currentTrack?.stableKey == preparedTrack.stableKey else { return }
+            accentColors[preparedTrack.stableKey] = asset.color
+            if let image = asset.image {
+                artworkImages[preparedTrack.stableKey] = image
+            }
+            incomingTrack = preparedTrack
+            trackTransitionProgress = 0
+            outgoingRecordBehindSleeve = false
+            withAnimation(.timingCurve(0.20, 0.74, 0.24, 1, duration: 0.18)) {
+                trackTransitionProgress = VinylSequence.trackRecordCleared
+            }
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard trackTransitionToken == token else { return }
+            var layerTransaction = Transaction()
+            layerTransaction.disablesAnimations = true
+            withTransaction(layerTransaction) {
+                outgoingRecordBehindSleeve = true
+            }
+            withAnimation(.timingCurve(0.22, 0.76, 0.28, 1, duration: 0.68)) {
+                trackTransitionProgress = VinylSequence.trackRecordSleeved
+            }
+            try? await Task.sleep(nanoseconds: 680_000_000)
+            guard trackTransitionToken == token else { return }
+            withAnimation(.timingCurve(0.50, 0, 0.72, 0.30, duration: 0.48)) {
+                trackTransitionProgress = VinylSequence.trackAlbumDeparted
+            }
+            try? await Task.sleep(nanoseconds: 480_000_000)
+            guard trackTransitionToken == token else { return }
+            withAnimation(.timingCurve(0.18, 0.72, 0.16, 1, duration: 0.70)) {
+                trackTransitionProgress = VinylSequence.trackAlbumArrived
+            }
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard trackTransitionToken == token else { return }
+            withAnimation(.timingCurve(0.16, 0.78, 0.18, 1, duration: 0.72)) {
+                trackTransitionProgress = VinylSequence.trackRecordEmerged
+            }
+            try? await Task.sleep(nanoseconds: 720_000_000)
+            guard trackTransitionToken == token else { return }
+            withAnimation(.timingCurve(0.20, 0.76, 0.20, 1, duration: 0.36)) {
+                trackTransitionProgress = VinylSequence.trackRecordRaised
+            }
+            try? await Task.sleep(nanoseconds: 360_000_000)
+            guard trackTransitionToken == token else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                self.displayedTrack = incomingTrack ?? preparedTrack
+            }
+            withAnimation(.linear(duration: 0.096)) {
+                trackTransitionProgress = 1
+            }
+            try? await Task.sleep(nanoseconds: 96_000_000)
+            guard trackTransitionToken == token else { return }
+            withTransaction(transaction) {
+                incomingTrack = nil
+                trackTransitionProgress = 0
+                outgoingRecordBehindSleeve = false
+                tonearmEngagement = 0
+            }
+            if model.currentTrack?.playing == true {
+                withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.72)) {
+                    tonearmEngagement = 1
+                }
+            }
+        }
+    }
+
+    private func refreshCurrentTrackAsset() {
+        guard let current = model.currentTrack else { return }
+        if incomingTrack?.stableKey == current.stableKey {
+            incomingTrack = current
+            loadAccent(for: current)
+            return
+        } else if displayedTrack?.stableKey == current.stableKey {
+            displayedTrack = current
+        }
+        loadAccent(for: current)
+    }
+
+    private var currentResolvedLabels: VinylResolvedLabels {
+        .init(trackKey: model.currentTrackKey, title: model.titleText, artist: model.artistText)
+    }
+
+    private func rememberCurrentLabels() {
+        labelSnapshots.update(currentResolvedLabels, retaining:
+            [displayedTrack?.stableKey, incomingTrack?.stableKey].compactMap { $0 })
+    }
+
+    private func accentColor(for track: TrackSnapshot) -> Color {
+        accentColors[track.stableKey] ?? VinylArtworkAccent.fallbackColor(key: track.stableKey)
+    }
+
+    private func loadAccent(for track: TrackSnapshot) {
+        let key = track.stableKey
+        let assetKey = key + "|" + (track.artworkURL?.absoluteString ?? "")
+        Task { @MainActor in
+            let asset = await VinylArtworkAccent.asset(for: track)
+            guard !Task.isCancelled else { return }
+            let currentAssetKeys = [displayedTrack, incomingTrack]
+                .compactMap { candidate -> String? in
+                    guard let candidate else { return nil }
+                    return candidate.stableKey + "|" + (candidate.artworkURL?.absoluteString ?? "")
+                }
+            guard currentAssetKeys.contains(assetKey) else { return }
+            accentColors[key] = asset.color
+            if let image = asset.image {
+                artworkImages[key] = image
+            }
+        }
+    }
+
+    private func updatePlaying(_ playing: Bool, animated: Bool) {
+        let token = UUID()
+        spinToken = token
+        playbackSequenceToken = token
+        guard effectiveAnimationsEnabled, animated else {
+            freezeSpin(at: Date())
+            spinning = playing && effectiveAnimationsEnabled
+            spinOrigin = Date()
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                playProgress = playing ? 1 : 0
+                tonearmEngagement = playing ? 1 : 0
+            }
+            return
+        }
+        if playing {
+            freezeSpin(at: Date())
+            spinning = false
+            let fullSequence = playProgress <= 0.05 && tonearmEngagement <= 0.05
+            Task { @MainActor in
+                if fullSequence {
+                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.78)) {
+                        playProgress = 0.72
+                    }
+                    try? await Task.sleep(nanoseconds: 780_000_000)
+                    guard playbackSequenceToken == token else { return }
+                    try? await Task.sleep(nanoseconds: 220_000_000)
+                    guard playbackSequenceToken == token else { return }
+                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.56)) {
+                        playProgress = 1
+                    }
+                    try? await Task.sleep(nanoseconds: 560_000_000)
+                    guard playbackSequenceToken == token else { return }
+                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.72)) {
+                        tonearmEngagement = 1
+                    }
+                    try? await Task.sleep(nanoseconds: 720_000_000)
+                } else {
+                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.72)) {
+                        playProgress = 1
+                        tonearmEngagement = 1
+                    }
+                    try? await Task.sleep(nanoseconds: 720_000_000)
+                }
+                guard playbackSequenceToken == token,
+                      model.currentTrack?.playing == true else { return }
+                spinOrigin = Date()
+                spinning = true
+            }
+        } else {
+            freezeSpin(at: Date())
+            spinning = false
+            let fullSequence = playProgress >= 0.95
+            Task { @MainActor in
+                withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.72)) {
+                    tonearmEngagement = 0
+                }
+                try? await Task.sleep(nanoseconds: 720_000_000)
+                guard playbackSequenceToken == token else { return }
+                freezeSpin(at: Date())
+                spinning = false
+                guard fullSequence else {
+                    withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.78)) {
+                        playProgress = 0
+                    }
+                    return
+                }
+                withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.46)) {
+                    playProgress = 0.88
+                }
+                try? await Task.sleep(nanoseconds: 460_000_000)
+                guard playbackSequenceToken == token else { return }
+                withAnimation(.linear(duration: 0.07)) {
+                    playProgress = 0.72
+                }
+                try? await Task.sleep(nanoseconds: 70_000_000)
+                guard playbackSequenceToken == token else { return }
+                withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.78)) {
+                    playProgress = 0
+                }
+            }
+        }
+    }
+
+    private func spinDegrees(at date: Date) -> Double {
+        VinylMotionPolicy.degrees(base: spinBaseDegrees, elapsed: date.timeIntervalSince(spinOrigin),
+                                  spinning: spinning, speedPercent: spinSpeedPercent)
+    }
+
+    private func freezeSpin(at date: Date) {
+        spinBaseDegrees = spinDegrees(at: date)
+        spinOrigin = date
+    }
+
+    private func close() {
+        guard isPresented else { return }
+        performHaptic(.soft)
+        guard effectiveAnimationsEnabled else {
+            isPresented = false
+            return
+        }
+        withAnimation(.timingCurve(0.22, 0.74, 0.28, 1, duration: 0.36)) {
+            isPresented = false
+        }
+    }
+
+    private func updateAnimationPreference(_ enabled: Bool) {
+        guard !enabled else {
+            updatePlaying(model.currentTrack?.playing == true, animated: false)
+            return
+        }
+        trackTransitionToken = UUID()
+        spinToken = UUID()
+        playbackSequenceToken = UUID()
+        freezeSpin(at: Date())
+        spinning = false
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            displayedTrack = model.currentTrack ?? incomingTrack ?? displayedTrack
+            incomingTrack = nil
+            trackTransitionProgress = 0
+            outgoingRecordBehindSleeve = false
+            entranceProgress = 1
+            playProgress = model.currentTrack?.playing == true ? 1 : 0
+            tonearmEngagement = model.currentTrack?.playing == true ? 1 : 0
+        }
+    }
+
+    private var effectiveAnimationsEnabled: Bool {
+        settings.vinylAnimationsEnabled && !accessibilityReduceMotion
+    }
+
+    private func performHaptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+#if os(iOS)
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
+#endif
+    }
+}
+
+private struct VinylSpinDateKey: EnvironmentKey {
+    static let defaultValue = Date.distantPast
+}
+
+private extension EnvironmentValues {
+    /// The vinyl spin timeline's date for the current frame; only the records read it.
+    var vinylSpinDate: Date {
+        get { self[VinylSpinDateKey.self] }
+        set { self[VinylSpinDateKey.self] = newValue }
+    }
+}
+
+/// Re-renders its content with the spin timeline's date: the only views a spin tick updates.
+private struct VinylSpinDateReader<Content: View>: View {
+    @Environment(\.vinylSpinDate) private var spinDate
+    @ViewBuilder let content: (Date) -> Content
+
+    var body: some View {
+        content(spinDate)
+    }
+}
+
+/// The tonearm is the one part of the vinyl scene that follows the playback position. It observes
+/// the playback clock itself, so each clock tick re-renders the tonearm alone instead of the whole
+/// scene (records, cover and their geometry). Drawing, drag and seek code is unchanged.
+private struct VinylTonearmLayer: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var model: AppViewModel
+    // Subscribed (not read directly) so the tonearm follows the display-rate playback clock
+    // driving model.nowPositionMs.
+    @EnvironmentObject private var playbackClock: PlaybackClock
+    @GestureState private var tonearmDragState: VinylTonearmDragState?
+
+    let geometry: VinylSceneGeometry
+    let incomingTrackPresent: Bool
+    let trackTransitionProgress: CGFloat
+    let tonearmEngagement: CGFloat
+
+    var body: some View {
         let style = AppSettings.normalizeVinylTonearmStyle(settings.vinylTonearmStyle)
         let finish = AppSettings.normalizeVinylTonearmFinish(settings.vinylTonearmFinish)
         let sizeScale = CGFloat(AppSettings.clampVinylTonearmSizePercent(settings.vinylTonearmSizePercent)) / 100
         let linear = style == AppSettings.vinylTonearmStyleLinear
-        let trackParkProgress = incomingTrack == nil
+        let trackParkProgress = !incomingTrackPresent
             ? 1
             : 1 - vinylSmoothStep(0, VinylSequence.trackRecordSleeved, trackTransitionProgress)
         let engagement = Double(tonearmEngagement * trackParkProgress)
@@ -339,6 +785,10 @@ struct VinylPlayerModeView: View {
             sizeScale: sizeScale,
             progress: progress
         )
+#if DEBUG && os(iOS)
+        debugProbeTonearm(rotation: rotation, progress: progress, engagement: engagement,
+                          playbackProgress: playbackProgress, dragging: tonearmDragState != nil)
+#endif
 
         return ZStack(alignment: .topLeading) {
             Canvas { context, _ in
@@ -499,320 +949,6 @@ struct VinylPlayerModeView: View {
         return max(0, min(1, Double(model.nowPositionMs) / Double(model.durationMs)))
     }
 
-    private var loadingIndicatorText: String? {
-        if model.status == .loading || model.lyricsResult.lines.isEmpty && model.lyricsResult.detail.lowercased().contains("loading") {
-            return model.lyricsLoadingText
-        }
-        if model.lyricsSupplementTranslationLoading {
-            return model.aiTranslationLoadingText
-        }
-        if model.lyricsSupplementPronunciationLoading {
-            return model.aiPronunciationLoadingText
-        }
-        if model.lyricsSupplementFuriganaLoading {
-            return settings.t("loading.pronunciation")
-        }
-        if model.culturalAnnotationsLoading {
-            return model.culturalAnnotationsLoadingText
-        }
-        return nil
-    }
-
-    private func enter() {
-        displayedTrack = model.currentTrack
-        incomingTrack = nil
-        trackTransitionProgress = 0
-        outgoingRecordBehindSleeve = false
-        entranceProgress = 0
-        playProgress = 0
-        tonearmEngagement = 0
-        spinning = false
-        spinOrigin = Date()
-        if let displayedTrack {
-            loadAccent(for: displayedTrack)
-        }
-        if effectiveAnimationsEnabled {
-            DispatchQueue.main.async {
-                withAnimation(.timingCurve(0.18, 0.82, 0.22, 1, duration: 0.78)) {
-                    entranceProgress = 1
-                }
-            }
-        } else {
-            entranceProgress = 1
-        }
-        updatePlaying(
-            model.currentTrack?.playing == true,
-            animated: effectiveAnimationsEnabled
-        )
-    }
-
-    private func synchronizeTrack(animateChange: Bool) {
-        guard let next = model.currentTrack, next.hasUsableMetadata else {
-            close()
-            return
-        }
-        guard let displayedTrack else {
-            self.displayedTrack = next
-            return
-        }
-        if displayedTrack.stableKey == next.stableKey {
-            self.displayedTrack = next
-            return
-        }
-        guard animateChange && effectiveAnimationsEnabled else {
-            self.displayedTrack = next
-            incomingTrack = nil
-            return
-        }
-
-        let token = UUID()
-        trackTransitionToken = token
-        Task { @MainActor in
-            var preparedTrack = next
-            for _ in 0..<8 {
-                guard preparedTrack.artworkURL == displayedTrack.artworkURL else { break }
-                try? await Task.sleep(nanoseconds: 40_000_000)
-                guard trackTransitionToken == token,
-                      let current = model.currentTrack,
-                      current.stableKey == next.stableKey else { return }
-                preparedTrack = current
-            }
-            let asset = await VinylArtworkAccent.asset(for: preparedTrack)
-            guard trackTransitionToken == token,
-                  model.currentTrack?.stableKey == preparedTrack.stableKey else { return }
-            accentColors[preparedTrack.stableKey] = asset.color
-            if let image = asset.image {
-                artworkImages[preparedTrack.stableKey] = image
-            }
-            incomingTrack = preparedTrack
-            trackTransitionProgress = 0
-            outgoingRecordBehindSleeve = false
-            withAnimation(.timingCurve(0.20, 0.74, 0.24, 1, duration: 0.18)) {
-                trackTransitionProgress = VinylSequence.trackRecordCleared
-            }
-            try? await Task.sleep(nanoseconds: 180_000_000)
-            guard trackTransitionToken == token else { return }
-            var layerTransaction = Transaction()
-            layerTransaction.disablesAnimations = true
-            withTransaction(layerTransaction) {
-                outgoingRecordBehindSleeve = true
-            }
-            withAnimation(.timingCurve(0.22, 0.76, 0.28, 1, duration: 0.68)) {
-                trackTransitionProgress = VinylSequence.trackRecordSleeved
-            }
-            try? await Task.sleep(nanoseconds: 680_000_000)
-            guard trackTransitionToken == token else { return }
-            withAnimation(.timingCurve(0.50, 0, 0.72, 0.30, duration: 0.48)) {
-                trackTransitionProgress = VinylSequence.trackAlbumDeparted
-            }
-            try? await Task.sleep(nanoseconds: 480_000_000)
-            guard trackTransitionToken == token else { return }
-            withAnimation(.timingCurve(0.18, 0.72, 0.16, 1, duration: 0.70)) {
-                trackTransitionProgress = VinylSequence.trackAlbumArrived
-            }
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            guard trackTransitionToken == token else { return }
-            withAnimation(.timingCurve(0.16, 0.78, 0.18, 1, duration: 0.72)) {
-                trackTransitionProgress = VinylSequence.trackRecordEmerged
-            }
-            try? await Task.sleep(nanoseconds: 720_000_000)
-            guard trackTransitionToken == token else { return }
-            withAnimation(.timingCurve(0.20, 0.76, 0.20, 1, duration: 0.36)) {
-                trackTransitionProgress = VinylSequence.trackRecordRaised
-            }
-            try? await Task.sleep(nanoseconds: 360_000_000)
-            guard trackTransitionToken == token else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                self.displayedTrack = incomingTrack ?? preparedTrack
-            }
-            withAnimation(.linear(duration: 0.096)) {
-                trackTransitionProgress = 1
-            }
-            try? await Task.sleep(nanoseconds: 96_000_000)
-            guard trackTransitionToken == token else { return }
-            withTransaction(transaction) {
-                incomingTrack = nil
-                trackTransitionProgress = 0
-                outgoingRecordBehindSleeve = false
-                tonearmEngagement = 0
-            }
-            if model.currentTrack?.playing == true {
-                withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.72)) {
-                    tonearmEngagement = 1
-                }
-            }
-        }
-    }
-
-    private func refreshCurrentTrackAsset() {
-        guard let current = model.currentTrack else { return }
-        if incomingTrack?.stableKey == current.stableKey {
-            incomingTrack = current
-            loadAccent(for: current)
-            return
-        } else if displayedTrack?.stableKey == current.stableKey {
-            displayedTrack = current
-        }
-        loadAccent(for: current)
-    }
-
-    private func accentColor(for track: TrackSnapshot) -> Color {
-        accentColors[track.stableKey] ?? VinylArtworkAccent.fallbackColor(key: track.stableKey)
-    }
-
-    private func loadAccent(for track: TrackSnapshot) {
-        let key = track.stableKey
-        let assetKey = key + "|" + (track.artworkURL?.absoluteString ?? "")
-        Task { @MainActor in
-            let asset = await VinylArtworkAccent.asset(for: track)
-            guard !Task.isCancelled else { return }
-            let currentAssetKeys = [displayedTrack, incomingTrack]
-                .compactMap { candidate -> String? in
-                    guard let candidate else { return nil }
-                    return candidate.stableKey + "|" + (candidate.artworkURL?.absoluteString ?? "")
-                }
-            guard currentAssetKeys.contains(assetKey) else { return }
-            accentColors[key] = asset.color
-            if let image = asset.image {
-                artworkImages[key] = image
-            }
-        }
-    }
-
-    private func updatePlaying(_ playing: Bool, animated: Bool) {
-        let token = UUID()
-        spinToken = token
-        playbackSequenceToken = token
-        guard effectiveAnimationsEnabled, animated else {
-            freezeSpin(at: Date())
-            spinning = playing
-            spinOrigin = Date()
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                playProgress = playing ? 1 : 0
-                tonearmEngagement = playing ? 1 : 0
-            }
-            return
-        }
-        if playing {
-            freezeSpin(at: Date())
-            spinning = false
-            let fullSequence = playProgress <= 0.05 && tonearmEngagement <= 0.05
-            Task { @MainActor in
-                if fullSequence {
-                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.78)) {
-                        playProgress = 0.72
-                    }
-                    try? await Task.sleep(nanoseconds: 780_000_000)
-                    guard playbackSequenceToken == token else { return }
-                    try? await Task.sleep(nanoseconds: 220_000_000)
-                    guard playbackSequenceToken == token else { return }
-                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.56)) {
-                        playProgress = 1
-                    }
-                    try? await Task.sleep(nanoseconds: 560_000_000)
-                    guard playbackSequenceToken == token else { return }
-                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.72)) {
-                        tonearmEngagement = 1
-                    }
-                    try? await Task.sleep(nanoseconds: 720_000_000)
-                } else {
-                    withAnimation(.timingCurve(0.18, 0.76, 0.22, 1, duration: 0.72)) {
-                        playProgress = 1
-                        tonearmEngagement = 1
-                    }
-                    try? await Task.sleep(nanoseconds: 720_000_000)
-                }
-                guard playbackSequenceToken == token,
-                      model.currentTrack?.playing == true else { return }
-                spinOrigin = Date()
-                spinning = true
-            }
-        } else {
-            let fullSequence = playProgress >= 0.95
-            Task { @MainActor in
-                withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.72)) {
-                    tonearmEngagement = 0
-                }
-                try? await Task.sleep(nanoseconds: 720_000_000)
-                guard playbackSequenceToken == token else { return }
-                freezeSpin(at: Date())
-                spinning = false
-                guard fullSequence else {
-                    withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.78)) {
-                        playProgress = 0
-                    }
-                    return
-                }
-                withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.46)) {
-                    playProgress = 0.88
-                }
-                try? await Task.sleep(nanoseconds: 460_000_000)
-                guard playbackSequenceToken == token else { return }
-                withAnimation(.linear(duration: 0.07)) {
-                    playProgress = 0.72
-                }
-                try? await Task.sleep(nanoseconds: 70_000_000)
-                guard playbackSequenceToken == token else { return }
-                withAnimation(.timingCurve(0.28, 0, 0.34, 1, duration: 0.78)) {
-                    playProgress = 0
-                }
-            }
-        }
-    }
-
-    private func spinDegrees(at date: Date) -> Double {
-        guard spinning else { return spinBaseDegrees }
-        return (spinBaseDegrees + max(0, date.timeIntervalSince(spinOrigin)) * 9).truncatingRemainder(dividingBy: 360)
-    }
-
-    private func freezeSpin(at date: Date) {
-        spinBaseDegrees = spinDegrees(at: date)
-        spinOrigin = date
-    }
-
-    private func close() {
-        guard isPresented else { return }
-        performHaptic(.soft)
-        guard effectiveAnimationsEnabled else {
-            isPresented = false
-            return
-        }
-        withAnimation(.timingCurve(0.22, 0.74, 0.28, 1, duration: 0.36)) {
-            isPresented = false
-        }
-    }
-
-    private func updateAnimationPreference(_ enabled: Bool) {
-        guard !enabled else {
-            updatePlaying(model.currentTrack?.playing == true, animated: false)
-            return
-        }
-        trackTransitionToken = UUID()
-        spinToken = UUID()
-        playbackSequenceToken = UUID()
-        freezeSpin(at: Date())
-        spinning = false
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            displayedTrack = model.currentTrack ?? incomingTrack ?? displayedTrack
-            incomingTrack = nil
-            trackTransitionProgress = 0
-            outgoingRecordBehindSleeve = false
-            entranceProgress = 1
-            playProgress = model.currentTrack?.playing == true ? 1 : 0
-            tonearmEngagement = model.currentTrack?.playing == true ? 1 : 0
-        }
-    }
-
-    private var effectiveAnimationsEnabled: Bool {
-        settings.vinylAnimationsEnabled && !accessibilityReduceMotion
-    }
-
     private func performHaptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
 #if os(iOS)
         UIImpactFeedbackGenerator(style: style).impactOccurred()
@@ -848,6 +984,8 @@ private struct VinylAlbumCover: View {
 
 private struct VinylDisc: View {
     let track: TrackSnapshot
+    let title: String
+    let artist: String
     let accent: Color
     let centerCounterRotation: Double
 
@@ -911,19 +1049,25 @@ private struct VinylDisc: View {
                         fontSize: max(5.5, size * 0.0168)
                     )
 
-                    Text(track.title)
-                        .font(.pretendard(max(10, size * 0.0455), weight: .bold))
+                    Text(title)
+                        .font(.pretendard(max(1, size * 0.0455), weight: .bold))
                         .foregroundStyle(accent)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                         .minimumScaleFactor(0.54)
-                        .frame(width: size * 0.35)
+                        .frame(width: CGFloat(VinylMotionPolicy.labelWidth(recordSize: Double(size))), height: size * 0.055)
+                        .clipped()
+                        .accessibilityLabel(title)
                         .position(x: size * 0.5, y: size * 0.442)
-                    Text(track.artist)
-                        .font(.pretendard(max(7, size * 0.0245), weight: .semibold))
+                    Text(artist)
+                        .font(.pretendard(max(1, size * 0.0245), weight: .semibold))
                         .foregroundStyle(.white.opacity(0.82))
                         .lineLimit(1)
+                        .truncationMode(.tail)
                         .minimumScaleFactor(0.55)
-                        .frame(width: size * 0.35)
+                        .frame(width: CGFloat(VinylMotionPolicy.labelWidth(recordSize: Double(size))), height: size * 0.04)
+                        .clipped()
+                        .accessibilityLabel(artist)
                         .position(x: size * 0.5, y: size * 0.567)
 
                     Circle()
@@ -937,7 +1081,7 @@ private struct VinylDisc: View {
     }
 
     private var circularLabel: String {
-        let source = track.album.trimmed.isEmpty ? "\(track.title) · \(track.artist)" : track.album
+        let source = track.album.trimmed.isEmpty ? "\(title) · \(artist)" : track.album
         return String(source.prefix(34)).uppercased()
     }
 }
