@@ -335,10 +335,28 @@ final class AppViewModel: ObservableObject {
     private(set) var nowPositionMs: Int64 {
         get { playbackClock.nowPositionMs }
         set {
+            // Writes outside the frame clock (seeks, track changes, Spotify sync) restart the
+            // continuous position at the same whole millisecond.
+            if Int64(nowContinuousPositionMs.rounded()) != newValue {
+                nowContinuousPositionMs = Double(newValue)
+            }
             if playbackClock.nowPositionMs != newValue {
                 playbackClock.nowPositionMs = newValue
             }
         }
+    }
+    /// Unrounded playback position sampled for the same display frame as nowPositionMs.
+    /// Discrete lyric state keeps using whole milliseconds; only continuously painted values
+    /// (karaoke fill edge and bounce) read this, so they advance by exactly one frame per frame.
+    private(set) var nowContinuousPositionMs: Double = 0
+    /// Uptime of the display frame being prepared (its vsync time in the foreground).
+    private(set) var playbackFrameUptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    private var lyricsFrameUpdatesUntilUptime: TimeInterval = 0
+
+    /// Lyric line travel is painted from the playback clock. While playback is paused the clock
+    /// stops publishing, so a travel in flight asks for frame updates until it lands.
+    func keepLyricsFramesUpdating(until uptime: TimeInterval) {
+        lyricsFrameUpdatesUntilUptime = max(lyricsFrameUpdatesUntilUptime, uptime)
     }
     @Published var trackOffsetMs: Int = 0 {
         didSet {
@@ -406,6 +424,7 @@ final class AppViewModel: ObservableObject {
     private var metadataTranslationTask: Task<Void, Never>?
     private var furiganaRefreshTask: Task<Void, Never>?
     private var manualTask: Task<Void, Never>?
+    private var manualSearchRequestID = UUID()
     private var tmiTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
     private var pollinationsAuthTask: Task<Void, Never>?
@@ -458,6 +477,14 @@ final class AppViewModel: ObservableObject {
     private var currentSpotifyContextKnown = false
     private var automaticUpdateCheckStarted = false
     private let defaults = UserDefaults.standard
+#if DEBUG
+    @Published private(set) var debugSettingsUIActionCount = 0
+    private func debugSettingsUIConsumesAction() -> Bool {
+        guard DebugSettingsUIHarness.enabled else { return false }
+        debugSettingsUIActionCount += 1
+        return true
+    }
+#endif
     private let keyLastAutoUpdateCheckMs = "last_auto_update_check_ms"
     private let keyInitialSetupDismissed = "initial_setup_dismissed"
     private let keySpotifyValidatedSourceKey = "spotify_validated_source_key"
@@ -512,6 +539,28 @@ final class AppViewModel: ObservableObject {
         lyricsResult = LyricsResult.empty(settings.t("status.waiting_current_track"))
         manualLrclibStatus = settings.t("lyrics.lrclib_search.ready")
         updateStatus = settings.t("update.status_idle")
+#if DEBUG
+        if DebugSettingsUIHarness.enabled {
+            let track = TrackSnapshot(title: "A deliberately long track title with 日本語 and 한국어 for narrow-screen layout",
+                                      artist: "Offline artist with a long translated name", album: "Fixture album",
+                                      mediaId: "", durationMs: 180_000, positionMs: 2_000, playing: false)
+            // Complete definite initialization before reading any @Published property.
+            inputTitle = track.title
+            inputArtist = track.artist
+            inputAlbum = track.album
+            inputDuration = String(track.durationMs / 1_000)
+            inputSpotifyId = ""
+            inputIsrc = ""
+            currentTrack = track
+            let line = LyricsLine(startTimeMs: 0, endTimeMs: 20_000, text: "静かな夜に歌う",
+                                  pronunciationText: "shizukana yoru ni utau",
+                                  translationText: "An intentionally long translated lyric used to inspect native controls, safe areas and text wrapping without any account or network request.")
+            lyricsResult = LyricsResult(lines: [line], providerLabel: "Offline fixture", detail: "DEBUG UI fixture", karaoke: false, providerId: "fixture")
+            baseLyricsResult = lyricsResult
+            status = .loaded
+            return
+        }
+#endif
         inputTitle = defaults.string(forKey: "manual_track_title") ?? ""
         inputArtist = defaults.string(forKey: "manual_track_artist") ?? ""
         inputAlbum = defaults.string(forKey: "manual_track_album") ?? ""
@@ -802,7 +851,8 @@ final class AppViewModel: ObservableObject {
     }
 
     var titleText: String {
-        metadataTranslation?.title.trimmed.isEmpty == false ? metadataTranslation!.title : (currentTrack?.title ?? inputTitle)
+        let title = metadataTranslation?.title.trimmed.isEmpty == false ? metadataTranslation!.title : (currentTrack?.title ?? inputTitle)
+        return VinylMotionPolicy.title(title, simplified: settings.simplifyTitleEnabled)
     }
 
     var artistText: String {
@@ -831,6 +881,17 @@ final class AppViewModel: ObservableObject {
             + Int64(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
         if lyricsDurationMs > 0 {
             return max(0, min(lyricsDurationMs, adjusted))
+        }
+        return max(0, adjusted)
+    }
+
+    /// adjustedPositionMs without whole-millisecond rounding; equal to it while paused.
+    var adjustedContinuousPositionMs: Double {
+        let adjusted = nowContinuousPositionMs
+            + Double(spotifyDJLyricsOffsetMs)
+            + Double(globalOffsetMs + trackOffsetMs + bluetoothOffsetMs)
+        if lyricsDurationMs > 0 {
+            return max(0, min(Double(lyricsDurationMs), adjusted))
         }
         return max(0, adjusted)
     }
@@ -878,6 +939,51 @@ final class AppViewModel: ObservableObject {
         let loadingResult = LyricsResult.empty(lyricsLoadingText)
         baseLyricsResult = loadingResult
         lyricsResult = loadingResult
+    }
+
+    /// Plays DebugKaraokeFixture through the production clock and lyric renderers.
+    func applyDebugKaraokeFixture() {
+        let environment = ProcessInfo.processInfo.environment
+        let startMs = max(0, Int64(environment["IVLYRICS_DEBUG_FIXTURE_START_MS"] ?? "") ?? 0)
+        let playing = environment["IVLYRICS_DEBUG_FIXTURE_PAUSED"] != "1"
+        let fixture = DebugKaraokeFixture.make()
+        cancelLyricsLoadTask()
+        initialSetupPresented = false
+        lyricsLoadingProviderName = ""
+        var track = TrackSnapshot(
+            title: environment["IVLYRICS_DEBUG_FIXTURE_TITLE"] ?? DebugKaraokeFixture.title,
+            artist: DebugKaraokeFixture.artist,
+            album: "DEBUG",
+            packageName: "ios.debug-fixture",
+            durationMs: fixture.durationMs,
+            positionMs: startMs,
+            lastPositionUpdateUptime: ProcessInfo.processInfo.systemUptime,
+            playing: playing
+        )
+        if environment["IVLYRICS_DEBUG_FIXTURE_FROZEN"] == "1" {
+            // init clamps the speed to a positive value; a frozen "playing" track keeps its position.
+            track.playbackSpeed = 0
+        }
+        currentTrack = track
+        nowPositionMs = startMs
+        baseLyricsResult = fixture.result
+        lyricsResult = fixture.result
+        status = .loaded
+    }
+
+    /// Replaces the fixture track with a second one (same lyrics) to exercise track changes.
+    func debugAdvanceFixtureTrack() {
+        guard let track = currentTrack else { return }
+        currentTrack = TrackSnapshot(
+            title: track.title + " 2",
+            artist: track.artist,
+            album: track.album,
+            packageName: track.packageName,
+            durationMs: track.durationMs,
+            positionMs: track.positionNow(),
+            lastPositionUpdateUptime: ProcessInfo.processInfo.systemUptime,
+            playing: track.playing
+        )
     }
 #endif
 
@@ -940,6 +1046,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func resolveSpotifyMetadata(loadImmediately: Bool = true) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         let raw = inputSpotifyId
         let trackId = TrackSnapshot.extractSpotifyTrackId(raw)
         guard !trackId.isEmpty else {
@@ -1023,6 +1132,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func connectSpotifyUserAndStartPolling() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         let clientId = settings.spotifyClientId.trimmed
         guard requireSpotifyLiveClientId(logMessage: "spotify live: Spotify Client ID is required") else {
             return
@@ -1048,6 +1160,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func setSpotifyWebAPIEnabled(_ enabled: Bool) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard settings.spotifyWebAPIEnabled != enabled else { return }
         settings.spotifyWebAPIEnabled = enabled
         if enabled {
@@ -1087,6 +1202,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func startSpotifyLivePolling() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard settings.spotifyWebAPIEnabled else {
             appendLog("spotify live: Web API polling skipped because the feature is disabled")
             return
@@ -1113,6 +1231,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func resumeSpotifyLiveIfAuthorized() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
 #if targetEnvironment(simulator)
         let hasReusableAuthorization = settings.spotifyWebAPIEnabled
             && spotifyUserPlaybackService.connected
@@ -1273,6 +1394,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func disconnectSpotifyUser() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         stopSpotifyLivePolling()
         spotifyAppRemotePlaybackService.disconnectAndForget()
         spotifyUserPlaybackService.disconnect()
@@ -1312,6 +1436,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func startCreatorAccountLogin() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard !creatorPrivacyRequestInFlight, !creatorPrivacyLoginInProgress else { return }
         creatorPrivacyTask?.cancel()
         creatorPrivacyRequestInFlight = true
@@ -1355,6 +1482,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshCreatorPrivacy(announceFailure: Bool = true) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard !creatorPrivacyRequestInFlight else { return }
         guard creatorAccountClient.currentSession() != nil else {
             creatorAccountConnected = false
@@ -1390,6 +1520,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func setCreatorPrivacy(_ isPrivate: Bool) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard creatorPrivacyCanEdit else {
             if !creatorAccountConnected {
                 showSavedToast(settings.t("creator_privacy.login_required"))
@@ -1425,6 +1558,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func disconnectCreatorAccount() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard !creatorPrivacyRequestInFlight else { return }
         let previousState = creatorPrivacyState
         creatorPrivacyTask?.cancel()
@@ -1452,6 +1588,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshCloudSettings() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard prepareCloudSettingsOperation() else { return }
         cloudSettingsTask?.cancel()
         cloudSettingsStatusOverrideKey = ""
@@ -1475,6 +1614,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func uploadCloudSettings() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard prepareCloudSettingsOperation() else { return }
         cloudSettingsTask?.cancel()
         cloudSettingsStatusOverrideKey = ""
@@ -1505,6 +1647,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func applyCloudSettings() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard prepareCloudSettingsOperation() else { return }
         cloudSettingsTask?.cancel()
         cloudSettingsStatusOverrideKey = ""
@@ -1541,6 +1686,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func deleteCloudSettings() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard prepareCloudSettingsOperation() else { return }
         cloudSettingsTask?.cancel()
         cloudSettingsStatusOverrideKey = ""
@@ -1704,6 +1852,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func reloadLyrics(bypassCache: Bool) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         if currentTrack == nil {
             applyManualTrack(loadImmediately: false)
         }
@@ -1781,6 +1932,9 @@ final class AppViewModel: ObservableObject {
 #endif
 
     func showTmiForCurrentTrack(bypassCache: Bool = false) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         let snapshot = currentTrack ?? pendingManualTrackSnapshot()
         guard let snapshot, snapshot.hasUsableMetadata, !snapshot.isSpotifyDjSegment else {
             appendLog("ai tmi skipped: current track missing")
@@ -1969,6 +2123,10 @@ final class AppViewModel: ObservableObject {
         let playbackChanged = track.playing != targetPlaying
         guard playbackChanged || forceCommand else { return }
         let position = track.positionNow()
+#if DEBUG && os(iOS)
+        DebugFrameProbe.shared.recordEvent("playback", ["playing": targetPlaying, "positionMs": position,
+                                                       "changed": playbackChanged])
+#endif
         if spotifyAppRemotePlaybackService.connected || spotifyLivePolling {
             spotifyPlaybackInteractionGuard.registerPlayback(
                 trackKey: track.stableKey,
@@ -2033,6 +2191,9 @@ final class AppViewModel: ObservableObject {
     }
 
     private func seekPlayer(to position: Int64, track: inout TrackSnapshot) {
+#if DEBUG && os(iOS)
+        DebugFrameProbe.shared.recordEvent("seek", ["positionMs": position, "fromMs": track.positionNow()])
+#endif
         track = track.withPlayback(positionMs: position, playing: track.playing)
         currentTrack = track
         nowPositionMs = position
@@ -2154,7 +2315,12 @@ final class AppViewModel: ObservableObject {
     }
 
     func searchManualCandidates() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         manualTask?.cancel()
+        let requestID = UUID()
+        manualSearchRequestID = requestID
         let title = inputTitle.trimmed
         guard !title.isEmpty else {
             manualCandidates = []
@@ -2166,29 +2332,34 @@ final class AppViewModel: ObservableObject {
         manualCandidates = []
         manualLrclibStatus = settings.t("lyrics.lrclib_search.loading")
         let track = currentTrack
+        let trackKey = currentTrackKey
         let artist = inputArtist.trimmed
         manualTask = Task { [weak self] in
             guard let self else { return }
+            defer { if manualSearchRequestID == requestID { searchingManualCandidates = false } }
             do {
                 let candidates = try await lyricsRepository.searchManualLrclib(track: track, title: title, artist: artist)
-                if Task.isCancelled { return }
+                guard !Task.isCancelled, manualSearchRequestID == requestID, trackKey == currentTrackKey else { return }
                 manualCandidates = candidates
                 manualLrclibStatus = candidates.isEmpty
                     ? settings.t("lyrics.lrclib_search.no_results")
                     : settings.tf("lyrics.lrclib_search.result_count_format", candidates.count)
                 appendLog("manual LRCLIB search: candidates=\(candidates.count)")
             } catch {
+                guard !Task.isCancelled, manualSearchRequestID == requestID, trackKey == currentTrackKey else { return }
                 let detail = error.localizedDescription.trimmed.isEmpty ? "unknown error" : error.localizedDescription.trimmed
                 manualCandidates = []
                 manualLrclibStatus = settings.tf("lyrics.lrclib_search.error_format", detail)
                 showSavedToast(manualLrclibStatus)
                 appendLog("manual LRCLIB search failed: \(detail)")
             }
-            searchingManualCandidates = false
         }
     }
 
     func applyManualCandidate(_ candidate: ManualLrclibCandidate) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard let track = currentTrack else { return }
         let previousBase = baseLyricsResult
         let previousResult = lyricsResult
@@ -2260,6 +2431,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func clearCachesForCurrentTrack() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard let track = currentTrack else {
             showSavedToast(settings.t("toast.current_track_missing"))
             return
@@ -2282,6 +2456,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func clearAllCaches() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         culturalAnnotationTask?.cancel()
         culturalAnnotations = []
         culturalAnnotationsLoading = false
@@ -2298,6 +2475,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func clearAiCaches() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         culturalAnnotationTask?.cancel()
         culturalAnnotations = []
         culturalAnnotationsLoading = false
@@ -2313,6 +2493,9 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var aiConnectionTesting = false
 
     func testAIConnection() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard !aiConnectionTesting else { return }
         let tested = settings.snapshot
         guard tested.hasApiKey, tested.provider.translationOnly || !tested.model.trimmed.isEmpty else {
@@ -2377,6 +2560,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func metadataTranslationSettingChanged(enabled: Bool) {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { return }
+#endif
         metadataTranslationTask?.cancel()
         metadataTranslationTask = nil
         metadataTranslationLoading = false
@@ -2400,6 +2586,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func regenerateCulturalAnnotations() {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { debugSettingsUIActionCount += 1; return }
+#endif
         culturalAnnotationTask?.cancel()
         culturalAnnotationRequestKey = ""
         culturalAnnotations = []
@@ -2421,6 +2610,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func japaneseFuriganaSettingChanged(enabled: Bool) {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { return }
+#endif
         furiganaRefreshTask?.cancel()
         furiganaRefreshTask = nil
         guard enabled else {
@@ -2524,6 +2716,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func validateSpotifyApiCredentials(reloadOnChange: Bool = true, startLiveAfterSuccess: Bool = false) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard !spotifyCredentialsValidationInFlight else {
             appendLog("spotify api validation: already in flight")
             return
@@ -2601,6 +2796,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func checkForUpdates(manual: Bool) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         if updateCheckInFlight {
             if manual {
                 appendLog("update check: already in flight")
@@ -2650,6 +2848,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func openUpdateReleasePage(_ info: AppUpdateInfo? = nil) {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         let urlString = IvLyricsUtilities.firstNonEmpty(
             info?.releaseURL,
             pendingUpdateInfo?.releaseURL,
@@ -2711,6 +2912,33 @@ final class AppViewModel: ObservableObject {
         }
 #else
         inAppBrowserURL = webURL
+#endif
+    }
+
+    func handleTitleTap() {
+        switch AppearancePolicy.titleAction(settings.titleTapAction) {
+        case "disabled": return
+        case "album": openSpotifyDestination(currentTrack?.albumURI ?? "")
+        case "context": openSpotifyDestination(currentTrack?.playbackContextURI ?? "")
+        default: openSpotifyForCurrentTrack()
+        }
+    }
+
+    private func openSpotifyDestination(_ uri: String) {
+        guard let destination = AppearancePolicy.spotifyDestination(uri) else {
+            showSavedToast(settings.t("toast.spotify_open_failed"))
+            return
+        }
+#if os(iOS)
+        UIApplication.shared.open(destination.app, options: [:]) { [weak self] opened in
+            guard !opened else { return }
+            UIApplication.shared.open(destination.web, options: [:]) { webOpened in
+                guard !webOpened else { return }
+                Task { @MainActor in self?.showSavedToast(self?.settings.t("toast.spotify_open_failed") ?? "") }
+            }
+        }
+#else
+        inAppBrowserURL = destination.web
 #endif
     }
 
@@ -2797,6 +3025,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func startPollinationsLogin() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         guard !pollinationsAuthInFlight else { return }
         pollinationsAuthTask?.cancel()
         pollinationsAuthInFlight = true
@@ -2835,6 +3066,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func openPollinationsLoginPage() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         let url = pollinationsAuthVerificationURL ?? URL(string: PollinationsAuthClient.authBaseURL)
         guard let url else { return }
 #if os(iOS)
@@ -2845,6 +3079,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func disconnectPollinationsLogin() {
+#if DEBUG
+        if debugSettingsUIConsumesAction() { return }
+#endif
         pollinationsAuthTask?.cancel()
         pollinationsAuthTask = nil
         pollinationsAuthInFlight = false
@@ -2884,6 +3121,16 @@ final class AppViewModel: ObservableObject {
     }
 
     func selectTrackVideo(_ info: YouTubeVideoInfo?, trackKey: String) async {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled {
+            guard currentTrackKey == trackKey else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            youtubeInfo = info
+            debugSettingsUIActionCount += 1
+            return
+        }
+#endif
         await youtubeRepository.selectVideo(info, trackKey: trackKey)
         guard currentTrackKey == trackKey else { return }
         youTubeSelectionRevision = UUID()
@@ -2894,6 +3141,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func communityVideosForCurrentTrack() async throws -> [YouTubeVideoInfo] {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { return [] }
+#endif
         guard let track = currentTrack else { return [] }
         return try await youtubeRepository.communityVideos(track: track, lyricsResult: lyricsResult)
     }
@@ -3193,7 +3443,8 @@ final class AppViewModel: ObservableObject {
 
     private func applySpotifyPlayback(_ playback: SpotifyPlaybackSnapshot, loadLyricsIfNeeded: Bool) {
 #if DEBUG
-        if ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_LYRICS_LOADING"] == "1" {
+        if ProcessInfo.processInfo.environment["IVLYRICS_DEBUG_LYRICS_LOADING"] == "1"
+            || DebugKaraokeFixture.isEnabled {
             return
         }
 #endif
@@ -3412,6 +3663,9 @@ final class AppViewModel: ObservableObject {
         bypassSupplementCache: Bool = true,
         refreshMetadataTranslation: Bool = true
     ) {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { debugSettingsUIActionCount += 1; return }
+#endif
         appendLog(settings.t(statusKey))
         guard let track = currentTrack, !baseLyricsResult.lines.isEmpty else {
             appendLog(settings.t("status.no_lyrics_to_apply"))
@@ -4274,8 +4528,8 @@ final class AppViewModel: ObservableObject {
     private func startClock() {
         #if os(iOS)
         displayClock?.invalidate()
-        displayClock = DisplayRefreshClock { [weak self] in
-            MainActor.assumeIsolated { self?.refreshPlaybackClock() }
+        displayClock = DisplayRefreshClock { [weak self] frameUptime in
+            MainActor.assumeIsolated { self?.refreshPlaybackClock(frameUptime: frameUptime) }
         }
         updatePlaybackClockMode()
         #else
@@ -4298,8 +4552,15 @@ final class AppViewModel: ObservableObject {
         #endif
     }
 
-    private func refreshPlaybackClock() {
-        let uptime = ProcessInfo.processInfo.systemUptime
+    /// frameUptime is the vsync time of the display frame being prepared (CADisplayLink.timestamp);
+    /// without it (background PiP timer, other platforms) the clock is sampled when called.
+    private func refreshPlaybackClock(frameUptime: TimeInterval? = nil) {
+#if DEBUG && os(iOS)
+        // Before frame timestamps, the clock sampled systemUptime here; the probe compares both.
+        let debugCallbackUptime = ProcessInfo.processInfo.systemUptime
+#endif
+        let uptime = frameUptime ?? ProcessInfo.processInfo.systemUptime
+        playbackFrameUptime = uptime
         let position = currentTrack?.positionNow(uptime: uptime) ?? 0
         if let track = currentTrack {
             updateSpotifyDJLyricsTimeline(
@@ -4308,7 +4569,22 @@ final class AppViewModel: ObservableObject {
                 spotifyContextKnown: currentSpotifyContextKnown, uptime: uptime
             )
         }
-        if position != nowPositionMs { nowPositionMs = position }
+        nowContinuousPositionMs = currentTrack?.continuousPositionMs(uptime: uptime) ?? 0
+#if DEBUG && os(iOS)
+        if DebugFrameProbe.shared.recording, frameUptime != nil, let track = currentTrack {
+            DebugFrameProbe.shared.recordClock(
+                callbackUptime: debugCallbackUptime,
+                frameUptime: uptime,
+                painted: nowContinuousPositionMs,
+                callbackSampled: Double(track.positionNow(uptime: debugCallbackUptime))
+            )
+        }
+#endif
+        if position != nowPositionMs {
+            nowPositionMs = position
+        } else if uptime < lyricsFrameUpdatesUntilUptime {
+            playbackClock.objectWillChange.send()
+        }
         // PiP renders at its own cadence. Avoid rebuilding settings and the inactive
         // priming frame for every foreground glyph update, including 120Hz displays.
         let pipInterval = pictureInPictureController.isEngaged ? 1.0 / 30.0 : 1.0

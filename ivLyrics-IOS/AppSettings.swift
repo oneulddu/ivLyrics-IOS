@@ -83,6 +83,9 @@ final class AppSettings: ObservableObject {
         "vinyl_tonearm_style", "vinyl_tonearm_finish", "vinyl_tonearm_size_percent", "background_mode",
         "background_brightness", "background_blur", "background_noise", "background_reduce_motion",
         "background_solid_color", "background_video_scale", "lyrics_provider_order_v1",
+        "background_video_fallback", "background_video_aspect", "background_video_edge_to_edge",
+        "title_tap_action", "landscape_original_lyrics", "landscape_artwork", "lyrics_not_found_notice",
+        "vinyl_track_change_animations", "vinyl_rotation_speed_percent", "simplify_title",
         "lyrics_provider_enabled_v1", "lyrics_provider_types_v1", "lyrics_prefer_sync_data_provider",
         "lyrics_prefer_type_over_provider", "lyrics_multi_prefer_sync_data_provider",
         "lyrics_multi_prefer_type_over_provider", "typography_settings_v1", "speaker_color_settings_v1",
@@ -144,6 +147,17 @@ final class AppSettings: ObservableObject {
         Provider(id: "paxsenix", label: "paxsenix", description: "OpenAI 호환 API 서버", defaultBaseUrl: PaxsenixAIProvider.baseURL, defaultModel: "", apiKeyURL: PaxsenixAIProvider.dashboardURL),
         Provider(id: "deepl", label: "DeepL", description: "DeepL API Free / Pro", defaultBaseUrl: "", defaultModel: "", apiKeyURL: "https://www.deepl.com/your-account/keys")
     ]
+    /// On-device translation. Appended last so existing users keep their provider order.
+    static let localAIProvider = Provider(
+        id: LocalAI.providerId,
+        label: LocalAI.label,
+        description: "",
+        defaultBaseUrl: "",
+        defaultModel: "",
+        apiKeyURL: "",
+        defaultEnabled: false,
+        isLocal: true
+    )
     static let allAIProviders: [Provider] = [
         Provider(
             id: KeylessTranslationProviders.bingId,
@@ -165,7 +179,7 @@ final class AppSettings: ObservableObject {
             isKeyless: true,
             defaultEnabled: true
         )
-    ] + providers
+    ] + providers + [localAIProvider]
     static let defaultAIProviderOrder = allAIProviders.map(\.id)
 
     static let languages: [Language] = [
@@ -281,6 +295,10 @@ final class AppSettings: ObservableObject {
     @Published var keepScreenOn: Bool { didSet { set("keep_screen_on", keepScreenOn) } }
     @Published var landscapeAutoHideControls: Bool { didSet { set("landscape_auto_hide_controls", landscapeAutoHideControls) } }
     @Published var landscapeCenterNoLyrics: Bool { didSet { set("landscape_center_no_lyrics", landscapeCenterNoLyrics) } }
+    @Published var titleTapAction: String { didSet { set("title_tap_action", AppearancePolicy.titleAction(titleTapAction)) } }
+    @Published var landscapeOriginalLyricsEnabled: Bool { didSet { set("landscape_original_lyrics", landscapeOriginalLyricsEnabled) } }
+    @Published var landscapeArtworkEnabled: Bool { didSet { set("landscape_artwork", landscapeArtworkEnabled) } }
+    @Published var lyricsNotFoundNoticeEnabled: Bool { didSet { set("lyrics_not_found_notice", lyricsNotFoundNoticeEnabled) } }
     @Published var pipShowArtwork: Bool { didSet { set("pip_show_artwork", pipShowArtwork) } }
     @Published var pipOrientation: String { didSet { set("pip_orientation", Self.normalizePipOrientation(pipOrientation)) } }
     @Published var pipBackgroundMode: String { didSet { set("pip_background_mode", Self.normalizePipBackgroundMode(pipBackgroundMode)) } }
@@ -290,6 +308,9 @@ final class AppSettings: ObservableObject {
     @Published var vinylAlbumSizePercent: Int { didSet { set("vinyl_album_size_percent", Self.clampVinylSizePercent(vinylAlbumSizePercent)) } }
     @Published var vinylRecordSizePercent: Int { didSet { set("vinyl_record_size_percent", Self.clampVinylSizePercent(vinylRecordSizePercent)) } }
     @Published var vinylAnimationsEnabled: Bool { didSet { set("vinyl_animations_enabled", vinylAnimationsEnabled) } }
+    @Published var vinylTrackChangeAnimationsEnabled: Bool { didSet { set("vinyl_track_change_animations", vinylTrackChangeAnimationsEnabled) } }
+    @Published var vinylRotationSpeedPercent: Int { didSet { set("vinyl_rotation_speed_percent", VinylMotionPolicy.speedPercent(vinylRotationSpeedPercent)) } }
+    @Published var simplifyTitleEnabled: Bool { didSet { set("simplify_title", simplifyTitleEnabled) } }
     @Published var vinylCenterRotationEnabled: Bool { didSet { set("vinyl_center_rotation_enabled", vinylCenterRotationEnabled) } }
     @Published var vinylLyricsEnabled: Bool { didSet { set("vinyl_lyrics_enabled", vinylLyricsEnabled) } }
     @Published var vinylTonearmStyle: String { didSet { set("vinyl_tonearm_style", Self.normalizeVinylTonearmStyle(vinylTonearmStyle)) } }
@@ -302,6 +323,9 @@ final class AppSettings: ObservableObject {
     @Published var backgroundReduceMotionEnabled: Bool { didSet { set("background_reduce_motion", backgroundReduceMotionEnabled); bumpBackgroundRevisionIfNeeded() } }
     @Published var backgroundSolidColor: String { didSet { set("background_solid_color", Self.normalizeHexColor(backgroundSolidColor, fallback: "#1e3a8a")); bumpBackgroundRevisionIfNeeded() } }
     @Published var backgroundVideoScale: Int { didSet { set("background_video_scale", Self.clampBackgroundVideoScale(backgroundVideoScale)); bumpBackgroundRevisionIfNeeded() } }
+    @Published var backgroundVideoFallback: String { didSet { set("background_video_fallback", Self.normalizeVideoFallback(backgroundVideoFallback)); bumpBackgroundRevisionIfNeeded() } }
+    @Published var backgroundVideoAspect: String { didSet { set("background_video_aspect", AppearancePolicy.videoAspect(backgroundVideoAspect)); bumpBackgroundRevisionIfNeeded() } }
+    @Published var backgroundVideoEdgeToEdge: Bool { didSet { set("background_video_edge_to_edge", backgroundVideoEdgeToEdge); bumpBackgroundRevisionIfNeeded() } }
     @Published var spotifyClientId: String { didSet { set("spotify_client_id", spotifyClientId) } }
     @Published var spotifyClientSecret: String { didSet { setSecure("spotify_client_secret", spotifyClientSecret) } }
     @Published var spotifyWebAPIEnabled: Bool { didSet { set("spotify_web_api_enabled", spotifyWebAPIEnabled) } }
@@ -353,6 +377,10 @@ final class AppSettings: ObservableObject {
     @Published private(set) var aiProviderOrder: [String] { didSet { saveAIProviderSettingsIfNeeded() } }
     @Published private(set) var aiProviderEnabled: [String: Bool] { didSet { saveAIProviderSettingsIfNeeded() } }
     @Published private(set) var aiProviderProfiles: [String: AIProviderProfile] { didSet { saveAIProviderSettingsIfNeeded() } }
+    /// Local AI settings stay on this device: the model files and memory they describe are local.
+    @Published var localAITier: String { didSet { set("local_ai_tier_v1", LocalAI.Tier.stored(localAITier).rawValue) } }
+    @Published var localAIProcessor: String { didSet { set("local_ai_processor_v1", LocalAI.Processor.stored(localAIProcessor).rawValue) } }
+    @Published var localAIIdleMinutes: Int { didSet { set("local_ai_idle_minutes_v1", LocalAI.normalizedIdleMinutes(localAIIdleMinutes)) } }
     @Published private(set) var languageRulesRevision = 0
     @Published private(set) var backgroundSettingsRevision = 0
     @Published private(set) var typographyRevision = 0
@@ -428,6 +456,10 @@ final class AppSettings: ObservableObject {
         keepScreenOn = defaults.object(forKey: "keep_screen_on") as? Bool ?? false
         landscapeAutoHideControls = defaults.object(forKey: "landscape_auto_hide_controls") as? Bool ?? true
         landscapeCenterNoLyrics = defaults.object(forKey: "landscape_center_no_lyrics") as? Bool ?? true
+        titleTapAction = AppearancePolicy.titleAction(defaults.string(forKey: "title_tap_action"))
+        landscapeOriginalLyricsEnabled = defaults.object(forKey: "landscape_original_lyrics") as? Bool ?? true
+        landscapeArtworkEnabled = defaults.object(forKey: "landscape_artwork") as? Bool ?? true
+        lyricsNotFoundNoticeEnabled = defaults.object(forKey: "lyrics_not_found_notice") as? Bool ?? true
         pipShowArtwork = defaults.object(forKey: "pip_show_artwork") as? Bool ?? true
         pipOrientation = Self.normalizePipOrientation(defaults.string(forKey: "pip_orientation") ?? Self.pipOrientationSquare)
         pipBackgroundMode = Self.normalizePipBackgroundMode(defaults.string(forKey: "pip_background_mode") ?? Self.pipBackgroundCover)
@@ -437,6 +469,9 @@ final class AppSettings: ObservableObject {
         vinylAlbumSizePercent = Self.clampVinylSizePercent(defaults.object(forKey: "vinyl_album_size_percent") as? Int ?? 100)
         vinylRecordSizePercent = Self.clampVinylSizePercent(defaults.object(forKey: "vinyl_record_size_percent") as? Int ?? 100)
         vinylAnimationsEnabled = defaults.object(forKey: "vinyl_animations_enabled") as? Bool ?? true
+        vinylTrackChangeAnimationsEnabled = defaults.object(forKey: "vinyl_track_change_animations") as? Bool ?? true
+        vinylRotationSpeedPercent = VinylMotionPolicy.speedPercent(defaults.object(forKey: "vinyl_rotation_speed_percent") as? Int ?? 100)
+        simplifyTitleEnabled = defaults.object(forKey: "simplify_title") as? Bool ?? false
         vinylCenterRotationEnabled = defaults.object(forKey: "vinyl_center_rotation_enabled") as? Bool ?? true
         vinylLyricsEnabled = defaults.object(forKey: "vinyl_lyrics_enabled") as? Bool ?? true
         vinylTonearmStyle = Self.normalizeVinylTonearmStyle(defaults.string(forKey: "vinyl_tonearm_style") ?? Self.vinylTonearmStyleS)
@@ -449,6 +484,9 @@ final class AppSettings: ObservableObject {
         backgroundReduceMotionEnabled = defaults.object(forKey: "background_reduce_motion") as? Bool ?? false
         backgroundSolidColor = Self.normalizeHexColor(defaults.string(forKey: "background_solid_color") ?? "#1e3a8a", fallback: "#1e3a8a")
         backgroundVideoScale = Self.clampBackgroundVideoScale(defaults.object(forKey: "background_video_scale") as? Int ?? 100)
+        backgroundVideoFallback = Self.normalizeVideoFallback(defaults.string(forKey: "background_video_fallback"))
+        backgroundVideoAspect = AppearancePolicy.videoAspect(defaults.string(forKey: "background_video_aspect"))
+        backgroundVideoEdgeToEdge = defaults.object(forKey: "background_video_edge_to_edge") as? Bool ?? true
         spotifyClientId = defaults.string(forKey: "spotify_client_id") ?? ""
         spotifyClientSecret = SecureStringStore.shared.migratedString(
             forKey: "spotify_client_secret",
@@ -498,6 +536,9 @@ final class AppSettings: ObservableObject {
         aiProviderOrder = Self.loadAIProviderOrder(defaults: defaults)
         aiProviderEnabled = loadedAIProviderEnabled
         aiProviderProfiles = loadedAIProviderProfiles
+        localAITier = LocalAI.Tier.stored(defaults.string(forKey: "local_ai_tier_v1")).rawValue
+        localAIProcessor = LocalAI.Processor.stored(defaults.string(forKey: "local_ai_processor_v1")).rawValue
+        localAIIdleMinutes = LocalAI.normalizedIdleMinutes(defaults.object(forKey: "local_ai_idle_minutes_v1") as? Int)
         isBootstrapping = false
         snapshotInvalidationCancellable = objectWillChange.sink { [weak self] _ in
             self?.cachedSnapshot = nil
@@ -569,6 +610,10 @@ final class AppSettings: ObservableObject {
         keepScreenOn = loaded.keepScreenOn
         landscapeAutoHideControls = loaded.landscapeAutoHideControls
         landscapeCenterNoLyrics = loaded.landscapeCenterNoLyrics
+        titleTapAction = loaded.titleTapAction
+        landscapeOriginalLyricsEnabled = loaded.landscapeOriginalLyricsEnabled
+        landscapeArtworkEnabled = loaded.landscapeArtworkEnabled
+        lyricsNotFoundNoticeEnabled = loaded.lyricsNotFoundNoticeEnabled
         pipShowArtwork = loaded.pipShowArtwork
         pipOrientation = loaded.pipOrientation
         pipBackgroundMode = loaded.pipBackgroundMode
@@ -578,6 +623,9 @@ final class AppSettings: ObservableObject {
         vinylAlbumSizePercent = loaded.vinylAlbumSizePercent
         vinylRecordSizePercent = loaded.vinylRecordSizePercent
         vinylAnimationsEnabled = loaded.vinylAnimationsEnabled
+        vinylTrackChangeAnimationsEnabled = loaded.vinylTrackChangeAnimationsEnabled
+        vinylRotationSpeedPercent = loaded.vinylRotationSpeedPercent
+        simplifyTitleEnabled = loaded.simplifyTitleEnabled
         vinylCenterRotationEnabled = loaded.vinylCenterRotationEnabled
         vinylLyricsEnabled = loaded.vinylLyricsEnabled
         vinylTonearmStyle = loaded.vinylTonearmStyle
@@ -597,6 +645,9 @@ final class AppSettings: ObservableObject {
         standardPreferLyricsTypeOverProviderOrder = loaded.standardPreferLyricsTypeOverProviderOrder
         multiPreferSyncDataProvider = loaded.multiPreferSyncDataProvider
         multiPreferLyricsTypeOverProviderOrder = loaded.multiPreferLyricsTypeOverProviderOrder
+        backgroundVideoFallback = loaded.backgroundVideoFallback
+        backgroundVideoAspect = loaded.backgroundVideoAspect
+        backgroundVideoEdgeToEdge = loaded.backgroundVideoEdgeToEdge
         isSwitchingAIProviderProfile = false
         cachedTypographySettings = nil
         cachedSpeakerColorSettings = nil
@@ -718,7 +769,10 @@ final class AppSettings: ObservableObject {
             standardLyricsProviderTypes: standardLyricsProviderTypes,
             standardPreferSyncDataProvider: standardPreferSyncDataProvider,
             standardPreferLyricsTypeOverProviderOrder: standardPreferLyricsTypeOverProviderOrder,
-            standardLyricsProviderRemoteGlobalDisable: lyricsProviderRemoteGlobalDisable
+            standardLyricsProviderRemoteGlobalDisable: lyricsProviderRemoteGlobalDisable,
+            localAITier: LocalAI.Tier.stored(localAITier).rawValue,
+            localAIProcessor: LocalAI.Processor.stored(localAIProcessor).rawValue,
+            localAIIdleMinutes: LocalAI.normalizedIdleMinutes(localAIIdleMinutes)
         )
         cachedSnapshot = snapshot
         return snapshot
@@ -1113,7 +1167,10 @@ final class AppSettings: ObservableObject {
             noise: backgroundNoiseEnabled,
             reduceMotion: backgroundReduceMotionEnabled,
             solidColor: backgroundSolidColor,
-            videoScale: backgroundVideoScale
+            videoScale: backgroundVideoScale,
+            videoFallback: backgroundVideoFallback,
+            videoAspect: backgroundVideoAspect,
+            videoEdgeToEdge: backgroundVideoEdgeToEdge
         )
     }
 
@@ -1800,6 +1857,10 @@ final class AppSettings: ObservableObject {
         return backgroundGradient
     }
 
+    static func normalizeVideoFallback(_ mode: String?) -> String {
+        [backgroundGradient, backgroundBlurGradient, backgroundSolid].contains(mode ?? "") ? mode! : backgroundBlurGradient
+    }
+
     static func normalizeLyricsAlignment(_ alignment: String?) -> String {
         let value = (alignment ?? "").trimmed.lowercased()
         if value == "center" || value == "right" {
@@ -2055,7 +2116,10 @@ final class AppSettings: ObservableObject {
             noise: settings.noise,
             reduceMotion: settings.reduceMotion,
             solidColor: settings.solidColor,
-            videoScale: settings.videoScale
+            videoScale: settings.videoScale,
+            videoFallback: settings.videoFallback,
+            videoAspect: settings.videoAspect,
+            videoEdgeToEdge: settings.videoEdgeToEdge
         )
         return [
             "mode": safe.mode,
@@ -2064,7 +2128,10 @@ final class AppSettings: ObservableObject {
             "noise": safe.noise,
             "reduceMotion": safe.reduceMotion,
             "solidColor": safe.solidColor,
-            "videoScale": safe.videoScale
+            "videoScale": safe.videoScale,
+            "videoFallback": safe.videoFallback,
+            "videoAspect": safe.videoAspect,
+            "videoEdgeToEdge": safe.videoEdgeToEdge
         ]
     }
 
@@ -2076,7 +2143,10 @@ final class AppSettings: ObservableObject {
             noise: object["noise"] as? Bool ?? fallback.noise,
             reduceMotion: object["reduceMotion"] as? Bool ?? fallback.reduceMotion,
             solidColor: object["solidColor"] as? String ?? fallback.solidColor,
-            videoScale: object["videoScale"] as? Int ?? fallback.videoScale
+            videoScale: object["videoScale"] as? Int ?? fallback.videoScale,
+            videoFallback: object["videoFallback"] as? String ?? fallback.videoFallback,
+            videoAspect: object["videoAspect"] as? String ?? fallback.videoAspect,
+            videoEdgeToEdge: object["videoEdgeToEdge"] as? Bool ?? fallback.videoEdgeToEdge
         )
     }
 
@@ -2153,6 +2223,9 @@ final class AppSettings: ObservableObject {
         var standardPreferSyncDataProvider: Bool
         var standardPreferLyricsTypeOverProviderOrder: Bool
         var standardLyricsProviderRemoteGlobalDisable: Bool
+        var localAITier: String
+        var localAIProcessor: String
+        var localAIIdleMinutes: Int
 
         var hasApiKey: Bool {
             if provider.id == "pollinations", !pollinationsAccessToken.trimmed.isEmpty {
@@ -2202,6 +2275,8 @@ final class AppSettings: ObservableObject {
         var hasAnyTranslationProvider: Bool {
             hasKeylessTranslationProvider || hasReadyAIProvider
                 || (isAIProviderEnabled("deepl") && selectingAIProvider("deepl")?.hasApiKey == true)
+                // Without the model it fails at once and the next provider translates.
+                || isAIProviderEnabled(LocalAI.providerId)
         }
 
         func selectingAIProvider(_ providerId: String) -> Snapshot? {
@@ -2378,6 +2453,13 @@ final class AppSettings: ObservableObject {
         var cacheKey: String {
             var key = "\(provider.id)|output=\(outputLang)|resolvedOutput=\(pronunciationLanguage)|pronunciationNotation=\(pronunciationNotation)|translationTarget=\(defaultRule.targetLang)|bingTranslate=\(bingTranslateEnabled)|googleTranslate=\(googleTranslateEnabled)|default=\(defaultRule.cacheKey)|furigana=\(japaneseFuriganaEnabled)|model=\(model)|url=\(baseUrl)|tok=\(maxTokens)|temp=\(temperature)"
             for providerId in AppSettings.normalizedAIProviderOrder(aiProviderOrder) {
+                if providerId == LocalAI.providerId {
+                    // Disabled Local AI leaves the keys of existing caches unchanged.
+                    if isAIProviderEnabled(providerId) {
+                        key += "|provider=\(providerId):enabled=true:tier=\(LocalAI.Tier.stored(localAITier).rawValue)"
+                    }
+                    continue
+                }
                 key += "|provider=\(providerId):enabled=\(isAIProviderEnabled(providerId))"
                 if let profile = aiProviderProfiles[providerId] {
                     key += ":model=\(profile.model):url=\(profile.baseUrl):tok=\(profile.maxTokens):temp=\(profile.temperature)"
@@ -2392,6 +2474,14 @@ final class AppSettings: ObservableObject {
                 key += "|rule=\(rule.cacheKey)"
             }
             return key
+        }
+
+        var localAIConfiguration: LocalAI.Configuration {
+            LocalAI.Configuration(
+                tier: LocalAI.Tier.stored(localAITier),
+                processor: LocalAI.Processor.stored(localAIProcessor),
+                idleMinutes: LocalAI.normalizedIdleMinutes(localAIIdleMinutes)
+            )
         }
     }
 
@@ -2464,8 +2554,12 @@ final class AppSettings: ObservableObject {
         var reduceMotion: Bool
         var solidColor: String
         var videoScale: Int
+        var videoFallback: String
+        var videoAspect: String
+        var videoEdgeToEdge: Bool
 
-        init(mode: String, brightness: Int, blur: Int, noise: Bool, reduceMotion: Bool, solidColor: String, videoScale: Int) {
+        init(mode: String, brightness: Int, blur: Int, noise: Bool, reduceMotion: Bool, solidColor: String, videoScale: Int,
+             videoFallback: String = AppSettings.backgroundBlurGradient, videoAspect: String = "fill", videoEdgeToEdge: Bool = true) {
             self.mode = AppSettings.normalizeBackgroundMode(mode)
             self.brightness = min(100, max(0, brightness))
             self.blur = min(100, max(0, blur))
@@ -2473,6 +2567,9 @@ final class AppSettings: ObservableObject {
             self.reduceMotion = reduceMotion
             self.solidColor = AppSettings.normalizeHexColor(solidColor, fallback: "#1e3a8a")
             self.videoScale = AppSettings.clampBackgroundVideoScale(videoScale)
+            self.videoFallback = AppSettings.normalizeVideoFallback(videoFallback)
+            self.videoAspect = AppearancePolicy.videoAspect(videoAspect)
+            self.videoEdgeToEdge = videoEdgeToEdge
         }
     }
 
@@ -2583,9 +2680,11 @@ final class AppSettings: ObservableObject {
         var defaultBaseUrl: String
         var defaultModel: String
         var apiKeyURL: String
-        var translationOnly: Bool { isKeyless || id == "deepl" }
+        var translationOnly: Bool { isKeyless || isLocal || id == "deepl" }
         var isKeyless: Bool = false
         var defaultEnabled: Bool = false
+        /// Runs on this device (Local AI): no key, translation only.
+        var isLocal: Bool = false
     }
 
     struct AIProviderProfile: Codable, Hashable, Sendable {

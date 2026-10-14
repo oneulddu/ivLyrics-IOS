@@ -10,10 +10,51 @@ private struct LyricsSegmentationLocaleKey: EnvironmentKey {
     static let defaultValue = "auto"
 }
 
+private struct CoveredPageDecorationsPausedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private struct PlaybackAdvancingKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private struct OriginalLyricsVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+private struct InterludeMotionEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
 extension EnvironmentValues {
+    var interludeMotionEnabled: Bool {
+        get { self[InterludeMotionEnabledKey.self] }
+        set { self[InterludeMotionEnabledKey.self] = newValue }
+    }
+    var originalLyricsVisible: Bool {
+        get { self[OriginalLyricsVisibleKey.self] }
+        set { self[OriginalLyricsVisibleKey.self] = newValue }
+    }
     var lyricsSegmentationLocale: String {
         get { self[LyricsSegmentationLocaleKey.self] }
         set { self[LyricsSegmentationLocaleKey.self] = newValue }
+    }
+
+    /// True while the portrait main page sits fully covered by the lyrics page or vinyl mode.
+    /// Its time-driven decorations stop ticking; they draw the current time again in the update
+    /// that starts uncovering the page.
+    var coveredPageDecorationsPaused: Bool {
+        get { self[CoveredPageDecorationsPausedKey.self] }
+        set { self[CoveredPageDecorationsPausedKey.self] = newValue }
+    }
+
+    /// True while playback runs, when the playback clock already updates the visible page on every
+    /// display frame and time-driven decorations can follow the display at little extra cost. While
+    /// playback is paused a decoration tick is the page's only update and re-runs the whole page, so
+    /// those decorations keep their previous cadence there.
+    var playbackAdvancing: Bool {
+        get { self[PlaybackAdvancingKey.self] }
+        set { self[PlaybackAdvancingKey.self] = newValue }
     }
 }
 
@@ -29,6 +70,8 @@ private struct AndroidSlidingMetadataText: View {
     let baseSize: CGFloat
     let color: Color
 
+    @Environment(\.coveredPageDecorationsPaused) private var coveredPageDecorationsPaused
+    @Environment(\.playbackAdvancing) private var playbackAdvancing
     @State private var animationStart = Date()
 
     var body: some View {
@@ -40,7 +83,15 @@ private struct AndroidSlidingMetadataText: View {
             let availableWidth = max(0, proxy.size.width)
             let overflowing = textWidth > availableWidth + 0.5
 
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !overflowing)) { timeline in
+            // Display rate while playback runs (the page already updates every frame); the previous
+            // 1/30 s cadence while it is paused, when each tick would be the page's only update.
+            TimelineView(.animation(
+                minimumInterval: playbackAdvancing ? nil : 1.0 / 30.0,
+                paused: !overflowing || coveredPageDecorationsPaused
+            )) { timeline in
+#if DEBUG && os(iOS)
+                let _ = debugProbeTimeline(.marqueeTick, timeline.date)
+#endif
                 Text(text)
                     .font(typography.font(slotId: slotId, baseSize: baseSize))
                     .foregroundStyle(color)
@@ -140,15 +191,29 @@ private struct AndroidSlidingMetadataText: View {
 
 @main
 struct IvLyricsIOSApp: App {
-    @StateObject private var settings = AppSettings.shared
-    @StateObject private var viewModel = AppViewModel(settings: .shared)
-
     init() {
         IvLyricsFontLoader.registerPretendard()
     }
 
     var body: some Scene {
         WindowGroup {
+#if DEBUG
+            if DebugSettingsUIHarness.enabled { DebugSettingsUIRoot() }
+            else { ProductionAppRoot() }
+#else
+            ProductionAppRoot()
+#endif
+        }
+    }
+}
+
+private struct ProductionAppRoot: View {
+    @StateObject private var settings = AppSettings.shared
+    @StateObject private var viewModel = AppViewModel(settings: .shared)
+
+    init() { LocalAIController.shared.start() }
+
+    var body: some View {
             ContentView()
                 .environmentObject(settings)
                 .environmentObject(viewModel)
@@ -156,12 +221,15 @@ struct IvLyricsIOSApp: App {
                 .onOpenURL { url in
                     viewModel.handleOpenURL(url)
                 }
-        }
     }
 }
 
 struct ContentView: View {
     private static let lyricsMetaTipShownKey = "lyrics_meta_menu_tip_shown"
+    /// Never advances. The covered main page observes it instead of the live clock.
+    private static let coveredPagePlaybackClock = PlaybackClock()
+    /// Longer than the covering transitions (lyrics page 0.33s, vinyl 0.36-0.42s).
+    private static let coveredPageFreezeDelay: TimeInterval = 0.6
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
@@ -180,6 +248,8 @@ struct ContentView: View {
     @State private var lyricsMetaTipToken = UUID()
     @State private var inAppBrowserDragOffset: CGFloat = 0
     @State private var vinylModeVisible = false
+    @State private var mainPageFrozen = false
+    @State private var mainPageCoverToken = UUID()
 
     var body: some View {
         GeometryReader { geometry in
@@ -190,6 +260,7 @@ struct ContentView: View {
                 safeAreaInsets: geometry.safeAreaInsets
             )
             .environment(\.lyricsSegmentationLocale, model.effectiveSelectedRuleSourceLang)
+            .environment(\.playbackAdvancing, model.currentTrack?.playing == true)
             .statusBarHidden(isLandscape)
             .persistentSystemOverlays(isLandscape ? .hidden : .automatic)
             .contentShape(Rectangle())
@@ -211,6 +282,9 @@ struct ContentView: View {
             }
             .onChange(of: settings.keepScreenOn) { _, enabled in
                 applyKeepScreenOn(enabled)
+            }
+            .onChange(of: mainPageCovered(isLandscape: isLandscape)) { _, covered in
+                updateMainPageFreeze(covered: covered)
             }
             .onChange(of: geometry.size.height) { _, height in
                 lyricsPageAnimationHeight = max(1, height)
@@ -286,11 +360,24 @@ struct ContentView: View {
             LyricsPictureInPictureHostView(controller: model.pictureInPictureController)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
-            PlayerBackgroundView()
+            PlayerBackgroundView(isLandscape: isLandscape)
             primaryContent(
                 isLandscape: isLandscape,
                 size: size,
                 safeAreaInsets: safeAreaInsets
+            )
+            // The portrait main page stays mounted (artwork, marquee and preview state) while the
+            // lyrics page or vinyl mode covers it, but stops repainting on every display frame.
+            // The live clock and its time-driven decorations return in the same update that
+            // starts uncovering it.
+            .environmentObject(
+                mainPageFrozen && mainPageCovered(isLandscape: isLandscape)
+                    ? Self.coveredPagePlaybackClock
+                    : model.playbackClock
+            )
+            .environment(
+                \.coveredPageDecorationsPaused,
+                mainPageFrozen && mainPageCovered(isLandscape: isLandscape)
             )
             .opacity(vinylModeVisible ? 0 : 1)
             .scaleEffect(vinylModeVisible ? 0.985 : 1)
@@ -375,6 +462,27 @@ struct ContentView: View {
     ) -> CGFloat {
         guard !isLandscape, lyricsPageVisible else { return screenHeight }
         return min(screenHeight, max(0, lyricsPageDragOffset - safeAreaTop))
+    }
+
+    /// Portrait only: the landscape pane shows the lyric list itself, and holding it would turn
+    /// the vinyl dismissal into a catch-up scroll.
+    private func mainPageCovered(isLandscape: Bool) -> Bool {
+        guard !isLandscape else { return false }
+        return vinylModeVisible || (lyricsPageVisible && lyricsPageDragOffset == 0)
+    }
+
+    private func updateMainPageFreeze(covered: Bool) {
+        let token = UUID()
+        mainPageCoverToken = token
+        guard covered else {
+            mainPageFrozen = false
+            return
+        }
+        // The covering transition still shows the page; hold it only once fully covered.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.coveredPageFreezeDelay) {
+            guard mainPageCoverToken == token else { return }
+            mainPageFrozen = true
+        }
     }
 
     @ViewBuilder
@@ -518,7 +626,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    model.openSpotifyForCurrentTrack()
+                    model.handleTitleTap()
                 }
                 .onLongPressGesture {
                     performMainMetaHaptic()
@@ -601,6 +709,60 @@ struct ContentView: View {
         if environment["IVLYRICS_DEBUG_LYRICS_LOADING"] == "1" {
             model.applyDebugLyricsLoadingState()
         }
+        if DebugKaraokeFixture.isEnabled {
+            model.applyDebugKaraokeFixture()
+        }
+        if environment["IVLYRICS_DEBUG_SHOW_VINYL"] == "1" {
+            DispatchQueue.main.async {
+                presentVinylMode()
+            }
+        }
+        // Uncover the main page after a delay to verify it resumes the live clock immediately.
+        if let rawDelay = environment["IVLYRICS_DEBUG_REVEAL_MAIN_AFTER_S"], let delay = Double(rawDelay) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+#if os(iOS)
+                DebugFrameProbe.shared.recordEvent("revealMain")
+#endif
+                if vinylModeVisible {
+                    withAnimation(.timingCurve(0.22, 0.74, 0.28, 1, duration: 0.36)) {
+                        vinylModeVisible = false
+                    }
+                } else if lyricsPageVisible {
+                    lyricsPageDragOffset = 240
+                }
+            }
+        }
+        // Scripted playback changes for headless runs (vinyl play/pause and track sequences,
+        // decoration cadence while playback is paused).
+        if let raw = environment["IVLYRICS_DEBUG_FIXTURE_PAUSE_AFTER_S"], let delay = Double(raw) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+#if os(iOS)
+                DebugFrameProbe.shared.recordEvent("debugPause")
+#endif
+                model.pausePlayback()
+            }
+        }
+        if let raw = environment["IVLYRICS_DEBUG_FIXTURE_PLAY_AFTER_S"], let delay = Double(raw) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+#if os(iOS)
+                DebugFrameProbe.shared.recordEvent("debugPlay")
+#endif
+                if model.currentTrack?.playing == false {
+                    model.togglePlayback()
+                }
+            }
+        }
+        if let raw = environment["IVLYRICS_DEBUG_FIXTURE_NEXT_TRACK_AFTER_S"], let delay = Double(raw) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+#if os(iOS)
+                DebugFrameProbe.shared.recordEvent("debugNextTrack")
+#endif
+                model.debugAdvanceFixtureTrack()
+            }
+        }
+#if os(iOS)
+        DebugFrameProbe.shared.scheduleFromEnvironment()
+#endif
         if let rawDragOffset = environment["IVLYRICS_DEBUG_LYRICS_DRAG_OFFSET"],
            let debugDragOffset = Double(rawDragOffset) {
             DispatchQueue.main.async {
@@ -697,14 +859,30 @@ struct ContentView: View {
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, 16)
         .overlay(alignment: .topTrailing) {
-            if controlsShown {
-                LandscapeCommandBar(
-                    showingSettings: $showingSettings
-                )
-                .padding(.top, 16)
-                .padding(.trailing, 22)
-                .transition(.opacity)
+            Group {
+                if controlsShown {
+                    LandscapeCommandBar(
+                        showingSettings: $showingSettings
+                    )
+                    .transition(.opacity)
+                } else {
+                    // Keep the settings corner from passing taps to the lyric rows
+                    // underneath while the controls are auto-hidden; a tap here
+                    // brings the controls back instead of seeking the lyrics.
+                    Color.clear
+                        .frame(
+                            width: LandscapeCommandBar.hitTargetSize,
+                            height: LandscapeCommandBar.hitTargetSize
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            showLandscapeControlsTemporarily(isLandscape: true)
+                        }
+                        .accessibilityHidden(true)
+                }
             }
+            .padding(.top, 16)
+            .padding(.trailing, 22)
         }
         .animation(.easeInOut(duration: controlsShown ? 0.18 : 0.26), value: controlsShown)
     }
@@ -871,7 +1049,7 @@ struct ContentView: View {
 
 private struct PortraitPlayerProgressSection: View {
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var metadataControlsSpacing: CGFloat
 
@@ -1089,6 +1267,7 @@ private struct AndroidTransportButtonFace: View {
 struct PlayerBackgroundView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    var isLandscape = false
 
     var body: some View {
         let background = effectiveBackground
@@ -1106,6 +1285,33 @@ struct PlayerBackgroundView: View {
     @ViewBuilder
     private func backgroundContent(background: AppSettings.BackgroundSettings, date: Date?) -> some View {
         ZStack {
+            if background.mode == AppSettings.backgroundVideo {
+                let fallback = videoFallback(background)
+                backgroundFallback(background: fallback, date: date)
+                if let info = model.youtubeInfo {
+                    YouTubeBackdropSection(info: info, background: background, isLandscape: isLandscape)
+                }
+            } else {
+                backgroundFallback(background: background, date: date)
+            }
+            if background.noise {
+                NoiseOverlay()
+                    .opacity(0.18)
+                    .ignoresSafeArea()
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func videoFallback(_ background: AppSettings.BackgroundSettings) -> AppSettings.BackgroundSettings {
+        var fallback = background
+        fallback.mode = background.videoFallback
+        return fallback
+    }
+
+    @ViewBuilder
+    private func backgroundFallback(background: AppSettings.BackgroundSettings, date: Date?) -> some View {
+        ZStack {
             if background.mode == AppSettings.backgroundGradient, let url = model.currentTrack?.artworkURL {
                 MovingArtworkBlurLayer(
                     url: url,
@@ -1121,16 +1327,8 @@ struct PlayerBackgroundView: View {
             } else {
                 backgroundBase(background: background, date: date)
             }
-            if background.mode == AppSettings.backgroundVideo, let info = model.youtubeInfo {
-                YouTubeBackdropSection(info: info, background: background)
-            }
             if background.mode != AppSettings.backgroundGradient {
                 Color.black.opacity(0.24).ignoresSafeArea()
-            }
-            if background.noise {
-                NoiseOverlay()
-                    .opacity(0.18)
-                    .ignoresSafeArea()
             }
         }
     }
@@ -1154,13 +1352,15 @@ struct PlayerBackgroundView: View {
 
 private struct YouTubeBackdropSection: View {
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var info: YouTubeVideoInfo
     var background: AppSettings.BackgroundSettings
+    var isLandscape: Bool
+    @State private var videoVisible = false
 
     var body: some View {
-        Group {
+        ZStack {
             YouTubeBackdropView(
                 info: info,
                 playerSeconds: model.youtubePlayerSeconds,
@@ -1172,13 +1372,14 @@ private struct YouTubeBackdropSection: View {
                 autoMatchedUnknownCaptionStart: info.isAutoMatchedUnknownCaptionStart,
                 brightness: background.brightness,
                 blur: background.blur,
-                videoScale: background.videoScale
+                videoScale: background.videoScale,
+                videoAspect: background.videoAspect,
+                videoVisible: $videoVisible
             )
             .blur(radius: youtubeBackgroundBlurRadius(background.blur))
-            .ignoresSafeArea()
-            Color.black.opacity(youtubeBackgroundDimOpacity(background.brightness))
-                .ignoresSafeArea()
+            Color.black.opacity(videoVisible ? AppearancePolicy.videoDimOpacity(background.brightness) : 0)
         }
+        .ignoresSafeArea(.container, edges: background.videoEdgeToEdge || !isLandscape ? .all : [])
     }
 }
 
@@ -1323,11 +1524,6 @@ private func animatedBackgroundValue(seconds: Double, speed: Double, phase: Doub
 private func youtubeBackgroundBlurRadius(_ blur: Int) -> CGFloat {
     let effectiveBlur = min(200, max(0, blur * 2))
     return effectiveBlur <= 0 ? 0 : min(36, CGFloat(effectiveBlur) * 0.16)
-}
-
-private func youtubeBackgroundDimOpacity(_ brightness: Int) -> Double {
-    let alpha = max(42, min(220, Int((214.0 - Double(brightness) * 1.28).rounded())))
-    return Double(alpha) / 255.0
 }
 
 private struct ToastBanner: View {
@@ -1640,7 +1836,7 @@ private struct LyricsPageOverlay: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    model.openSpotifyForCurrentTrack()
+                    model.handleTitleTap()
                 }
                 .onLongPressGesture {
                     openMetaMenu(.language)
@@ -2193,8 +2389,10 @@ private struct LandscapePlayerPane: View {
         let typography = settings.typographySettings()
         AndroidLandscapePlayerLayout(tablet: containerSize.width > 900) {
             VStack(spacing: metadataSpacing) {
-                LandscapeArtworkView(size: artworkSize, onTap: onOpenVinyl)
-                    .scaleEffect(controlsVisible ? 1 : 1.08)
+                if settings.landscapeArtworkEnabled {
+                    LandscapeArtworkView(size: artworkSize, onTap: onOpenVinyl)
+                        .scaleEffect(controlsVisible ? 1 : 1.08)
+                }
                 VStack(spacing: 4) {
                     Text(model.titleText.trimmed.isEmpty ? settings.t("label.no_current_track") : model.titleText)
                         .font(typography.font(slotId: AppSettings.typoMainTitle, baseSize: 23))
@@ -2207,6 +2405,8 @@ private struct LandscapePlayerPane: View {
                         .truncationMode(.tail)
                 }
                 .shadow(color: .black.opacity(0.45), radius: 3, y: 1)
+                .contentShape(Rectangle())
+                .onTapGesture { model.handleTitleTap() }
             }
             .offset(y: controlsVisible ? 0 : hiddenHeroOffset)
 
@@ -2269,7 +2469,7 @@ private struct LandscapeArtworkView: View {
 private struct LandscapeTransportControls: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
 
     var body: some View {
@@ -2466,6 +2666,8 @@ private struct PlayerProgressBar: View {
 }
 
 private struct LandscapeCommandBar: View {
+    static let hitTargetSize: CGFloat = 44
+
     @EnvironmentObject private var settings: AppSettings
     @Binding var showingSettings: Bool
 
@@ -2475,7 +2677,10 @@ private struct LandscapeCommandBar: View {
         } label: {
             AndroidMoreIcon()
                 .frame(width: 18, height: 18)
-                .frame(width: 44, height: 44)
+                .frame(width: Self.hitTargetSize, height: Self.hitTargetSize)
+                // The plain-style label only hit-tests the 18 pt icon it draws, so taps
+                // beside it fell through to the lyric rows; claim the whole 44 pt frame.
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
@@ -2485,6 +2690,7 @@ private struct LandscapeCommandBar: View {
 
 private struct LandscapeLyricsPane: View {
     @EnvironmentObject private var model: AppViewModel
+    @EnvironmentObject private var settings: AppSettings
 
     var body: some View {
         LyricsTimelineScrollView(
@@ -2493,6 +2699,7 @@ private struct LandscapeLyricsPane: View {
             trailingPadding: 8,
             centerEmptyContent: true
         )
+        .environment(\.originalLyricsVisible, settings.landscapeOriginalLyricsEnabled)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottom) {
             LyricsProviderAttribution(includesSyncContributors: true)
@@ -3399,7 +3606,7 @@ private struct TmiSheetView: View {
 struct TransportPanel: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
 
     var body: some View {
@@ -3623,16 +3830,22 @@ struct MainLyricPreviewPanel: View {
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     var chromeless = false
     var typographyOverride: AppSettings.TypographySettings? = nil
     var showsCulturalAnnotations = false
+    var animationsEnabled = true
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @State private var interludeTransition = InterludeTransition()
     @State private var emptyLyricsPreviewKey = ""
     @State private var hiddenEmptyLyricsPreviewKey = ""
     @State private var emptyLyricsPreviewToken = UUID()
 
     var body: some View {
+#if DEBUG && os(iOS)
+        let _ = debugProbeCount(.previewBody)
+#endif
         let previewItems = AppSettings.normalizePreviewItems(settings.previewItems)
         Group {
             if previewItems != AppSettings.previewItemNone {
@@ -3643,6 +3856,7 @@ struct MainLyricPreviewPanel: View {
                             MainLyricPreviewRowView(
                                 row: row,
                                 positionMs: model.adjustedPositionMs,
+                                continuousPositionMs: model.adjustedContinuousPositionMs,
                                 typographyOverride: typographyOverride
                             )
                         }
@@ -3656,6 +3870,24 @@ struct MainLyricPreviewPanel: View {
                 }
             }
         }
+        .environment(\.interludeMotionEnabled, smoothInterludeMotion)
+        .overlay {
+            if let outgoing = interludeTransition.outgoing {
+                InterludeExitOverlay(startedAt: outgoing.startedAt) {
+                    MainLyricPreviewRowView(row: .interlude(interludeLabel(outgoing.segment.kind)), positionMs: model.adjustedPositionMs, typographyOverride: typographyOverride)
+                }
+            }
+        }
+        .task(id: interludeTransition.outgoing) {
+            guard let outgoing = interludeTransition.outgoing else { return }
+            try? await Task.sleep(for: .seconds(InterludeTransition.exitSeconds))
+            guard !Task.isCancelled, interludeTransition.outgoing == outgoing else { return }
+            interludeTransition.outgoing = nil
+        }
+        .onChange(of: previewInterlude, initial: true) { _, next in updateInterlude(next) }
+        .onChange(of: model.currentTrackKey) { _, _ in updateInterlude(previewInterlude) }
+        .onChange(of: model.lyricsResult.lines) { _, _ in interludeTransition = InterludeTransition(); updateInterlude(previewInterlude) }
+        .onChange(of: smoothInterludeMotion) { _, _ in updateInterlude(previewInterlude) }
         .onAppear {
             updateEmptyLyricsPreviewTimer(for: emptyLyricsPreviewCandidateKey)
         }
@@ -3664,7 +3896,26 @@ struct MainLyricPreviewPanel: View {
         }
         .onDisappear {
             resetEmptyLyricsPreviewTimer()
+            interludeTransition = InterludeTransition()
         }
+    }
+
+    private var smoothInterludeMotion: Bool {
+        animationsEnabled && settings.syncedLyricsKaraokeAnimationEnabled && !accessibilityReduceMotion
+    }
+
+    private var previewInterlude: InterludeTransition.Segment? {
+        guard settings.previewItems != AppSettings.previewItemNone,
+              LyricsTimelineDisplayBuilder.activeLineIndices(context: model.timelineContext, positionMs: model.adjustedPositionMs).isEmpty,
+              let item = LyricsTimelineDisplayBuilder.previewItem(context: model.timelineContext, positionMs: model.adjustedPositionMs,
+                  trackDurationMs: model.lyricsDurationMs, autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled),
+              case .interlude(let info) = item else { return nil }
+        return .init(id: item.id, startMs: info.startTimeMs, endMs: info.endTimeMs, kind: info.kind, automatic: info.automatic)
+    }
+
+    private func updateInterlude(_ next: InterludeTransition.Segment?) {
+        interludeTransition.update(next: next, positionMs: model.adjustedPositionMs, now: Date().timeIntervalSinceReferenceDate,
+                                  scope: model.currentTrackKey, enabled: smoothInterludeMotion && settings.previewItems != AppSettings.previewItemNone)
     }
 
     private var reservedContentHeight: CGFloat {
@@ -3704,7 +3955,10 @@ struct MainLyricPreviewPanel: View {
 
         switch entry {
         case .interlude(let info):
-            return [MainLyricPreviewRow.interlude(interludeLabel(info.kind))]
+            var row = MainLyricPreviewRow.interlude(interludeLabel(info.kind))
+            row.lineStartTimeMs = info.startTimeMs
+            row.lineEndTimeMs = info.endTimeMs
+            return [row]
         case .line(let lineIndex, let line, _):
             return previewRows(for: line, lineIndex: lineIndex, previewItems: previewItems)
         }
@@ -3715,6 +3969,7 @@ struct MainLyricPreviewPanel: View {
         if model.status == .loading || isLoadingLyricsPreview(detail) {
             return [.loading(model.lyricsLoadingText)]
         }
+        guard settings.lyricsNotFoundNoticeEnabled else { return [] }
         if hiddenEmptyLyricsPreviewKey == buildEmptyLyricsPreviewKey(detail: detail) {
             return []
         }
@@ -4124,8 +4379,11 @@ private struct MainLyricPreviewRowView: View {
     @EnvironmentObject private var settings: AppSettings
     var row: MainLyricPreviewRow
     var positionMs: Int64
+    var continuousPositionMs: Double? = nil
     var typographyOverride: AppSettings.TypographySettings? = nil
     @State private var contentWidth: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.interludeMotionEnabled) private var interludeMotionEnabled
 
     var body: some View {
         switch row.type {
@@ -4139,6 +4397,8 @@ private struct MainLyricPreviewRowView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .center)
+            .opacity(InterludeTransition.entryOpacity(positionMs: continuousPositionMs ?? Double(positionMs), startMs: row.lineStartTimeMs,
+                                                      enabled: interludeMotionEnabled && !accessibilityReduceMotion))
         case .loading:
             MainLyricPreviewLoadingSkeleton()
             .frame(maxWidth: .infinity, alignment: .center)
@@ -4239,6 +4499,7 @@ private struct MainLyricPreviewRowView: View {
                 startTimeMs: row.syllables.first?.startTimeMs ?? 0,
                 endTimeMs: row.syllables.last?.endTimeMs ?? 0,
                 positionMs: positionMs,
+                continuousPositionMs: continuousPositionMs,
                 active: true,
                 activeColor: LyricSpeakerPalette.activeColor(speaker: row.speaker, settings: speakerColors),
                 alignment: .center,
@@ -4272,14 +4533,27 @@ private struct MainLyricPreviewRowView: View {
 }
 
 private struct MainLyricPreviewInterludeIcon: View {
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.interludeMotionEnabled) private var interludeMotionEnabled
+    @Environment(\.coveredPageDecorationsPaused) private var coveredPageDecorationsPaused
+    @Environment(\.playbackAdvancing) private var playbackAdvancing
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+        // Display rate while playback runs; the previous 1/60 s cadence while it is paused.
+        TimelineView(.animation(
+            minimumInterval: playbackAdvancing ? nil : 1.0 / 60.0,
+            paused: coveredPageDecorationsPaused || accessibilityReduceMotion || !interludeMotionEnabled || !playbackAdvancing
+        )) { timeline in
+#if DEBUG && os(iOS)
+            let _ = debugProbeTimeline(.previewInterludeTick, timeline.date)
+#endif
             let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
             HStack(spacing: 4) {
                 ForEach(0..<4, id: \.self) { index in
                     RoundedRectangle(cornerRadius: 2)
                         .fill(.white.opacity(0.62))
-                        .frame(width: 4, height: interludeBarHeight(index: index, nowMs: nowMs, minimum: 7, maximum: 19))
+                        .frame(width: 4, height: accessibilityReduceMotion || !interludeMotionEnabled
+                            ? 11 : interludeBarHeight(index: index, nowMs: nowMs, minimum: 7, maximum: 19))
                 }
             }
         }
@@ -4289,8 +4563,18 @@ private struct MainLyricPreviewInterludeIcon: View {
 
 private struct MainLyricPreviewLoadingSkeleton: View {
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.coveredPageDecorationsPaused) private var coveredPageDecorationsPaused
+    @Environment(\.playbackAdvancing) private var playbackAdvancing
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+        // Display rate while playback runs; the previous 1/30 s cadence while it is paused.
+        TimelineView(.animation(
+            minimumInterval: playbackAdvancing ? nil : 1.0 / 30.0,
+            paused: coveredPageDecorationsPaused
+        )) { timeline in
+#if DEBUG && os(iOS)
+            let _ = debugProbeTimeline(.previewSkeletonTick, timeline.date)
+#endif
             let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
             VStack(spacing: 6.6) {
                 ForEach(Array([0.54, 0.78, 0.42].enumerated()), id: \.offset) { index, widthFactor in
@@ -4312,10 +4596,15 @@ private struct MainLyricPreviewLoadingSkeleton: View {
 
 private struct LyricsLoadingSkeleton: View {
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.playbackAdvancing) private var playbackAdvancing
     private let widths: [CGFloat] = [0.62, 0.86, 0.74, 0.92, 0.56]
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+        // Display rate while playback runs; the previous 1/30 s cadence while it is paused.
+        TimelineView(.animation(minimumInterval: playbackAdvancing ? nil : 1.0 / 30.0)) { timeline in
+#if DEBUG && os(iOS)
+            let _ = debugProbeTimeline(.lyricsSkeletonTick, timeline.date)
+#endif
             let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
             VStack(alignment: .leading, spacing: 20) {
                 ForEach(Array(widths.enumerated()), id: \.offset) { index, widthFactor in
@@ -4617,13 +4906,21 @@ private struct EnumeratedRandomAccessCollection<Base: RandomAccessCollection>: R
 struct LyricsTimelineView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var animatedCenterIndex: Double?
+    /// Owned by LyricsTimelineScrollView; nil where the list does not scroll.
+    var travelCascade: LyricsTravelCascade? = nil
+    var onInterludeFrame: ((String, CGRect) -> Void)? = nil
 
     var body: some View {
+#if DEBUG && os(iOS)
+        let _ = debugProbeCount(.timelineBody)
+#endif
         let position = model.adjustedPositionMs
+        let continuousPosition = model.adjustedContinuousPositionMs
+        let frameUptime = model.playbackFrameUptime
         let timelineContext = model.timelineContext
         let displaySnapshot = LyricsTimelineDisplayBuilder.displaySnapshot(
             context: timelineContext,
@@ -4676,7 +4973,7 @@ struct LyricsTimelineView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14)
-                } else {
+                } else if settings.lyricsNotFoundNoticeEnabled {
                     Text(model.lyricsResult.detail)
                         .font(.body.weight(.medium))
                         .foregroundStyle(.white.opacity(0.76))
@@ -4691,7 +4988,12 @@ struct LyricsTimelineView: View {
                 let speakerColors = settings.speakerColorSettings()
                 ForEach(EnumeratedRandomAccessCollection(items), id: \.element.id) { displayIndex, item in
                     let itemActive = item.id == activeItemID
-                    let displayDistance = abs(Double(displayIndex) - visualCenterIndex)
+                    // Colors stop changing past maximumEffectiveDistance, so farther rows keep
+                    // equal inputs and skip re-rendering when the center moves.
+                    let displayDistance = min(
+                        LyricSpeakerPalette.maximumEffectiveDistance,
+                        abs(Double(displayIndex) - visualCenterIndex)
+                    )
                     Group {
                         switch item {
                         case .line(let index, let line, _):
@@ -4718,6 +5020,7 @@ struct LyricsTimelineView: View {
                                 displayDistance: displayDistance,
                                 progress: lineActive ? model.progress(for: line) : 0,
                                 positionMs: visualState.renderPositionMs,
+                                continuousPositionMs: visualState.animating ? continuousPosition : nil,
                                 alignment: settings.lyricsTextAlignment,
                                 pronunciationLoading: model.lyricsSupplementPronunciationLoading,
                                 translationLoading: model.lyricsSupplementTranslationLoading,
@@ -4734,12 +5037,23 @@ struct LyricsTimelineView: View {
                                 showLabel: settings.interludeLabelsEnabled,
                                 alignment: settings.lyricsTextAlignment
                             )
+                            .onGeometryChange(for: CGRect.self) { proxy in
+                                proxy.frame(in: .named("lyrics-interlude-viewport"))
+                            } action: { frame in onInterludeFrame?(item.id, frame) }
                         }
                     }
                     .id(item.id)
+                    .onGeometryChange(for: CGRect.self) { proxy in
+                        proxy.frame(in: .named(LyricsTravelCascade.coordinateSpace))
+                    } action: { frame in
+                        travelCascade?.rowFrames[item.id] = frame
+                    }
+                    .offset(y: cascadeOffset(itemID: item.id, displayIndex: displayIndex,
+                                             anchorIndex: targetDisplayIndex, at: frameUptime))
                 }
             }
         }
+        .coordinateSpace(.named(LyricsTravelCascade.coordinateSpace))
         .onAppear {
             animatedCenterIndex = Double(targetDisplayIndex)
         }
@@ -4762,6 +5076,17 @@ struct LyricsTimelineView: View {
                 animatedCenterIndex = next
             }
         }
+    }
+
+    private func cascadeOffset(itemID: String, displayIndex: Int, anchorIndex: Int, at uptime: TimeInterval) -> CGFloat {
+        guard let travelCascade else { return 0 }
+        let offset = travelCascade.offset(itemID: itemID, at: uptime)
+#if DEBUG && os(iOS)
+        if offset != 0 {
+            DebugFrameProbe.shared.recordOffset(relativeIndex: displayIndex - anchorIndex, offset: Double(offset))
+        }
+#endif
+        return offset
     }
 }
 
@@ -4824,15 +5149,41 @@ private struct LyricsProviderAttribution: View {
     }
 }
 
+/// Geometry is sampled without publishing changes on every scroll/display frame.
+private final class InterludeFrameStore {
+    var id = ""
+    var frame = CGRect.zero
+}
+
+private struct InterludeExitOverlay<Content: View>: View {
+    let startedAt: TimeInterval
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let appearance = InterludeTransition.exitAppearance(elapsed: timeline.date.timeIntervalSinceReferenceDate - startedAt)
+            content()
+                .opacity(appearance.opacity)
+                .scaleEffect(appearance.scale)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 private struct LyricsTimelineScrollView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var autoScrollPaused = false
     @State private var lastScrolledTargetID: String?
     @State private var autoScrollResumeTask: Task<Void, Never>?
+    @State private var travelCascade = LyricsTravelCascade()
+    @State private var interludeFrameStore = InterludeFrameStore()
+    @State private var interludeTransition = InterludeTransition()
+    @State private var outgoingInterludeFrame = CGRect.zero
 
     var topPadding: CGFloat = 0
     var bottomPadding: CGFloat = 0
@@ -4844,6 +5195,9 @@ private struct LyricsTimelineScrollView: View {
     private static let manualScrollHoldSeconds: TimeInterval = 4.0
 
     var body: some View {
+#if DEBUG && os(iOS)
+        let _ = debugProbeCount(.scrollBody)
+#endif
         let targetID = activeTargetID
         GeometryReader { geometry in
             if shouldCenterEmptyContent {
@@ -4866,7 +5220,10 @@ private struct LyricsTimelineScrollView: View {
                                 Color.clear
                                     .frame(height: topEdgeInset(for: geometry.size.height))
                             }
-                            LyricsTimelineView()
+                            LyricsTimelineView(travelCascade: travelCascade, onInterludeFrame: { id, frame in
+                                interludeFrameStore.id = id
+                                interludeFrameStore.frame = frame
+                            })
                                 .padding(.top, topPadding)
                                 .padding(.bottom, bottomPadding)
                                 .padding(.leading, horizontalPadding)
@@ -4923,6 +5280,54 @@ private struct LyricsTimelineScrollView: View {
                     }
                 }
             }
+        }
+        .coordinateSpace(name: "lyrics-interlude-viewport")
+        .overlay(alignment: .topLeading) {
+            if let outgoing = interludeTransition.outgoing, !outgoingInterludeFrame.isEmpty {
+                InterludeExitOverlay(startedAt: outgoing.startedAt) {
+                    LyricsInterludeView(
+                        info: .init(startTimeMs: outgoing.segment.startMs, endTimeMs: outgoing.segment.endMs, kind: outgoing.segment.kind, automatic: outgoing.segment.automatic),
+                        active: true, displayDistance: 0, showLabel: settings.interludeLabelsEnabled, alignment: settings.lyricsTextAlignment,
+                        isExitOverlay: true
+                    )
+                }
+                .frame(width: outgoingInterludeFrame.width, height: outgoingInterludeFrame.height)
+                .position(x: outgoingInterludeFrame.midX, y: outgoingInterludeFrame.midY)
+            }
+        }
+        .clipped()
+        .task(id: interludeTransition.outgoing) {
+            guard let outgoing = interludeTransition.outgoing else { return }
+            try? await Task.sleep(for: .seconds(InterludeTransition.exitSeconds))
+            guard !Task.isCancelled, interludeTransition.outgoing == outgoing else { return }
+            interludeTransition.outgoing = nil
+        }
+        .onChange(of: activeInterlude, initial: true) { _, next in updateInterlude(next) }
+        .onChange(of: model.currentTrackKey) { _, _ in updateInterlude(activeInterlude) }
+        .onChange(of: model.lyricsResult.lines) { _, _ in interludeTransition = InterludeTransition(); updateInterlude(activeInterlude) }
+        .onChange(of: smoothInterludeMotion) { _, _ in updateInterlude(activeInterlude) }
+        .onDisappear { interludeTransition = InterludeTransition() }
+    }
+
+    private var smoothInterludeMotion: Bool {
+        settings.syncedLyricsKaraokeAnimationEnabled && !accessibilityReduceMotion
+    }
+
+    private var activeInterlude: InterludeTransition.Segment? {
+        guard let item = LyricsTimelineDisplayBuilder.previewItem(context: model.timelineContext, positionMs: model.adjustedPositionMs,
+                  trackDurationMs: model.lyricsDurationMs, autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled),
+              case .interlude(let info) = item else { return nil }
+        return .init(id: item.id, startMs: info.startTimeMs, endMs: info.endTimeMs, kind: info.kind, automatic: info.automatic)
+    }
+
+    private func updateInterlude(_ next: InterludeTransition.Segment?) {
+        let previous = interludeTransition.active
+        let frame = interludeFrameStore.frame
+        let frameID = interludeFrameStore.id
+        interludeTransition.update(next: next, positionMs: model.adjustedPositionMs, now: Date().timeIntervalSinceReferenceDate,
+                                  scope: model.currentTrackKey, enabled: smoothInterludeMotion)
+        if let outgoing = interludeTransition.outgoing, outgoing.segment == previous {
+            outgoingInterludeFrame = frameID == outgoing.segment.id ? frame : .zero
         }
     }
 
@@ -4999,27 +5404,121 @@ private struct LyricsTimelineScrollView: View {
     private func scrollToTarget(_ targetID: String?, proxy: ScrollViewProxy, animated: Bool, force: Bool = false) {
         guard let targetID else { return }
         guard force || lastScrolledTargetID != targetID else { return }
+        let previousTargetID = lastScrolledTargetID
         lastScrolledTargetID = targetID
+#if DEBUG && os(iOS)
+        DebugFrameProbe.shared.recordEvent("travel", ["target": targetID, "animated": animated, "force": force])
+#endif
+        let anchorY = min(1, max(0, centerAnchorY))
         let action = {
             proxy.scrollTo(
                 targetID,
-                anchor: UnitPoint(x: 0.5, y: min(1, max(0, centerAnchorY)))
+                anchor: UnitPoint(x: 0.5, y: anchorY)
             )
         }
-        if animated && !accessibilityReduceMotion {
-            let displaySnapshot = LyricsTimelineDisplayBuilder.displaySnapshot(
-                context: model.timelineContext,
-                positionMs: model.adjustedPositionMs,
-                trackDurationMs: model.lyricsDurationMs,
-                autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
-            )
-            let duration = displaySnapshot.firstIndex(id: targetID).map {
-                LyricsMotion.centeringDuration(items: displaySnapshot.items, targetIndex: $0)
-            } ?? LyricsMotion.defaultCenteringDuration
-            withAnimation(LyricsMotion.centering(duration: duration), action)
-        } else {
+        guard animated && !accessibilityReduceMotion else {
             action()
+            return
         }
+        let displaySnapshot = LyricsTimelineDisplayBuilder.displaySnapshot(
+            context: model.timelineContext,
+            positionMs: model.adjustedPositionMs,
+            trackDurationMs: model.lyricsDurationMs,
+            autoInstrumentalBreakEnabled: settings.autoInstrumentalBreakEnabled
+        )
+        let targetIndex = displaySnapshot.firstIndex(id: targetID)
+        let windowMs = targetIndex.flatMap {
+            LyricsTravelMotion.windowMs(items: displaySnapshot.items, targetIndex: $0)
+        }
+        // A line that is replaced within 80ms moves without travel, like the PC renderer.
+        guard !LyricsTravelMotion.skipsMotion(windowMs: windowMs) else {
+            action()
+            return
+        }
+        let timing = LyricsTravelMotion.timing(windowMs: windowMs)
+        // Only a one-row advance cascades. Seeks, jumps, focus requests and manual-scroll
+        // returns (force) move every row together on the scroll alone.
+        if !force, let previousTargetID, let targetIndex,
+           displaySnapshot.firstIndex(id: previousTargetID) == targetIndex - 1,
+           let distance = travelCascade.anchorDistance(from: previousTargetID, to: targetID, anchorY: anchorY),
+           distance > 0.5 {
+            let startUptime = model.playbackFrameUptime
+            travelCascade.begin(
+                startUptime: startUptime,
+                distance: distance,
+                timing: timing,
+                rowsBelow: displaySnapshot.items.dropFirst(targetIndex + 1).prefix(32).map(\.id)
+            )
+            model.keepLyricsFramesUpdating(until: startUptime + timing.totalMs / 1_000)
+        }
+        // ScrollView honors SwiftUI's built-in springs (not CustomAnimation) for scrollTo.
+        // bounce 0 is the same critically damped curve (omega = k / duration); a retargeted
+        // scroll keeps its velocity.
+        withAnimation(.spring(duration: LyricsTravelMotion.springResponseSeconds(timing), bounce: 0), action)
+    }
+}
+
+extension LyricsTravelMotion {
+    /// Time from this row's travel to the next row's (the same window LyricsMotion uses).
+    static func windowMs(items: [LyricsTimelineDisplayItem], targetIndex: Int) -> Double? {
+        guard items.indices.contains(targetIndex) else { return nil }
+        let targetStart = items[targetIndex].startTimeMs
+        guard let nextStart = items.dropFirst(targetIndex + 1)
+            .lazy
+            .map(\.startTimeMs)
+            .first(where: { $0 > targetStart }) else {
+            return nil
+        }
+        return Double(nextStart - targetStart)
+    }
+}
+
+/// The lyric scroll carries every row on the travel spring. A row below the anchor adds
+/// distance * (p(t) - p(t - delay)), so it replays the anchor's travel 'delay' later and ends at
+/// exactly zero offset; overlapping travels add up. Plain reference type: rows read it while
+/// the playback clock repaints them, so it never invalidates a view by itself.
+final class LyricsTravelCascade {
+    static let coordinateSpace = "ivlyrics-lyrics-travel"
+
+    private struct Travel {
+        var startUptime: TimeInterval
+        var distance: Double
+        var durationMs: Double
+        var endMs: Double
+        var delays: [String: Double]
+    }
+
+    private var travels: [Travel] = []
+    /// Row layout frames in the scroll content; scrolling and cascade offsets do not change them.
+    var rowFrames: [String: CGRect] = [:]
+
+    /// Content-offset change of scrollTo(_:anchor:) from one row to the next.
+    func anchorDistance(from previousID: String, to targetID: String, anchorY: CGFloat) -> Double? {
+        guard let from = rowFrames[previousID], let to = rowFrames[targetID] else { return nil }
+        return Double((to.minY + to.height * anchorY) - (from.minY + from.height * anchorY))
+    }
+
+    func begin(startUptime: TimeInterval, distance: Double, timing: LyricsTravelMotion.Timing, rowsBelow: [String]) {
+        travels.removeAll { (startUptime - $0.startUptime) * 1_000 >= $0.endMs }
+        var delays: [String: Double] = [:]
+        for (offset, id) in rowsBelow.enumerated() {
+            delays[id] = LyricsTravelMotion.delayMs(rowsBelowAnchor: offset + 1, timing: timing)
+        }
+        travels.append(Travel(startUptime: startUptime, distance: distance, durationMs: timing.durationMs,
+                              endMs: timing.totalMs, delays: delays))
+    }
+
+    func offset(itemID: String, at uptime: TimeInterval) -> CGFloat {
+        guard !travels.isEmpty else { return 0 }
+        var total = 0.0
+        for travel in travels {
+            guard let delay = travel.delays[itemID], delay > 0 else { continue }
+            let elapsed = (uptime - travel.startUptime) * 1_000
+            guard elapsed > 0, elapsed < travel.durationMs + delay else { continue }
+            total += travel.distance * (LyricsTravelMotion.progress(elapsed / travel.durationMs)
+                - LyricsTravelMotion.progress((elapsed - delay) / travel.durationMs))
+        }
+        return CGFloat(total)
     }
 }
 
@@ -5936,11 +6435,14 @@ enum LyricsTimelineDisplayBuilder {
 struct LyricsInterludeView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
+    @Environment(\.playbackAdvancing) private var playbackAdvancing
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     var info: InterludeInfo
     var active: Bool
     var displayDistance: Double
     var showLabel: Bool
     var alignment: String
+    var isExitOverlay = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -5956,6 +6458,8 @@ struct LyricsInterludeView: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+        .opacity(InterludeTransition.entryOpacity(positionMs: model.adjustedContinuousPositionMs, startMs: info.startTimeMs,
+            enabled: !isExitOverlay && settings.syncedLyricsKaraokeAnimationEnabled && !accessibilityReduceMotion))
         .accessibilityLabel(label)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -5964,7 +6468,12 @@ struct LyricsInterludeView: View {
     }
 
     private var interludeBars: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !active)) { timeline in
+        // Display rate while playback runs; the previous 1/60 s cadence while it is paused.
+        TimelineView(.animation(minimumInterval: playbackAdvancing ? nil : 1.0 / 60.0,
+                                paused: !active || !playbackAdvancing || accessibilityReduceMotion || !settings.syncedLyricsKaraokeAnimationEnabled)) { timeline in
+#if DEBUG && os(iOS)
+            let _ = debugProbeTimeline(.interludeBarsTick, timeline.date)
+#endif
             let nowMs = timeline.date.timeIntervalSinceReferenceDate * 1_000
             HStack(spacing: 3.8) {
                 ForEach(0..<4, id: \.self) { index in
@@ -5972,7 +6481,7 @@ struct LyricsInterludeView: View {
                         .fill(interludeColor)
                         .frame(
                             width: 3.2,
-                            height: active
+                            height: active && !accessibilityReduceMotion && settings.syncedLyricsKaraokeAnimationEnabled
                                 ? interludeBarHeight(index: index, nowMs: nowMs, minimum: 7, maximum: 23)
                                 : 11
                         )
@@ -6005,6 +6514,7 @@ struct LyricsInterludeView: View {
 
 struct LyricsLineView: View, Equatable {
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.originalLyricsVisible) private var originalLyricsVisible
     var lineIndex: Int
     var line: LyricsLine
     var originalText: String
@@ -6015,6 +6525,8 @@ struct LyricsLineView: View, Equatable {
     var displayDistance: Double
     var progress: Double
     var positionMs: Int64
+    /// Set only while the row follows the clock (see SyllableKaraokeText.continuousPositionMs).
+    var continuousPositionMs: Double? = nil
     var alignment: String
     var pronunciationLoading: Bool
     var translationLoading: Bool
@@ -6034,6 +6546,7 @@ struct LyricsLineView: View, Equatable {
             && lhs.displayDistance == rhs.displayDistance
             && lhs.progress == rhs.progress
             && lhs.positionMs == rhs.positionMs
+            && lhs.continuousPositionMs == rhs.continuousPositionMs
             && lhs.alignment == rhs.alignment
             && lhs.pronunciationLoading == rhs.pronunciationLoading
             && lhs.translationLoading == rhs.translationLoading
@@ -6042,6 +6555,9 @@ struct LyricsLineView: View, Equatable {
     }
 
     var body: some View {
+#if DEBUG && os(iOS)
+        let _ = debugProbeCount(.lineBody)
+#endif
         let orderedVocalParts = LyricsTimelineDisplayBuilder.orderedVocalParts(line.vocalParts)
         let displayVocalParts = LyricsTimelineDisplayBuilder.displayableVocalParts(orderedVocalParts)
         let linePronunciationText = IvLyricsUtilities.distinctPronunciation(
@@ -6127,6 +6643,7 @@ struct LyricsLineView: View, Equatable {
                         && positionMs >= part.startTimeMs
                         && positionMs < max(part.endTimeMs, part.startTimeMs) + 820
                     VStack(alignment: stackAlignment, spacing: 2) {
+                        if originalLyricsVisible {
                         SyllableKaraokeText(
                             text: LyricsTimelineDisplayBuilder.vocalPartDisplayText(part),
                             rubyText: settings.japaneseFuriganaEnabled ? part.furiganaText : "",
@@ -6136,6 +6653,7 @@ struct LyricsLineView: View, Equatable {
                             startTimeMs: part.startTimeMs,
                             endTimeMs: part.endTimeMs,
                             positionMs: positionMs,
+                            continuousPositionMs: continuousPositionMs,
                             active: partAnimating,
                             completedColorOpacity: completedColorOpacity,
                             activeColor: vocalPartActiveColor(part),
@@ -6149,15 +6667,17 @@ struct LyricsLineView: View, Equatable {
                             bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
                             effectRowSeed: index
                         )
-                        .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
+                        }
                         if useVocalPartSupplements {
                             vocalPartSupplements(part, active: partActive)
                         }
                     }
+                    // Keep the part scroll anchor present when landscape hides original lyrics.
+                    .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
                     .padding(.top, vocalPartTopSpacing(index: index, parts: displayVocalParts))
                 }
             }
-        } else if shouldRenderTimedKaraoke {
+        } else if originalLyricsVisible, shouldRenderTimedKaraoke {
             SyllableKaraokeText(
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
@@ -6167,6 +6687,7 @@ struct LyricsLineView: View, Equatable {
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
+                continuousPositionMs: continuousPositionMs,
                 active: animationActive,
                 completedColorOpacity: completedColorOpacity,
                 activeColor: lineActiveColor,
@@ -6179,7 +6700,7 @@ struct LyricsLineView: View, Equatable {
                 bounceEnabled: settings.karaokeBounceEffectEnabled,
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21)
             )
-        } else if settings.syncedLyricsKaraokeAnimationEnabled {
+        } else if originalLyricsVisible, settings.syncedLyricsKaraokeAnimationEnabled {
             SyllableKaraokeText(
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
@@ -6189,6 +6710,7 @@ struct LyricsLineView: View, Equatable {
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
+                continuousPositionMs: continuousPositionMs,
                 active: animationActive,
                 completedColorOpacity: completedColorOpacity,
                 activeColor: lineActiveColor,
@@ -6202,7 +6724,7 @@ struct LyricsLineView: View, Equatable {
                 bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
                 syntheticTimingEnabled: true
             )
-        } else {
+        } else if originalLyricsVisible {
             SyllableKaraokeText(
                 text: originalText.isEmpty ? " " : originalText,
                 rubyText: settings.japaneseFuriganaEnabled ? line.furiganaText : "",
@@ -6212,6 +6734,7 @@ struct LyricsLineView: View, Equatable {
                 startTimeMs: line.startTimeMs,
                 endTimeMs: line.endTimeMs,
                 positionMs: positionMs,
+                continuousPositionMs: continuousPositionMs,
                 active: animationActive,
                 completedColorOpacity: completedColorOpacity,
                 activeColor: lineActiveColor,
@@ -6416,6 +6939,10 @@ struct SyllableKaraokeText: View {
     var startTimeMs: Int64
     var endTimeMs: Int64
     var positionMs: Int64
+    /// Unrounded position for the frame being painted. Discrete glyph states (pending, active,
+    /// done) still come from positionMs; the fill edge and bounce follow this value so they
+    /// advance on every display frame. nil (PiP, previews) paints from positionMs.
+    var continuousPositionMs: Double? = nil
     var active: Bool
     var completedColorOpacity: CGFloat = 1
     var activeColor: Color
@@ -6445,6 +6972,9 @@ struct SyllableKaraokeText: View {
 
     @ViewBuilder
     private func karaokeBody(nowMs: Double, displayKind: String) -> some View {
+#if DEBUG && os(iOS)
+        let _ = debugProbeCount(.karaokeBody)
+#endif
         let segments = karaokeSegments
         Group {
             if segments.isEmpty {
@@ -6537,6 +7067,16 @@ struct SyllableKaraokeText: View {
                 isWhitespace: metadata.isWhitespace
             ))
         }
+#if DEBUG && os(iOS)
+        if DebugFrameProbe.shared.recording, !timedSegments.isEmpty {
+            DebugFrameProbe.shared.recordFill(
+                singleLine: singleLine, active: active, lineStart: startTimeMs, lineEnd: endTimeMs,
+                position: paintPositionMs,
+                fill: timedSegments.reduce(0) { $0 + Double($1.fill) },
+                bounce: timedSegments.map { Double($0.bounceOffsetY) }.min() ?? 0
+            )
+        }
+#endif
         if !timedSegments.isEmpty {
             return timedSegments
         }
@@ -6762,7 +7302,11 @@ struct SyllableKaraokeText: View {
         if positionMs <= startTimeMs || endTimeMs <= startTimeMs {
             return 0
         }
-        return min(1, max(0, CGFloat(positionMs - startTimeMs) / CGFloat(endTimeMs - startTimeMs)))
+        return min(1, max(0, CGFloat(paintPositionMs - Double(startTimeMs)) / CGFloat(endTimeMs - startTimeMs)))
+    }
+
+    private var paintPositionMs: Double {
+        continuousPositionMs ?? Double(positionMs)
     }
 
     private var preparedKaraoke: KaraokeRenderPreparationCache.Value {
@@ -6793,7 +7337,7 @@ struct SyllableKaraokeText: View {
 
     private func karaokeBounce(profile: KaraokeMotionProfile?) -> KaraokeBounceMetrics {
         guard bounceEnabled, !accessibilityReduceMotion, let profile else { return .idle }
-        let values = profile.values(positionMs: Double(positionMs), textSize: Double(bounceTextSize))
+        let values = profile.values(positionMs: paintPositionMs, textSize: Double(bounceTextSize))
         return KaraokeBounceMetrics(offsetY: CGFloat(values.offsetY), scale: CGFloat(values.scale))
     }
 
@@ -6875,6 +7419,9 @@ final class KaraokeRenderPreparationCache {
 
     func value(for next: Key, prepare: () -> Value) -> Value {
         if key == next, let prepared { return prepared }
+#if DEBUG && os(iOS)
+        MainActor.assumeIsolated { debugProbeCount(.preparationMiss) }
+#endif
         let value = prepare()
         key = next
         prepared = value
@@ -6932,6 +7479,9 @@ private struct KaraokeSyllableSegmentView: View {
     var rowSeed: Int
 
     var body: some View {
+#if DEBUG && os(iOS)
+        let _ = debugProbeCount(.glyphBody)
+#endif
         VStack(spacing: 0) {
             if !segment.rubyText.isEmpty {
                 Text(segment.rubyText)
@@ -7136,11 +7686,17 @@ private struct KaraokeSegmentFlowLayout: Layout {
     }
 
     func makeCache(subviews: Subviews) -> Cache {
-        Cache(sizes: subviews.map { $0.sizeThatFits(.unspecified) },
+#if DEBUG && os(iOS)
+        MainActor.assumeIsolated { debugProbeCount(.flowLayoutMake) }
+#endif
+        return Cache(sizes: subviews.map { $0.sizeThatFits(.unspecified) },
               whitespace: subviews.map { $0[KaraokeWhitespaceLayoutKey.self] })
     }
 
     func updateCache(_ cache: inout Cache, subviews: Subviews) {
+#if DEBUG && os(iOS)
+        MainActor.assumeIsolated { debugProbeCount(.flowLayoutUpdate) }
+#endif
         let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
         let whitespace = subviews.map { $0[KaraokeWhitespaceLayoutKey.self] }
         // Fill/motion changes leave intrinsic sizes intact. Fonts, ruby, content and
@@ -7687,6 +8243,10 @@ private struct KaraokeDebugPreview: View {
 #endif
 
 enum LyricSpeakerPalette {
+    /// Every distance-based lyric color is constant beyond this distance: inactive text clamps
+    /// at 2.6 (also after a vocal part's +0.45), supplements at 2.8, interlude bars at 2.6.
+    static let maximumEffectiveDistance = 2.8
+
     private struct ResolutionCacheKey: Hashable {
         var speaker: String
         var speakerColor: String
@@ -7931,7 +8491,7 @@ enum LyricSpeakerPalette {
 struct LogsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: AppViewModel
-    // Subscribed (not read directly) so this view re-renders with the 60 Hz playback clock driving model.nowPositionMs.
+    // Subscribed (not read directly) so this view re-renders with the display-rate playback clock driving model.nowPositionMs.
     @EnvironmentObject private var playbackClock: PlaybackClock
     @Binding var visible: Bool
 
@@ -8491,6 +9051,8 @@ struct SettingsView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var selectedSpeakerColor = AppSettings.speakerColorNormal
     @State private var expandedAIProvider: String?
     @EnvironmentObject private var settings: AppSettings
@@ -8500,7 +9062,7 @@ struct SettingsView: View {
     @State private var deezerARLInput = ""
     @State private var deezerCredentialStatus = ""
     @State private var settingsSearch = ""
-    @FocusState private var settingsSearchFocused: Bool
+    @State private var settingsSearchFocused = false
     @State private var settingsSearchTarget = ""
     @State private var aiModels: [AIProviderModels.Model] = []
     @State private var aiModelsConfiguration: AIProviderModels.Configuration?
@@ -8513,31 +9075,13 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 9) {
-                settingsHeader
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(SettingsDesign.secondary)
-                    TextField(settings.t("settings.search"), text: $settingsSearch)
-                        .focused($settingsSearchFocused)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    if !settingsSearch.isEmpty {
-                        Button { settingsSearch = "" } label: { Image(systemName: "xmark.circle.fill") }
-                            .accessibilityLabel(settings.t("button.close"))
-                    }
-                }
-                .padding(10).background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 10))
-                settingsTabs
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 13)
-            .padding(.bottom, 12)
-            .background(SettingsDesign.background.opacity(0.96))
-            .overlay(alignment: .bottom) { SettingsDesign.border.frame(height: 1) }
+            if !scrollsHeader { settingsTop }
 
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         Color.clear.frame(height: 0).id("settings-top")
+                        if scrollsHeader { settingsTop.padding(.bottom, 20) }
                         if settingsSearch.trimmed.isEmpty { selectedSettingsPage }
                         else { settingsSearchResults }
                     }
@@ -8547,7 +9091,10 @@ struct SettingsView: View {
                     .padding(.top, 22)
                     .padding(.bottom, 40)
                 }
+                .accessibilityIdentifier("settings.scroll")
+                .scrollDismissesKeyboard(.interactively)
                 .onChange(of: selectedTab) { _, _ in
+                    settingsSearchFocused = false
                     if settingsSearchTarget.isEmpty { proxy.scrollTo("settings-top", anchor: .top) }
                 }
                 .task(id: settingsSearchTarget) {
@@ -8573,14 +9120,63 @@ struct SettingsView: View {
                 selectedTab = tab
             }
 #endif
+#if DEBUG
+            if !DebugSettingsUIHarness.enabled {
+                Task { await settings.refreshDeezerConfiguration() }
+                model.prepareCreatorPrivacySettings()
+            }
+#else
             Task { await settings.refreshDeezerConfiguration() }
             model.prepareCreatorPrivacySettings()
+#endif
         }
         .fullScreenCover(isPresented: $settingsLogsPresented) {
             LogsView(visible: $settingsLogsPresented)
                 .environmentObject(model)
                 .environmentObject(model.playbackClock)
         }
+    }
+
+    private var scrollsHeader: Bool { verticalSizeClass == .compact || dynamicTypeSize.isAccessibilitySize }
+
+    private var settingsTop: some View {
+        VStack(spacing: 10) {
+            settingsHeader
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(SettingsDesign.secondary)
+                    .accessibilityHidden(true)
+                SettingsSearchField(prompt: settings.t("settings.search"), text: $settingsSearch,
+                                    isFocused: $settingsSearchFocused)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .layoutPriority(1)
+                if !settingsSearch.isEmpty {
+                    Button { settingsSearch = ""; settingsSearchFocused = true } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(settings.t("button.clear_search"))
+                    .accessibilityIdentifier("settings.search.clear")
+                }
+            }
+            .padding(.horizontal, 12)
+            .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 10))
+            if scrollsHeader {
+                Picker(settings.t("settings.title"), selection: $selectedTab) {
+                    ForEach(SettingsTab.allCases) { tab in Text(settings.t(tab.titleKey)).tag(tab) }
+                }
+                .settingsMenuSurface()
+                .accessibilityIdentifier("settings.sections")
+            } else {
+                settingsTabs
+            }
+        }
+        .padding(.horizontal, scrollsHeader ? 0 : 20)
+        .padding(.top, 12)
+        .padding(.bottom, 12)
+        .background(SettingsDesign.background.opacity(0.96))
     }
 
     private var settingsSearchEntries: [(tab: SettingsTab, key: String)] {
@@ -8590,6 +9186,7 @@ struct SettingsView: View {
             (.general, "setting.pronunciation_language"),
             (.general, "setting.pronunciation_notation"),
             (.general, "setting.metadata_translation"),
+            (.general, "setting.simplify_title"),
             (.general, "setting.japanese_furigana"),
             (.general, "setting.main_preview"),
             (.lyrics, "section.player"),
@@ -8611,6 +9208,10 @@ struct SettingsView: View {
             (.player, "setting.keep_screen_on"),
             (.player, "setting.landscape_auto_hide"),
             (.player, "setting.landscape_center_no_lyrics"),
+            (.player, "setting.title_tap_action"),
+            (.player, "setting.landscape_original_lyrics"),
+            (.player, "setting.landscape_artwork"),
+            (.player, "setting.lyrics_not_found_notice"),
             (.player, "section.pip"),
             (.player, "setting.pip_show_artwork"),
             (.player, "setting.pip_background"),
@@ -8625,6 +9226,8 @@ struct SettingsView: View {
             (.player, "vinyl.settings.tonearm_finish"),
             (.player, "vinyl.settings.tonearm_size"),
             (.player, "vinyl.settings.animations"),
+            (.player, "vinyl.settings.track_change_animations"),
+            (.player, "vinyl.settings.rotation_speed"),
             (.player, "vinyl.settings.center_rotation"),
             (.player, "vinyl.settings.lyrics"),
             (.player, "section.typography"),
@@ -8662,6 +9265,9 @@ struct SettingsView: View {
             (.appearance, "setting.brightness"),
             (.appearance, "setting.blur"),
             (.appearance, "setting.video_scale"),
+            (.appearance, "setting.video_fallback"),
+            (.appearance, "setting.video_aspect"),
+            (.appearance, "setting.video_edge_to_edge"),
             (.appearance, "setting.noise"),
             (.appearance, "setting.reduce_motion"),
             (.appearance, "field.solid_color"),
@@ -8708,21 +9314,27 @@ struct SettingsView: View {
                     settingsSearchFocused = false
                     selectedTab = entry.tab
                     if entry.tab == .ai {
-                        if let provider = AppSettings.providers.first(where: { $0.label == entry.key }) {
+                        if entry.key == LocalAI.label {
+                            expandedAIProvider = LocalAI.providerId
+                        } else if let provider = AppSettings.providers.first(where: { $0.label == entry.key }) {
                             settings.setProvider(provider.id)
+                            expandedAIProvider = settings.providerId
+                        } else {
+                            expandedAIProvider = settings.providerId
                         }
-                        expandedAIProvider = settings.providerId
                     }
                     settingsSearchTarget = settings.t(entry.key)
                     settingsSearch = ""
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(settings.t(entry.key)).font(.pretendard(15, weight: .semibold))
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(settings.t(entry.tab.titleKey)).font(.caption).foregroundStyle(SettingsDesign.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading).padding(14)
                     .background(SettingsDesign.surface, in: RoundedRectangle(cornerRadius: 12))
                 }.buttonStyle(.plain)
+                    .accessibilityIdentifier("settings.result.\(entry.key)")
             }
         }
     }
@@ -8733,7 +9345,7 @@ struct SettingsView: View {
                 .font(.pretendard(22, weight: .heavy))
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
-            Button { dismiss() } label: {
+            Button { settingsSearchFocused = false; dismiss() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(SettingsDesign.secondary)
@@ -8745,6 +9357,7 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(settings.t("button.close"))
+            .accessibilityIdentifier("settings.close")
         }
     }
 
@@ -8753,6 +9366,7 @@ struct SettingsView: View {
             HStack(spacing: 6) {
                 ForEach(SettingsTab.allCases) { tab in
                     Button {
+                        settingsSearchFocused = false
                         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
                             settingsSearch = ""
                             settingsSearchTarget = ""
@@ -8771,6 +9385,7 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
+                    .accessibilityIdentifier("settings.tab.\(tab.rawValue)")
                 }
             }
         }
@@ -8836,8 +9451,10 @@ struct SettingsView: View {
                 settingsToggleCard(
                     settings.t("setting.metadata_translation"),
                     description: settings.t("setting.metadata_translation_desc"),
-                    binding: metadataTranslationBinding
+                    binding: metadataTranslationBinding,
+                    identifier: "settings.toggle.metadata"
                 )
+                settingsToggleCard(settings.t("setting.simplify_title"), description: settings.t("setting.simplify_title_desc"), binding: settingsSavedBinding(\.simplifyTitleEnabled))
                 settingsToggleCard(
                     settings.t("setting.japanese_furigana"),
                     description: settings.t("setting.japanese_furigana_desc"),
@@ -9288,6 +9905,18 @@ struct SettingsView: View {
     private var playerSettingsPage: some View {
         VStack(alignment: .leading, spacing: 26) {
             settingsSection(settings.t("section.player")) {
+                settingsCard(settings.t("setting.title_tap_action")) {
+                    Picker(settings.t("setting.title_tap_action"), selection: $settings.titleTapAction) {
+                        Text(settings.t("title_action.disabled")).tag("disabled")
+                        Text(settings.t("title_action.track")).tag("track")
+                        Text(settings.t("title_action.album")).tag("album")
+                        Text(settings.t("title_action.context")).tag("context")
+                    }
+                    .pickerStyle(.menu)
+                }
+                settingsToggleCard(settings.t("setting.landscape_original_lyrics"), description: settings.t("setting.landscape_original_lyrics_desc"), binding: settingsSavedBinding(\.landscapeOriginalLyricsEnabled))
+                settingsToggleCard(settings.t("setting.landscape_artwork"), binding: settingsSavedBinding(\.landscapeArtworkEnabled))
+                settingsToggleCard(settings.t("setting.lyrics_not_found_notice"), binding: settingsSavedBinding(\.lyricsNotFoundNoticeEnabled))
                 settingsToggleCard(
                     settings.t("setting.keep_screen_on"),
                     description: settings.t("setting.keep_screen_on_desc"),
@@ -9501,6 +10130,13 @@ struct SettingsView: View {
                     binding: settingsSavedBinding(\.vinylAnimationsEnabled)
                 )
 
+                settingsToggleCard(settings.t("vinyl.settings.track_change_animations"), description: settings.t("vinyl.settings.track_change_animations_desc"), binding: settingsSavedBinding(\.vinylTrackChangeAnimationsEnabled))
+                settingsCard(settings.t("vinyl.settings.rotation_speed"), description: settings.t("vinyl.settings.rotation_speed_desc"), valueText: "\(settings.vinylRotationSpeedPercent)%") {
+                    SettingsSlider(value: Binding(get: { Double(settings.vinylRotationSpeedPercent) }, set: { settings.vinylRotationSpeedPercent = VinylMotionPolicy.speedPercent(Int($0.rounded())) }), in: 25...300, step: 5, onEditingChanged: { editing in
+                        if !editing { model.showSavedToast(settings.t("toast.settings_saved")) }
+                    })
+                }
+
                 settingsToggleCard(
                     settings.t("vinyl.settings.center_rotation"),
                     description: settings.t("vinyl.settings.center_rotation_desc"),
@@ -9542,7 +10178,8 @@ struct SettingsView: View {
                 settingsToggleCard(
                     settings.t("setting.cultural_annotations"),
                     description: settings.t("setting.cultural_annotations_desc"),
-                    binding: culturalAnnotationsEnabledBinding
+                    binding: culturalAnnotationsEnabledBinding,
+                    identifier: "settings.toggle.cultural"
                 )
                 if settings.culturalAnnotationsEnabled {
                     settingsCard(settings.t("setting.cultural_font_family")) {
@@ -10006,6 +10643,7 @@ struct SettingsView: View {
                     ]
                 )
             }
+            videoAppearanceSettings(fallback: $settings.backgroundVideoFallback, aspect: $settings.backgroundVideoAspect, edgeToEdge: $settings.backgroundVideoEdgeToEdge)
             settingsCard(settings.t("setting.brightness"), valueText: "\(settings.backgroundBrightness)%") {
                 SettingsSlider(value: Binding(get: { Double(settings.backgroundBrightness) }, set: { settings.backgroundBrightness = Int($0.rounded()) }), in: 0...100, step: 1, onEditingChanged: backgroundSliderEditingChanged)
             }
@@ -10025,6 +10663,23 @@ struct SettingsView: View {
                     onSave: { model.showSavedToast(settings.t("toast.background_saved")) }
                 )
             }
+        }
+    }
+
+    private func videoAppearanceSettings(fallback: Binding<String>, aspect: Binding<String>, edgeToEdge: Binding<Bool>) -> some View {
+        Group {
+            settingsCard(settings.t("setting.video_fallback")) {
+                Picker(settings.t("setting.video_fallback"), selection: fallback) {
+                    Text(settings.t("background.mode.gradient")).tag(AppSettings.backgroundGradient)
+                    Text(settings.t("background.mode.blur_gradient")).tag(AppSettings.backgroundBlurGradient)
+                    Text(settings.t("background.mode.solid")).tag(AppSettings.backgroundSolid)
+                }.pickerStyle(.menu)
+            }
+            settingsCard(settings.t("setting.video_aspect")) {
+                SettingsSegmentedPicker(title: settings.t("setting.video_aspect"), selection: aspect,
+                    options: [("fit", settings.t("video_aspect.fit")), ("fill", settings.t("video_aspect.fill")), ("stretch", settings.t("video_aspect.stretch"))])
+            }
+            settingsToggleCard(settings.t("setting.video_edge_to_edge"), description: settings.t("setting.video_edge_to_edge_desc"), binding: edgeToEdge)
         }
     }
 
@@ -10049,6 +10704,11 @@ struct SettingsView: View {
                         ]
                     )
                 }
+                videoAppearanceSettings(
+                    fallback: Binding(get: { editableTrackBackground.videoFallback }, set: { value in updateTrackBackground { $0.videoFallback = AppSettings.normalizeVideoFallback(value) } }),
+                    aspect: Binding(get: { editableTrackBackground.videoAspect }, set: { value in updateTrackBackground { $0.videoAspect = AppearancePolicy.videoAspect(value) } }),
+                    edgeToEdge: Binding(get: { editableTrackBackground.videoEdgeToEdge }, set: { value in updateTrackBackground { $0.videoEdgeToEdge = value } })
+                )
                 settingsCard(settings.t("setting.brightness"), valueText: "\(Int(trackBackgroundBrightnessBinding.wrappedValue))%") {
                     SettingsSlider(value: trackBackgroundBrightnessBinding, in: 0...100, step: 1, onEditingChanged: trackBackgroundSliderEditingChanged)
                 }
@@ -10111,12 +10771,11 @@ struct SettingsView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             if !title.trimmed.isEmpty {
-                HStack(alignment: .firstTextBaseline) {
+                SettingsAdaptiveActions {
                     Text(title)
                         .font(.pretendard(15, weight: .semibold))
                         .foregroundStyle(SettingsDesign.text)
                     if !valueText.isEmpty {
-                        Spacer(minLength: 8)
                         Text(valueText)
                             .font(.pretendard(13))
                             .monospacedDigit()
@@ -10139,12 +10798,13 @@ struct SettingsView: View {
         .id(title)
     }
 
-    private func settingsToggleCard(_ title: String, description: String = "", binding: Binding<Bool>) -> some View {
+    private func settingsToggleCard(_ title: String, description: String = "", binding: Binding<Bool>, identifier: String? = nil) -> some View {
         Toggle(isOn: binding) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.pretendard(15, weight: .semibold))
                     .foregroundStyle(SettingsDesign.text)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !description.trimmed.isEmpty {
                     Text(description)
                         .font(.pretendard(12.5))
@@ -10157,6 +10817,8 @@ struct SettingsView: View {
         .padding(.vertical, 10)
         .settingsRowSeparator()
         .id(title)
+        .accessibilityIdentifier(identifier ?? "settings.toggle.\(title)")
+        .debugSettingsHitArea(identifier ?? "settings.toggle.\(title)")
     }
 
     private func typographySettingsRow(_ slot: AppSettings.TypographySlot) -> some View {
@@ -10321,12 +10983,9 @@ struct SettingsView: View {
 
     private func settingsActionButton(_ title: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
         Button(role: role, action: action) {
-            Text(title)
+            SettingsActionLabel(title: title)
                 .font(.pretendard(13.5, weight: .semibold))
                 .foregroundStyle(role == .destructive ? SettingsDesign.accent : SettingsDesign.text)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: 44)
-                .padding(.horizontal, 10)
                 .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 11).stroke(SettingsDesign.strongBorder))
         }
@@ -10389,8 +11048,9 @@ struct SettingsView: View {
     }
 
     private func aiProviderSettingsCard(_ provider: AppSettings.Provider, index: Int) -> some View {
-        let selected = !provider.isKeyless && settings.providerId == provider.id
-        let expanded = expandedAIProvider == provider.id && selected
+        let selected = !provider.isKeyless && !provider.isLocal && settings.providerId == provider.id
+        // Local AI has its own panel and does not change the provider whose keys are edited.
+        let expanded = expandedAIProvider == provider.id && (selected || provider.isLocal)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 providerOrderControls(index: index, count: settings.aiProviderOrder.count) { offset in
@@ -10404,6 +11064,8 @@ struct SettingsView: View {
                     guard !provider.isKeyless else { return }
                     if expanded {
                         expandedAIProvider = nil
+                    } else if provider.isLocal {
+                        expandedAIProvider = provider.id
                     } else {
                         settings.setProvider(provider.id)
                         expandedAIProvider = provider.id
@@ -10413,11 +11075,21 @@ struct SettingsView: View {
                     HStack(spacing: 6) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(provider.label).font(.pretendard(14.5, weight: .semibold))
+                                .fixedSize(horizontal: false, vertical: true)
                             Text(aiProviderDescription(provider))
                                 .font(.pretendard(12))
                                 .foregroundStyle(SettingsDesign.muted)
                                 .multilineTextAlignment(.leading)
                                 .fixedSize(horizontal: false, vertical: true)
+                            if provider.isLocal {
+                                // Translation runs on the phone itself, so the card says up front that it needs a high-end device.
+                                Text(settings.t("local_ai.performance_note"))
+                                    .font(.pretendard(12))
+                                    .foregroundStyle(SettingsDesign.accent)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.top, 2)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         if !provider.isKeyless {
@@ -10431,19 +11103,26 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
                 .disabled(provider.isKeyless)
                 .accessibilityValue(selected ? settings.t("setting.ai_provider_selected") : "")
+                .accessibilityIdentifier("settings.ai.expand.\(provider.id)")
 
                 Toggle("", isOn: aiProviderEnabledBinding(provider.id))
                     .labelsHidden()
                     .fixedSize()
                     .accessibilityLabel(settings.tf("setting.ai_provider_toggle_format", provider.label))
+                    .accessibilityIdentifier("settings.ai.toggle.\(provider.id)")
+                    .debugSettingsHitArea("settings.ai.toggle.\(provider.id)")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
 
             if expanded {
-                aiProviderConfiguration
-                    .padding(.leading, 56)
-                    .overlay(alignment: .top) { SettingsDesign.border.frame(height: 1).padding(.leading, 72) }
+                if provider.isLocal {
+                    LocalAISettingsPanel()
+                        .overlay(alignment: .top) { SettingsDesign.border.frame(height: 1) }
+                } else {
+                    aiProviderConfiguration
+                        .overlay(alignment: .top) { SettingsDesign.border.frame(height: 1) }
+                }
             }
         }
         .settingsRowSeparator()
@@ -10474,6 +11153,8 @@ struct SettingsView: View {
             return settings.t("setting.bing_translate_provider_desc")
         case KeylessTranslationProviders.googleId:
             return settings.t("setting.google_translate_provider_desc")
+        case LocalAI.providerId:
+            return settings.t("local_ai.description")
         default:
             return settings.t("provider.desc.\(provider.id)")
         }
@@ -10518,7 +11199,8 @@ struct SettingsView: View {
                 Button {
                     Task { await refreshAIModels() }
                 } label: {
-                    Image(systemName: "arrow.clockwise").frame(width: 34, height: 34)
+                    if aiModelsLoading { ProgressView().frame(width: 44, height: 44) }
+                    else { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44) }
                 }
                 .buttonStyle(.bordered)
                 .disabled(aiModelsLoading)
@@ -10540,6 +11222,9 @@ struct SettingsView: View {
 
     @MainActor
     private func refreshAIModels() async {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { return }
+#endif
         let configuration = aiModelConfiguration
         let requestId = UUID()
         aiModelsRequestId = requestId
@@ -11052,10 +11737,11 @@ private extension View {
     func settingsMenuSurface() -> some View {
         self
             .pickerStyle(.menu)
-            .font(.pretendard(14.5, weight: .semibold))
+            .font(.body)
             .tint(SettingsDesign.text)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .frame(minHeight: 48)
             .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
@@ -11400,14 +12086,19 @@ private struct OpenAIConnectionEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            VStack(alignment: .leading, spacing: 8) {
                 Toggle("\(position + 2). \(connection.name)", isOn: $connection.enabled)
+                HStack(spacing: 12) {
                 Button { onMove(-1) } label: { Image(systemName: "arrow.up") }
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
                     .disabled(position == 0).accessibilityLabel(settings.t("openai.move_up"))
                 Button { onMove(1) } label: { Image(systemName: "arrow.down") }
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
                     .disabled(position == count - 1).accessibilityLabel(settings.t("openai.move_down"))
                 Button(role: .destructive, action: onRemove) { Image(systemName: "trash") }
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
                     .accessibilityLabel(settings.t("openai.remove_connection"))
+                }
             }
             TextField(settings.t("openai.connection_name"), text: $connection.name)
             TextField(settings.t("field.base_url"), text: $connection.baseUrl)
@@ -11422,7 +12113,10 @@ private struct OpenAIConnectionEditor: View {
                     ForEach(availableModels) { model in Text(model.displayName).tag(model.id) }
                 }
                 .labelsHidden().settingsMenuSurface().disabled(loading || availableModels.isEmpty)
-                Button { revision += 1 } label: { Image(systemName: "arrow.clockwise") }
+                Button { revision += 1 } label: {
+                    if loading { ProgressView().frame(width: 44, height: 44) }
+                    else { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44) }
+                }
                     .disabled(loading).accessibilityLabel(settings.t("button.refresh_models"))
             }
             TextField(settings.t("field.model_id"), text: $connection.model)
@@ -11433,7 +12127,7 @@ private struct OpenAIConnectionEditor: View {
                 Text(settings.t("status.models_unavailable")).font(.caption).foregroundStyle(.orange)
             }
         }
-        .textFieldStyle(.roundedBorder)
+        .textFieldStyle(SettingsTextFieldStyle())
         .padding(12)
         .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
         .task(id: configuration) { await loadModels() }
@@ -11441,6 +12135,9 @@ private struct OpenAIConnectionEditor: View {
     }
 
     @MainActor private func loadModels() async {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { return }
+#endif
         let context = configuration
         let id = UUID()
         requestID = id

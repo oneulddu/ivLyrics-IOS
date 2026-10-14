@@ -7,6 +7,9 @@
       buildImplicitDependencies = "YES"
       buildArchitectures = "Automatic">
       <BuildActionEntries>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10100000000000000000004" BuildableName="ivLyrics-IOSUITests.xctest" BlueprintName="ivLyrics-IOSUITests" ReferencedContainer="container:ivLyrics-IOS.xcodeproj"/>
+         </BuildActionEntry>
          <BuildActionEntry
             buildForTesting = "YES"
             buildForRunning = "YES"
@@ -54,6 +57,9 @@
                BlueprintName = "ivLyrics-IOSTests"
                ReferencedContainer = "container:ivLyrics-IOS.xcodeproj">
             </BuildableReference>
+         </TestableReference>
+         <TestableReference skipped="NO" parallelizable="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10100000000000000000004" BuildableName="ivLyrics-IOSUITests.xctest" BlueprintName="ivLyrics-IOSUITests" ReferencedContainer="container:ivLyrics-IOS.xcodeproj"/>
          </TestableReference>
       </Testables>
    </TestAction>

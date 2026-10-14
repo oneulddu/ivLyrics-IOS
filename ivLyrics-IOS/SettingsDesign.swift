@@ -10,54 +10,137 @@ enum SettingsDesign {
     static let strongBorder = Color.white.opacity(0.14)
     static let text = Color(hex: "#F1F0F4")
     static let secondary = Color(hex: "#8F8E98")
-    static let muted = Color(hex: "#5C5B64")
+    static let muted = Color(hex: "#A3A2AD")
     static let accent = Color(hex: "#FF6B4A")
     static let mint = Color(hex: "#5FCE9B")
 }
 
 struct SettingsSwitchStyle: ToggleStyle {
-    @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 14) {
-            configuration.label.frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
-                    configuration.isOn.toggle()
-                }
-            } label: {
-                Capsule()
-                    .fill(configuration.isOn ? SettingsDesign.accent.opacity(0.16) : SettingsDesign.control)
-                    .overlay(Capsule().stroke(configuration.isOn ? .clear : SettingsDesign.strongBorder, lineWidth: 1))
-                    .overlay(alignment: configuration.isOn ? .trailing : .leading) {
-                        Circle()
-                            .fill(configuration.isOn ? SettingsDesign.accent : Color(hex: "#8B8A93"))
-                            .frame(width: 20, height: 20)
-                            .padding(3)
-                    }
-                    .frame(width: 44, height: 26)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        // UIKit owns the switch's intrinsic size, disabled state, accessibility value and hit area.
+        Toggle(isOn: configuration.$isOn) {
+            configuration.label
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .opacity(isEnabled ? 1 : 0.4)
-        .accessibilityRepresentation {
-            Toggle(isOn: configuration.$isOn) { configuration.label }
-                .toggleStyle(.switch)
-        }
+        .toggleStyle(.switch)
+        .tint(SettingsDesign.accent)
+        .frame(minHeight: 44)
     }
 }
 
 struct SettingsTextFieldStyle: TextFieldStyle {
     func _body(configuration: TextField<Self._Label>) -> some View {
         configuration
-            .font(.pretendard(13.5))
+            .font(.body)
             .padding(.horizontal, 12)
-            .padding(.vertical, 11)
+            .padding(.vertical, 10)
+            .frame(minHeight: 48)
             .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11))
-            .overlay(RoundedRectangle(cornerRadius: 11).stroke(SettingsDesign.strongBorder))
+            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(SettingsDesign.strongBorder))
+    }
+}
+
+/// A real native input frame: SwiftUI's plain TextField can expose only its
+/// 22pt text line to accessibility even when an outer layout frame is taller.
+struct SettingsSearchField: UIViewRepresentable {
+    var prompt: String
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField()
+        field.borderStyle = .none
+        field.backgroundColor = .clear
+        field.textColor = UIColor(SettingsDesign.text)
+        field.tintColor = UIColor(SettingsDesign.accent)
+        field.font = preferredFont
+        field.adjustsFontForContentSizeCategory = true
+        field.adjustsFontSizeToFitWidth = false
+        field.autocapitalizationType = .none
+        field.autocorrectionType = .no
+        field.returnKeyType = .search
+        field.clearButtonMode = .never
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.delegate = context.coordinator
+        field.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
+        return field
+    }
+
+    func updateUIView(_ field: UITextField, context: Context) {
+        context.coordinator.parent = self
+        if field.placeholder != prompt { field.placeholder = prompt }
+        if field.accessibilityLabel != prompt { field.accessibilityLabel = prompt }
+        field.accessibilityIdentifier = "settings.search"
+        let font = preferredFont
+        if field.font != font { field.font = font }
+        field.isEnabled = isEnabled
+        if field.text != text { field.text = text }
+        // UIKit keyboard/responder changes must not re-enter a SwiftUI render transaction.
+        context.coordinator.scheduleFocus(field)
+    }
+
+    static func dismantleUIView(_ field: UITextField, coordinator: Coordinator) {
+        coordinator.cancelFocusRequests()
+        field.delegate = nil
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextField, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 160, height: max(48, preferredFont.lineHeight + 20))
+    }
+
+    private var preferredFont: UIFont {
+        let category: UIContentSizeCategory
+        switch dynamicTypeSize {
+        case .xSmall: category = .extraSmall
+        case .small: category = .small
+        case .medium: category = .medium
+        case .large: category = .large
+        case .xLarge: category = .extraLarge
+        case .xxLarge: category = .extraExtraLarge
+        case .xxxLarge: category = .extraExtraExtraLarge
+        case .accessibility1: category = .accessibilityMedium
+        case .accessibility2: category = .accessibilityLarge
+        case .accessibility3: category = .accessibilityExtraLarge
+        case .accessibility4: category = .accessibilityExtraExtraLarge
+        case .accessibility5: category = .accessibilityExtraExtraExtraLarge
+        @unknown default: category = .large
+        }
+        return UIFont.preferredFont(forTextStyle: .body, compatibleWith: UITraitCollection(preferredContentSizeCategory: category))
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: SettingsSearchField
+        private var focusRequestID = 0
+        init(_ parent: SettingsSearchField) { self.parent = parent }
+        func cancelFocusRequests() { focusRequestID &+= 1 }
+        func scheduleFocus(_ field: UITextField) {
+            cancelFocusRequests()
+            guard parent.isFocused != field.isFirstResponder else { return }
+            let requestID = focusRequestID
+            DispatchQueue.main.async { [weak self, weak field] in
+                guard let self, let field, self.focusRequestID == requestID,
+                      field.window != nil else { return }
+                if self.parent.isFocused && !field.isFirstResponder { field.becomeFirstResponder() }
+                else if !self.parent.isFocused && field.isFirstResponder { field.resignFirstResponder() }
+            }
+        }
+        @objc func changed(_ field: UITextField) { parent.text = field.text ?? "" }
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            if !parent.isFocused { parent.isFocused = true }
+        }
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            if parent.isFocused { parent.isFocused = false }
+        }
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            parent.isFocused = false
+            textField.resignFirstResponder()
+            return true
+        }
     }
 }
 
@@ -109,7 +192,7 @@ struct SettingsSlider: UIViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UISlider, context: Context) -> CGSize? {
-        CGSize(width: proposal.width ?? 140, height: 28)
+        CGSize(width: proposal.width ?? 140, height: 44)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -151,11 +234,37 @@ struct SettingsActionButtonStyle: ButtonStyle {
 }
 
 struct SettingsSegmentedPicker: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var title: String
     @Binding var selection: String
     var options: [(value: String, title: String)]
 
     var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            menu
+        } else {
+            ViewThatFits(in: .horizontal) {
+                segments
+                menu
+            }
+        }
+    }
+
+    private var menu: some View {
+        Picker(title, selection: $selection) {
+            ForEach(options, id: \.value) { option in
+                Text(option.title).tag(option.value)
+            }
+        }
+        .pickerStyle(.menu)
+        .tint(SettingsDesign.text)
+        .font(.body)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .padding(.horizontal, 12)
+        .background(SettingsDesign.control, in: RoundedRectangle(cornerRadius: 11))
+    }
+
+    private var segments: some View {
         HStack(spacing: 4) {
             ForEach(options, id: \.value) { option in
                 Button { selection = option.value } label: {
@@ -163,7 +272,10 @@ struct SettingsSegmentedPicker: View {
                         .font(.pretendard(13.5, weight: .semibold))
                         .foregroundStyle(selection == option.value ? SettingsDesign.background : SettingsDesign.secondary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity, minHeight: 38)
+                        .fixedSize(horizontal: true, vertical: true)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(minHeight: 44)
                         .background(selection == option.value ? SettingsDesign.text : .clear, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
@@ -183,20 +295,60 @@ extension View {
 }
 
 struct SettingsChipToggleStyle: ToggleStyle {
+    @Environment(\.isEnabled) private var isEnabled
     func makeBody(configuration: Configuration) -> some View {
         Button { configuration.isOn.toggle() } label: {
             configuration.label
-                .font(.pretendard(11.5, weight: .semibold))
+                .font(.pretendard(13, weight: .semibold))
                 .foregroundStyle(configuration.isOn ? SettingsDesign.mint : SettingsDesign.muted)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .padding(.vertical, 8)
                 .background(configuration.isOn ? SettingsDesign.mint.opacity(0.16) : SettingsDesign.control, in: Capsule())
-                .frame(minHeight: 36)
-                .contentShape(Capsule())
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .opacity(isEnabled ? 1 : 0.4)
         .accessibilityRepresentation {
             Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(.switch)
+        }
+    }
+}
+
+/// All settings/popup actions share wrapping text, native button semantics and a full-row hit area.
+struct SettingsActionLabel: View {
+    var title: String
+    var systemImage: String? = nil
+    var busy = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if busy { ProgressView().controlSize(.small).accessibilityHidden(true) }
+            else if let systemImage { Image(systemName: systemImage).accessibilityHidden(true) }
+            Text(title)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Intrinsic-width controls move onto separate rows instead of being compressed on small screens.
+struct SettingsAdaptiveActions<Content: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 8, content: content)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { content().fixedSize(horizontal: true, vertical: true) }
+                VStack(alignment: .leading, spacing: 8, content: content)
+            }
         }
     }
 }

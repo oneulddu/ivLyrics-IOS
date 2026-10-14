@@ -136,7 +136,12 @@ jobs:
             test-pip-static-frame-cache.py \
             test-sync-load-reuse.py \
             test-ai-models.py \
-            test-openai-connections.py; do
+            test-openai-connections.py \
+            test-local-ai.py \
+            test-appearance.py \
+            test-vinyl.py \
+            test-interlude.py \
+            test-settings-ui.py; do
             script="$IVLYRICS_SOURCE_ROOT/scripts/$regression"
             if [[ -f "$script" ]]; then
               python3 "$script"

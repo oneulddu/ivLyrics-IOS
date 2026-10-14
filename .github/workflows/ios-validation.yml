@@ -2,6 +2,34 @@ name: iOS Validation
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 'ivLyrics-IOS/SettingsDesign.swift'
+      - 'ivLyrics-IOS/LocalAISettingsView.swift'
+      - 'ivLyrics-IOS/LyricsMetaMenuView.swift'
+      - 'ivLyrics-IOS/ContentView.swift'
+      - 'ivLyrics-IOS/AppViewModel.swift'
+      - 'ivLyrics-IOS/DebugSettingsUIHarness.swift'
+      - 'ivLyrics-IOSUITests/**'
+      - 'scripts/test-settings-ui.py'
+      - 'ivLyrics-IOS.xcodeproj/**'
+      - '.github/workflows/ios-validation.yml'
+  pull_request:
+    paths:
+      - 'ivLyrics-IOS/SettingsDesign.swift'
+      - 'ivLyrics-IOS/LocalAISettingsView.swift'
+      - 'ivLyrics-IOS/LyricsMetaMenuView.swift'
+      - 'ivLyrics-IOS/ContentView.swift'
+      - 'ivLyrics-IOS/AppViewModel.swift'
+      - 'ivLyrics-IOS/DebugSettingsUIHarness.swift'
+      - 'ivLyrics-IOSUITests/**'
+      - 'scripts/test-settings-ui.py'
+      - 'ivLyrics-IOS.xcodeproj/**'
+      - '.github/workflows/ios-validation.yml'
+
+concurrency:
+  group: ios-validation-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -50,6 +78,57 @@ jobs:
           python3 scripts/test-sync-load-reuse.py
           python3 scripts/test-ai-models.py
           python3 scripts/test-openai-connections.py
+          python3 scripts/test-local-ai.py
+          python3 scripts/test-appearance.py
+          python3 scripts/test-vinyl.py
+          python3 scripts/test-interlude.py
+          python3 scripts/test-settings-ui.py
+
+      - name: Check native settings and track popup UI
+        id: settings_ui
+        env:
+          IVLYRICS_LLAMA_STUB: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          ivlyrics_ui_device="$(xcrun simctl list devices available --json | ruby -rjson -e '
+            devices = JSON.parse(STDIN.read).fetch("devices").values.flatten
+            device = devices.find { |entry| entry["name"] == "iPhone SE (3rd generation)" } ||
+              devices.find { |entry| entry["name"].start_with?("iPhone") && !entry["name"].include?("Max") }
+            abort "No available iPhone Simulator" unless device
+            puts device.fetch("udid")
+          ')"
+          xcodebuild \
+            -project ivLyrics-IOS.xcodeproj \
+            -scheme ivLyrics-IOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$ivlyrics_ui_device" \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/settings-ui.xcresult" \
+            -derivedDataPath "$RUNNER_TEMP/settings-ui-derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Export native UI screenshots
+        if: always()
+        shell: bash
+        run: |
+          if [[ -d "$RUNNER_TEMP/settings-ui.xcresult" ]]; then
+            xcrun xcresulttool export attachments \
+              --path "$RUNNER_TEMP/settings-ui.xcresult" \
+              --output-path "$RUNNER_TEMP/settings-ui-screenshots"
+          fi
+
+      - name: Save native UI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-settings-ui
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/settings-ui.xcresult
+            ${{ runner.temp }}/settings-ui-screenshots
 
       - name: Run static analyzer
         run: |
@@ -61,8 +140,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             analyze
 
-
       - name: Build iOS Simulator
+        env:
+          # The pinned llama.cpp xcframework has no iOS Simulator slice (Packages/LlamaCpp).
+          IVLYRICS_LLAMA_STUB: "1"
         run: |
           xcodebuild \
             -project ivLyrics-IOS.xcodeproj \

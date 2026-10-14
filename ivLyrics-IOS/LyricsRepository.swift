@@ -113,6 +113,9 @@ actor LyricsRepository {
     }
 
     init() {
+#if DEBUG
+        if DebugSettingsUIHarness.enabled { return }
+#endif
         spotifyAccessToken = SecureStringStore.shared.migratedString(
             forKey: "spotify_token_cache_access_token",
             legacyDefaults: defaults
@@ -2017,7 +2020,9 @@ actor LyricsRepository {
             lastPositionUpdate: Date(),
             playbackSpeed: track.playbackSpeed,
             playing: track.playing,
-            artworkURL: match.artworkURL ?? track.artworkURL
+            artworkURL: match.artworkURL ?? track.artworkURL,
+            albumURI: track.albumURI,
+            playbackContextURI: track.playbackContextURI
         )
     }
 
