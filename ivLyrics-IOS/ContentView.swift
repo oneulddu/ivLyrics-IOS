@@ -6667,12 +6667,13 @@ struct LyricsLineView: View, Equatable {
                             bounceTextSize: typography.scaledSize(slotId: AppSettings.typoLyricsOriginal, baseSize: active ? 25 : 21),
                             effectRowSeed: index
                         )
-                        .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
                         }
                         if useVocalPartSupplements {
                             vocalPartSupplements(part, active: partActive)
                         }
                     }
+                    // Keep the part scroll anchor present when landscape hides original lyrics.
+                    .id(LyricsTimelineDisplayBuilder.vocalPartTargetID(lineIndex: lineIndex, line: line, partIndex: index))
                     .padding(.top, vocalPartTopSpacing(index: index, parts: displayVocalParts))
                 }
             }
